@@ -1,0 +1,100 @@
+# ─────────────────────────────────────────────
+# Personal learning notes (kept local only)
+# 包含 grilling session 的決策紀錄、面試題庫、AWS 速查、講義整理。
+# 之後若想備份建議另開 private repo。
+# ─────────────────────────────────────────────
+doc/learn/
+doc/session/
+
+# ─────────────────────────────────────────────
+# Python
+# ─────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+
+# ─────────────────────────────────────────────
+# Local DBs / data files
+# ─────────────────────────────────────────────
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+
+# ─────────────────────────────────────────────
+# Environment / secrets
+# ─────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+*.crt
+
+# ─────────────────────────────────────────────
+# IDE / editor
+# ─────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ─────────────────────────────────────────────
+# OS
+# ─────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ─────────────────────────────────────────────
+# Terraform (W3 開始用)
+# ─────────────────────────────────────────────
+*.tfstate
+*.tfstate.*
+*.tfvars
+.terraform/
+.terraform.lock.hcl
+crash.log
+crash.*.log
+
+# ─────────────────────────────────────────────
+# Docker
+# ─────────────────────────────────────────────
+*.pid
+
+# ─────────────────────────────────────────────
+# Logs
+# ─────────────────────────────────────────────
+*.log
+logs/
+
+# ─────────────────────────────────────────────
+# Node (MCP inspector via npx)
+# ─────────────────────────────────────────────
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ─────────────────────────────────────────────
+# Claude Code local settings (per-machine, per-user)
+# ─────────────────────────────────────────────
+.claude/settings.local.json
