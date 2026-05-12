@@ -23,8 +23,10 @@ class JobNotFoundError(Exception):
 class InvalidStateError(Exception):
     """Raised when all runs are already terminal (maps to INVALID_STATE).
 
-    The message includes the current external status so callers can surface
-    actionable feedback to the user without a second round-trip.
+    Carries the current internal status as its single arg so the transport
+    layer can map it to a user-facing external status (ADR-014). The domain
+    must not depend on the MCP presentation layer (ADR-010), so message
+    formatting happens in the handler, not here.
     """
 
 
@@ -181,11 +183,10 @@ async def cancel_job(
     """Cancel all non-terminal JobRuns for a job, writing outbox events atomically.
 
     Raises JobNotFoundError if job_id does not exist or belongs to another user.
-    Raises InvalidStateError if all runs are already in a terminal status.
+    Raises InvalidStateError(internal_status) if all runs are already terminal —
+    the transport layer maps the internal status to its external counterpart.
     Returns a JobView reflecting the post-cancel state (internal_status='CANCELLED').
     """
-    from app.mcp.status_mapping import to_external
-
     async with session.begin():
         job_result = await session.execute(
             select(Job).where(Job.job_id == job_id, Job.user_id == user_id)
@@ -201,10 +202,7 @@ async def cancel_job(
 
         if not non_terminal:
             current_status = all_runs[0].status if all_runs else "PENDING"
-            external = to_external(current_status)
-            raise InvalidStateError(
-                f"Job {job_id} cannot be cancelled; current status is {external!r}"
-            )
+            raise InvalidStateError(current_status)
 
         for run in non_terminal:
             await session.execute(

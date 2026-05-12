@@ -107,5 +107,5 @@ async def test_cancel_job_raises_invalid_state_when_all_runs_terminal():
     session.execute = AsyncMock(side_effect=[job_result, runs_result])
     session.begin = _make_begin_cm()
 
-    with pytest.raises(InvalidStateError, match="completed"):
+    with pytest.raises(InvalidStateError, match="SUCCEEDED"):
         await cancel_job(session, user_id="u1", job_id=42)

@@ -60,7 +60,11 @@ async def handle_task_cancel(
     except JobNotFoundError:
         return error("NOT_FOUND", f"Job {job_id} not found")
     except InvalidStateError as exc:
-        return error("INVALID_STATE", str(exc))
+        external = to_external(str(exc))
+        return error(
+            "INVALID_STATE",
+            f"Job {job_id} cannot be cancelled; current status is {external!r}",
+        )
     except Exception:
         logger.exception("task.cancel@v1 failed for user %s job %s", user_id, job_id)
         return error("INTERNAL", "An unexpected error occurred.")
