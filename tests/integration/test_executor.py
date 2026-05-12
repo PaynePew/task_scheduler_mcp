@@ -13,6 +13,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 import pytest_asyncio
+from pydantic import BaseModel
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -156,20 +157,16 @@ async def test_queued_echo_run_completes_to_succeeded(session_factory, sqs):
 async def test_handler_permanent_failure_marks_run_failed(session_factory, sqs):
     """Handler returning ok=False, retryable=False → FAILED + RunEvent(FAILED) + DeleteMessage."""
 
+    class NoParams(BaseModel):
+        pass
+
     class AlwaysFailHandler:
         name = "always_fail"
-        params_model = Job.__class__  # dummy, won't be validated
+        params_model = NoParams
         timeout_seconds = 10
 
         async def execute(self, run, params) -> ActionResult:
             return ActionResult(ok=False, result=None, error="permanent error", retryable=False)
-
-    from pydantic import BaseModel
-
-    class NoParams(BaseModel):
-        pass
-
-    AlwaysFailHandler.params_model = NoParams  # type: ignore[assignment]
 
     job, run = await _insert_queued_run(session_factory, action="always_fail", action_params={})
     message = _make_sqs_message(run.run_id, job.job_id)
