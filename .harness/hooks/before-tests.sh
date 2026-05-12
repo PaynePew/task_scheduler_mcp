@@ -39,11 +39,7 @@ while ! docker compose exec -T postgres pg_isready -U app -d app >/dev/null 2>&1
     sleep 1
 done
 
-echo "[before-tests] running migrations"
-if command -v uv >/dev/null 2>&1; then
-    uv run alembic upgrade head
-else
-    echo "[before-tests] uv not on host PATH — skipping migrations (CI/agent will run them)" >&2
-fi
+echo "[before-tests] running migrations via compose service (no host uv needed)"
+docker compose run --rm migrate
 
 echo "[before-tests] services ready"

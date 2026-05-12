@@ -1,0 +1,7 @@
+# Ensure shell scripts use LF on every platform so they run inside Linux
+# containers regardless of the host's git autocrlf setting.
+*.sh text eol=lf
+
+# Same for hook scripts even if they grow non-.sh extensions later.
+.harness/hooks/* text eol=lf
+.githooks/* text eol=lf
