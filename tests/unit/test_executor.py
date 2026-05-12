@@ -1,0 +1,412 @@
+"""Unit tests for app/workers/executor.py — uses async mocks, no DB or SQS required."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+from app.actions.base import ActionResult
+from app.workers.executor import _claim, _write_terminal, process_one
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _async_cm(yield_value=None) -> MagicMock:
+    """Async context manager that yields yield_value."""
+    cm = MagicMock()
+    cm.__aenter__ = AsyncMock(return_value=yield_value)
+    cm.__aexit__ = AsyncMock(return_value=False)
+    return cm
+
+
+def _make_message(run_id: int = 1, job_id: int = 1) -> dict:
+    return {
+        "Body": json.dumps({"run_id": run_id, "job_id": job_id}),
+        "ReceiptHandle": f"receipt-{run_id}",
+        "MessageId": f"msg-{run_id}",
+    }
+
+
+def _make_job(action: str = "echo", action_params: dict | None = None) -> MagicMock:
+    job = MagicMock()
+    job.action = action
+    job.action_params = action_params or {"message": "hello"}
+    return job
+
+
+def _make_run(run_id: int = 1, job_id: int = 1) -> MagicMock:
+    run = MagicMock()
+    run.run_id = run_id
+    run.job_id = job_id
+    run.status = "RUNNING"
+    return run
+
+
+def _make_handler(result: ActionResult) -> MagicMock:
+    handler = MagicMock()
+    handler.execute = AsyncMock(return_value=result)
+    handler.timeout_seconds = 10
+    handler.params_model = MagicMock()
+    handler.params_model.model_validate = MagicMock(return_value=MagicMock())
+    return handler
+
+
+def _make_session(
+    *,
+    claim_wins: bool = True,
+    job: MagicMock | None = None,
+    run: MagicMock | None = None,
+) -> MagicMock:
+    """Build a mock session whose execute() drives the claim + run-load calls."""
+    # execute call 1: claim UPDATE — returns a row if claim_wins, else None
+    claim_result = MagicMock()
+    claim_result.first.return_value = MagicMock() if claim_wins else None
+
+    # execute call 2: SELECT JobRun (only reached if claim_wins)
+    run_result = MagicMock()
+    run_result.scalar_one_or_none.return_value = run
+
+    # execute call 3: terminal UPDATE (second session invocation)
+    terminal_result = MagicMock()
+
+    session = MagicMock()
+    session.execute = AsyncMock(side_effect=[claim_result, run_result, terminal_result])
+    session.get = AsyncMock(return_value=job)
+    session.add = MagicMock()
+    session.begin = MagicMock(return_value=_async_cm(None))
+    return session
+
+
+def _make_factory(session: MagicMock) -> MagicMock:
+    """Factory always returns the same session (fine for unit tests)."""
+    return MagicMock(return_value=_async_cm(session))
+
+
+# ---------------------------------------------------------------------------
+# _claim unit tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_claim_returns_true_when_row_returned():
+    """UPDATE matches a row → claim succeeds."""
+    mock_result = MagicMock()
+    mock_result.first.return_value = MagicMock(run_id=1, job_id=1)
+
+    session = MagicMock()
+    session.execute = AsyncMock(return_value=mock_result)
+    session.add = MagicMock()
+
+    claimed = await _claim(session, run_id=1, job_id=1)
+
+    assert claimed is True
+    session.add.assert_called_once()  # RunEvent(STARTED) inserted
+
+
+@pytest.mark.asyncio
+async def test_claim_returns_false_when_no_row():
+    """UPDATE matches 0 rows (already claimed) → returns False, no RunEvent."""
+    mock_result = MagicMock()
+    mock_result.first.return_value = None
+
+    session = MagicMock()
+    session.execute = AsyncMock(return_value=mock_result)
+    session.add = MagicMock()
+
+    claimed = await _claim(session, run_id=1, job_id=1)
+
+    assert claimed is False
+    session.add.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# _write_terminal unit tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_write_terminal_succeeded():
+    """SUCCEEDED: updates status column and inserts RunEvent."""
+    session = MagicMock()
+    session.execute = AsyncMock(return_value=MagicMock())
+    session.add = MagicMock()
+
+    result = ActionResult(ok=True, result={"echoed": "hi"}, error=None)
+    await _write_terminal(
+        session, run_id=1, job_id=1, terminal_status="SUCCEEDED", action_result=result
+    )
+
+    session.execute.assert_awaited_once()
+    session.add.assert_called_once()
+    added = session.add.call_args[0][0]
+    assert added.event_type == "SUCCEEDED"
+    assert added.status_from == "RUNNING"
+    assert added.status_to == "SUCCEEDED"
+
+
+@pytest.mark.asyncio
+async def test_write_terminal_failed():
+    """FAILED: inserts RunEvent with FAILED event_type."""
+    session = MagicMock()
+    session.execute = AsyncMock(return_value=MagicMock())
+    session.add = MagicMock()
+
+    result = ActionResult(ok=False, result=None, error="oops", retryable=False)
+    await _write_terminal(
+        session, run_id=2, job_id=2, terminal_status="FAILED", action_result=result
+    )
+
+    added = session.add.call_args[0][0]
+    assert added.event_type == "FAILED"
+
+
+# ---------------------------------------------------------------------------
+# process_one — claim-failure path
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_process_one_no_claim_deletes_message():
+    """When another worker already claimed the run, DeleteMessage and return."""
+    session = _make_session(claim_wins=False)
+    factory = _make_factory(session)
+    sqs = MagicMock()
+
+    await process_one(factory, sqs, _make_message(), registry={})
+
+    sqs.delete_message.assert_called_once_with("receipt-1")
+
+
+@pytest.mark.asyncio
+async def test_process_one_no_claim_does_not_write_terminal():
+    """No claim → no terminal write."""
+    session = _make_session(claim_wins=False)
+    factory = _make_factory(session)
+    sqs = MagicMock()
+
+    await process_one(factory, sqs, _make_message(), registry={})
+
+    # session.execute should only be called once (the claim attempt)
+    assert session.execute.await_count == 1
+
+
+# ---------------------------------------------------------------------------
+# process_one — SUCCEEDED path
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_process_one_succeeded_deletes_message():
+    """ok=True → SUCCEEDED written, DeleteMessage called."""
+    job = _make_job()
+    run = _make_run()
+    session = _make_session(claim_wins=True, job=job, run=run)
+    factory = _make_factory(session)
+    sqs = MagicMock()
+
+    handler = _make_handler(ActionResult(ok=True, result={"echoed": "hello"}, error=None))
+    registry = {"echo": handler}
+
+    await process_one(factory, sqs, _make_message(), registry=registry)
+
+    sqs.delete_message.assert_called_once_with("receipt-1")
+    handler.execute.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_process_one_succeeded_writes_terminal_event():
+    """ok=True → terminal session writes SUCCEEDED RunEvent."""
+    job = _make_job()
+    run = _make_run()
+    session = _make_session(claim_wins=True, job=job, run=run)
+    factory = _make_factory(session)
+    sqs = MagicMock()
+
+    handler = _make_handler(ActionResult(ok=True, result={"echoed": "hello"}, error=None))
+    registry = {"echo": handler}
+
+    await process_one(factory, sqs, _make_message(), registry=registry)
+
+    # session.add should be called twice: once for RunEvent(STARTED), once for RunEvent(SUCCEEDED)
+    assert session.add.call_count == 2
+    events = [c[0][0] for c in session.add.call_args_list]
+    event_types = {e.event_type for e in events}
+    assert "STARTED" in event_types
+    assert "SUCCEEDED" in event_types
+
+
+# ---------------------------------------------------------------------------
+# process_one — FAILED path (retryable=False)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_process_one_permanent_failure_deletes_message():
+    """ok=False, retryable=False → FAILED written, DeleteMessage called."""
+    job = _make_job()
+    run = _make_run()
+    session = _make_session(claim_wins=True, job=job, run=run)
+    factory = _make_factory(session)
+    sqs = MagicMock()
+
+    handler = _make_handler(ActionResult(ok=False, result=None, error="bad input", retryable=False))
+    registry = {"echo": handler}
+
+    await process_one(factory, sqs, _make_message(), registry=registry)
+
+    sqs.delete_message.assert_called_once_with("receipt-1")
+    events = [c[0][0] for c in session.add.call_args_list]
+    event_types = {e.event_type for e in events}
+    assert "FAILED" in event_types
+
+
+# ---------------------------------------------------------------------------
+# process_one — retryable=True path (S07a: leave message)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_process_one_retryable_leaves_message():
+    """ok=False, retryable=True → do NOT DeleteMessage (S07b handles retry)."""
+    job = _make_job()
+    run = _make_run()
+    # Only 2 execute calls needed: claim + run-load; terminal NOT called
+    claim_result = MagicMock()
+    claim_result.first.return_value = MagicMock()
+    run_result = MagicMock()
+    run_result.scalar_one_or_none.return_value = run
+
+    session = MagicMock()
+    session.execute = AsyncMock(side_effect=[claim_result, run_result])
+    session.get = AsyncMock(return_value=job)
+    session.add = MagicMock()
+    session.begin = MagicMock(return_value=_async_cm(None))
+
+    factory = _make_factory(session)
+    sqs = MagicMock()
+
+    handler = _make_handler(ActionResult(ok=False, result=None, error="transient", retryable=True))
+    registry = {"echo": handler}
+
+    await process_one(factory, sqs, _make_message(), registry=registry)
+
+    sqs.delete_message.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# process_one — handler exception (S07a: leave message)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_process_one_handler_exception_leaves_message():
+    """Handler raises → do NOT DeleteMessage (SQS visibility expiry handles redelivery)."""
+    job = _make_job()
+    run = _make_run()
+
+    claim_result = MagicMock()
+    claim_result.first.return_value = MagicMock()
+    run_result = MagicMock()
+    run_result.scalar_one_or_none.return_value = run
+
+    session = MagicMock()
+    session.execute = AsyncMock(side_effect=[claim_result, run_result])
+    session.get = AsyncMock(return_value=job)
+    session.add = MagicMock()
+    session.begin = MagicMock(return_value=_async_cm(None))
+
+    factory = _make_factory(session)
+    sqs = MagicMock()
+
+    broken_handler = MagicMock()
+    broken_handler.execute = AsyncMock(side_effect=RuntimeError("boom"))
+    broken_handler.timeout_seconds = 10
+    broken_handler.params_model = MagicMock()
+    broken_handler.params_model.model_validate = MagicMock(return_value=MagicMock())
+    registry = {"echo": broken_handler}
+
+    await process_one(factory, sqs, _make_message(), registry=registry)
+
+    sqs.delete_message.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# process_one — timeout (S07a: leave message)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_process_one_handler_timeout_leaves_message():
+    """Handler times out → do NOT DeleteMessage."""
+    job = _make_job()
+    run = _make_run()
+
+    claim_result = MagicMock()
+    claim_result.first.return_value = MagicMock()
+    run_result = MagicMock()
+    run_result.scalar_one_or_none.return_value = run
+
+    session = MagicMock()
+    session.execute = AsyncMock(side_effect=[claim_result, run_result])
+    session.get = AsyncMock(return_value=job)
+    session.add = MagicMock()
+    session.begin = MagicMock(return_value=_async_cm(None))
+
+    factory = _make_factory(session)
+    sqs = MagicMock()
+
+    async def _slow(*_a, **_kw):
+        await asyncio.sleep(100)
+
+    slow_handler = MagicMock()
+    slow_handler.execute = _slow
+    slow_handler.timeout_seconds = 0.01  # very short timeout to trigger TimeoutError
+    slow_handler.params_model = MagicMock()
+    slow_handler.params_model.model_validate = MagicMock(return_value=MagicMock())
+    registry = {"echo": slow_handler}
+
+    await process_one(factory, sqs, _make_message(), registry=registry)
+
+    sqs.delete_message.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# process_one — duplicate delivery (two workers, same message)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_process_one_duplicate_delivery_exactly_one_wins():
+    """Two concurrent process_one calls on the same message: exactly one claims.
+
+    Winner factory claims successfully; loser factory returns no-row (already claimed).
+    Each gets its own session to avoid interleaving mock call-order issues.
+    """
+    job = _make_job()
+    run = _make_run()
+
+    winner_session = _make_session(claim_wins=True, job=job, run=run)
+    loser_session = _make_session(claim_wins=False)
+
+    winner_factory = _make_factory(winner_session)
+    loser_factory = _make_factory(loser_session)
+
+    sqs = MagicMock()
+    handler = _make_handler(ActionResult(ok=True, result={"echoed": "hi"}, error=None))
+    registry = {"echo": handler}
+
+    msg = _make_message()
+    await asyncio.gather(
+        process_one(winner_factory, sqs, msg, registry=registry),
+        process_one(loser_factory, sqs, msg, registry=registry),
+    )
+
+    # handler executed exactly once (by the winner)
+    assert handler.execute.await_count == 1
+    # delete_message called twice: winner completes + loser no-ops
+    assert sqs.delete_message.call_count == 2
