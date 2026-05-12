@@ -32,6 +32,7 @@ jobs:
     env:
       DATABASE_URL: postgresql+asyncpg://app:app@localhost:5432/app
       ALEMBIC_DATABASE_URL: postgresql+psycopg://app:app@localhost:5432/app
+      QUEUE_URL: http://localhost:9324/queue/task-queue
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v3
