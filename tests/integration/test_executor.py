@@ -110,14 +110,11 @@ async def test_queued_echo_run_completes_to_succeeded(session_factory, sqs):
     job, run = await _insert_queued_run(session_factory)
     message = _make_sqs_message(run.run_id, job.job_id)
 
+    # The message is synthetic — we never put it on ElasticMQ — so the fake
+    # ReceiptHandle would be rejected if forwarded. The spy only needs to
+    # record that process_one called delete_message with the right receipt.
     deleted_receipts: list[str] = []
-    orig_delete = sqs.delete_message
-
-    def _capture_delete(receipt):
-        deleted_receipts.append(receipt)
-        orig_delete(receipt)
-
-    sqs.delete_message = _capture_delete
+    sqs.delete_message = deleted_receipts.append
 
     await process_one(session_factory, sqs, message, registry=ACTION_REGISTRY)
 
@@ -173,14 +170,9 @@ async def test_handler_permanent_failure_marks_run_failed(session_factory, sqs):
 
     registry = {"always_fail": AlwaysFailHandler()}
 
+    # Synthetic message — fake receipt would be rejected by ElasticMQ if forwarded.
     deleted_receipts: list[str] = []
-    orig_delete = sqs.delete_message
-
-    def _capture_delete(receipt):
-        deleted_receipts.append(receipt)
-        orig_delete(receipt)
-
-    sqs.delete_message = _capture_delete
+    sqs.delete_message = deleted_receipts.append
 
     await process_one(session_factory, sqs, message, registry=registry)
 
