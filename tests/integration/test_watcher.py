@@ -13,7 +13,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.db.engine import create_async_engine
@@ -100,8 +100,6 @@ async def test_watcher_picks_up_pending_run(session_factory, sqs):
     assert count == 1
 
     # DB assertions
-    from sqlalchemy.future import select
-
     async with session_factory() as session:
         async with session.begin():
             updated_run = (
@@ -141,8 +139,6 @@ async def test_watcher_ignores_cancelled_runs(session_factory, sqs):
     assert count == 0
 
     # Run should remain CANCELLED
-    from sqlalchemy.future import select
-
     async with session_factory() as session:
         async with session.begin():
             unchanged = (
@@ -190,8 +186,6 @@ async def test_two_concurrent_watchers_do_not_double_publish(session_factory, sq
     assert body["run_id"] == run.run_id
 
     # Exactly one RunEvent(QUEUED) in DB
-    from sqlalchemy.future import select
-
     async with session_factory() as session:
         async with session.begin():
             events = (
