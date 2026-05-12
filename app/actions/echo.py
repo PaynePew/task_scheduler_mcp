@@ -15,6 +15,10 @@ class EchoParams(BaseModel):
 
 class EchoHandler:
     name: ClassVar[str] = "echo"
+    description: ClassVar[str] = (
+        "Returns the input message unchanged. "
+        "Use as a smoke-test to verify task creation and worker dispatch."
+    )
     params_model: ClassVar[type[BaseModel]] = EchoParams
     timeout_seconds: ClassVar[int] = 10
 

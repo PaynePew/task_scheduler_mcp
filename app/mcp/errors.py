@@ -1,0 +1,32 @@
+"""Maps domain exceptions to the 6-code MCP error vocabulary per ADR-014 / CONTEXT.md §6."""
+
+from __future__ import annotations
+
+from typing import Any
+
+from app.domain.jobs import UnknownActionError, UnsupportedScheduleTypeError
+from app.mcp.envelope import error
+
+
+def map_domain_error(exc: Exception) -> dict[str, Any]:
+    """Return an error envelope for a domain exception.
+
+    Codes: USER_INPUT | NOT_FOUND | INVALID_STATE | UNKNOWN_ACTION | DUPLICATE | INTERNAL
+    """
+    if isinstance(exc, UnknownActionError):
+        return error(
+            "UNKNOWN_ACTION",
+            f"Unknown action: {exc}",
+            field="action",
+            expected="echo",
+        )
+    if isinstance(exc, UnsupportedScheduleTypeError):
+        return error(
+            "USER_INPUT",
+            f"Unsupported schedule_type '{exc}'. Only 'immediate' is supported in this version.",
+            field="schedule_type",
+            expected="immediate",
+        )
+    if isinstance(exc, ValueError):
+        return error("USER_INPUT", str(exc))
+    return error("INTERNAL", "An unexpected error occurred.")

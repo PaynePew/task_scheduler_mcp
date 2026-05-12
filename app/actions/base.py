@@ -18,6 +18,7 @@ class ActionResult:
 
 class ActionHandler(Protocol):
     name: ClassVar[str]
+    description: ClassVar[str]
     params_model: ClassVar[type[BaseModel]]
     timeout_seconds: ClassVar[int]
 
