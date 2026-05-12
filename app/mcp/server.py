@@ -12,7 +12,7 @@ from mcp.server.lowlevel import Server
 from app.actions.registry import ACTION_REGISTRY
 from app.db.engine import async_session_factory
 from app.domain.jobs import create_job
-from app.mcp.envelope import success
+from app.mcp.envelope import error, success
 from app.mcp.errors import map_domain_error
 
 logger = logging.getLogger(__name__)
@@ -112,10 +112,7 @@ def create_server(user_id: str) -> Server:
         elif name == "task.create@v1":
             result = await _handle_task_create(arguments, user_id)
         else:
-            result = {
-                "ok": False,
-                "error": {"code": "INTERNAL", "message": f"Unknown tool: {name}"},
-            }
+            result = error("INTERNAL", f"Unknown tool: {name}")
         return [types.TextContent(type="text", text=json.dumps(result))]
 
     return server
