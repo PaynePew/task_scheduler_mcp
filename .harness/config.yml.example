@@ -32,11 +32,11 @@ agents:
     model: claude-haiku-4-5
     max_turns: 30
 
-# Doc paths follow the CLAUDE.md convention:
-#   doc/  (singular) — human-authored course / PRD docs
-#   docs/ (plural)   — agent-facing context (ADRs, agent guides)
+# All design + decision docs live under `docs/` (plural). The singular
+# `doc/` tree is legacy course material (grilling sessions, study notes)
+# and is not referenced by the harness.
 docs:
-  prd_dir: doc/PRD
+  prd_dir: docs/PRD
   context: CONTEXT.md
   adr_dir: docs/adr
 
