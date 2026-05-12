@@ -31,9 +31,7 @@ async def async_session() -> AsyncSession:
 
 @pytest.fixture(scope="session")
 def sqs_client():
-    """Boto3 SQS client pointed at the Compose ElasticMQ instance.
+    """SQSClient wrapper pointed at the Compose ElasticMQ instance (integration tests only)."""
+    from app.queue.sqs import SQSClient
 
-    TODO (S06): activate once the queue layer is wired.
-    """
-    pytest.skip("sqs_client not available until S06 wires the queue layer")
-    yield  # pragma: no cover
+    return SQSClient()
