@@ -16,7 +16,7 @@ class UnknownActionError(Exception):
 
 
 class UnsupportedScheduleTypeError(Exception):
-    """Raised when schedule_type is not yet implemented (maps to UNSUPPORTED_SCHEDULE_TYPE).
+    """Raised when schedule_type is not yet implemented (maps to USER_INPUT).
 
     S04 only implements 'immediate'. One-shot-with-future-datetime and
     recurring/chain schedules land in later slices (S10, S13). Until then,
