@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          python-version: "3.12"
+      - run: uv sync
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          python-version: "3.12"
+      - run: uv sync
+      - run: uv run pytest -m "not integration"
+
+  integration:
+    runs-on: ubuntu-latest
+    continue-on-error: true  # S01: removed in the PR that lands the first real integration test (S02)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          python-version: "3.12"
+      - name: Start Compose services
+        run: docker compose up -d postgres elasticmq
+      - name: Wait for services to be healthy
+        run: |
+          for i in $(seq 1 30); do
+            docker compose ps --format json | python3 -c "
+          import json, sys
+          services = [json.loads(l) for l in sys.stdin if l.strip()]
+          unhealthy = [s['Name'] for s in services if s.get('Health') not in ('healthy', '')]
+          if unhealthy:
+              print('Not yet healthy:', unhealthy); sys.exit(1)
+          " && break || sleep 2
+          done
+      - run: uv sync
+      - run: uv run pytest -m integration
