@@ -80,6 +80,7 @@ async def test_status_returns_scheduled_for_new_job(session_factory, sqs):
     result = await handle_task_status(
         {"job_id": job.job_id},
         user_id="status-test-user",
+        session_factory=session_factory,
     )
 
     assert result["ok"] is True
@@ -108,6 +109,7 @@ async def test_status_returns_completed_after_worker_executes(session_factory, s
     result = await handle_task_status(
         {"job_id": job.job_id},
         user_id="status-test-user",
+        session_factory=session_factory,
     )
 
     assert result["ok"] is True
@@ -128,6 +130,7 @@ async def test_status_returns_completed_with_runs(session_factory, sqs):
     result = await handle_task_status(
         {"job_id": job.job_id, "include_runs": True},
         user_id="status-test-user",
+        session_factory=session_factory,
     )
 
     assert result["ok"] is True
@@ -145,6 +148,7 @@ async def test_status_not_found_for_nonexistent_job(session_factory, sqs):
     result = await handle_task_status(
         {"job_id": 999999999},
         user_id="status-test-user",
+        session_factory=session_factory,
     )
 
     assert result["ok"] is False
@@ -159,6 +163,7 @@ async def test_status_not_found_for_cross_user_job(session_factory, sqs):
     result = await handle_task_status(
         {"job_id": job.job_id},
         user_id="attacker-user",
+        session_factory=session_factory,
     )
 
     assert result["ok"] is False
