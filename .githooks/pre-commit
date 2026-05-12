@@ -16,17 +16,43 @@ if [ -z "$staged_py" ]; then
     exit 0
 fi
 
-echo "[pre-commit] uv run ruff check ."
-if ! uv run ruff check .; then
+# Locate a ruff invocation. CI uses `uv run ruff`, which is also what most
+# contributors have. If uv isn't on PATH (e.g. Git Bash on Windows where uv
+# is installed but only visible to PowerShell), fall back to a project-local
+# .venv ruff, then a global ruff, then warn-and-skip rather than blocking
+# the commit with a tooling problem.
+run_ruff() {
+    if command -v uv >/dev/null 2>&1; then
+        uv run ruff "$@"
+    elif [ -x "./.venv/bin/ruff" ]; then
+        ./.venv/bin/ruff "$@"
+    elif [ -x "./.venv/Scripts/ruff.exe" ]; then
+        ./.venv/Scripts/ruff.exe "$@"
+    elif command -v ruff >/dev/null 2>&1; then
+        ruff "$@"
+    else
+        return 127
+    fi
+}
+
+if ! run_ruff --version >/dev/null 2>&1; then
+    echo "[pre-commit] ruff not found (uv missing and no .venv ruff). Skipping checks."
+    echo "  CI will still run them. To enable local pre-commit lint, install uv:"
+    echo "    https://docs.astral.sh/uv/getting-started/installation/"
+    exit 0
+fi
+
+echo "[pre-commit] ruff check ."
+if ! run_ruff check .; then
     echo ""
     echo "  Lint failed. To auto-fix what's safe:"
-    echo "    uv run ruff check --fix ."
+    echo "    uv run ruff check --fix .   # (or substitute your ruff invocation)"
     echo "  Then re-stage and re-commit."
     exit 1
 fi
 
-echo "[pre-commit] uv run ruff format --check ."
-if ! uv run ruff format --check .; then
+echo "[pre-commit] ruff format --check ."
+if ! run_ruff format --check .; then
     echo ""
     echo "  Format check failed. To apply formatting:"
     echo "    uv run ruff format ."
