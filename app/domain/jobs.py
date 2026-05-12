@@ -15,6 +15,17 @@ class UnknownActionError(Exception):
     """Raised when action is not registered in ACTION_REGISTRY (maps to UNKNOWN_ACTION)."""
 
 
+class UnsupportedScheduleTypeError(Exception):
+    """Raised when schedule_type is not yet implemented (maps to UNSUPPORTED_SCHEDULE_TYPE).
+
+    S04 only implements 'immediate'. One-shot-with-future-datetime and
+    recurring/chain schedules land in later slices (S10, S13). Until then,
+    passing anything other than 'immediate' is rejected explicitly rather
+    than silently degraded to one-shot-now (which would mask scheduling bugs
+    far from their cause).
+    """
+
+
 async def create_job(
     session: AsyncSession,
     *,
@@ -28,7 +39,10 @@ async def create_job(
 
     Returns the existing Job on (user_id, idempotency_key) collision.
     Raises UnknownActionError if action is not in ACTION_REGISTRY.
+    Raises UnsupportedScheduleTypeError for any schedule_type other than 'immediate'.
     """
+    if schedule_type != "immediate":
+        raise UnsupportedScheduleTypeError(schedule_type)
     if action not in ACTION_REGISTRY:
         raise UnknownActionError(action)
 
