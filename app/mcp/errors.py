@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.domain.jobs import UnknownActionError, UnsupportedScheduleTypeError
+from app.domain.jobs import (
+    InvalidStateError,
+    JobNotFoundError,
+    UnknownActionError,
+    UnsupportedScheduleTypeError,
+)
 from app.mcp.envelope import error
 
 
@@ -27,6 +32,10 @@ def map_domain_error(exc: Exception) -> dict[str, Any]:
             field="schedule_type",
             expected="immediate",
         )
+    if isinstance(exc, JobNotFoundError):
+        return error("NOT_FOUND", f"Job not found: {exc}")
+    if isinstance(exc, InvalidStateError):
+        return error("INVALID_STATE", str(exc))
     if isinstance(exc, ValueError):
         return error("USER_INPUT", str(exc))
     return error("INTERNAL", "An unexpected error occurred.")

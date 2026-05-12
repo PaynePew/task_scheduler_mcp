@@ -5,9 +5,11 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from app.domain.jobs import (
+    InvalidStateError,
     JobNotFoundError,
     UnknownActionError,
     UnsupportedScheduleTypeError,
+    cancel_job,
     create_job,
     get_job_with_runs,
 )
@@ -57,3 +59,53 @@ async def test_get_job_with_runs_raises_not_found_when_no_job():
 
     with pytest.raises(JobNotFoundError):
         await get_job_with_runs(session, user_id="u1", job_id=999, include_runs=False)
+
+
+def _make_begin_cm():
+    """Build a minimal async context manager for session.begin() that propagates exceptions."""
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def _begin():
+        yield
+
+    return _begin
+
+
+@pytest.mark.asyncio
+async def test_cancel_job_raises_not_found_when_no_job():
+    """cancel_job raises JobNotFoundError when the job doesn't exist or belongs to another user."""
+    job_result = MagicMock()
+    job_result.scalar_one_or_none.return_value = None
+
+    session = AsyncMock()
+    session.execute = AsyncMock(return_value=job_result)
+    session.begin = _make_begin_cm()
+
+    with pytest.raises(JobNotFoundError):
+        await cancel_job(session, user_id="u1", job_id=999)
+
+
+@pytest.mark.asyncio
+async def test_cancel_job_raises_invalid_state_when_all_runs_terminal():
+    """cancel_job raises InvalidStateError when all runs are already in a terminal status."""
+    from app.db.models import Job, JobRun
+
+    mock_job = MagicMock(spec=Job)
+    mock_job.job_id = 42
+
+    mock_run = MagicMock(spec=JobRun)
+    mock_run.status = "SUCCEEDED"
+
+    job_result = MagicMock()
+    job_result.scalar_one_or_none.return_value = mock_job
+
+    runs_result = MagicMock()
+    runs_result.scalars.return_value.all.return_value = [mock_run]
+
+    session = AsyncMock()
+    session.execute = AsyncMock(side_effect=[job_result, runs_result])
+    session.begin = _make_begin_cm()
+
+    with pytest.raises(InvalidStateError, match="completed"):
+        await cancel_job(session, user_id="u1", job_id=42)

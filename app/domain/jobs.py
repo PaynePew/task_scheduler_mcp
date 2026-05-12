@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.actions.registry import ACTION_REGISTRY
@@ -18,6 +18,14 @@ class UnknownActionError(Exception):
 
 class JobNotFoundError(Exception):
     """Raised when job_id does not exist or belongs to another user (maps to NOT_FOUND)."""
+
+
+class InvalidStateError(Exception):
+    """Raised when all runs are already terminal (maps to INVALID_STATE).
+
+    The message includes the current external status so callers can surface
+    actionable feedback to the user without a second round-trip.
+    """
 
 
 class UnsupportedScheduleTypeError(Exception):
@@ -158,4 +166,64 @@ async def get_job_with_runs(
         action=job.action,
         internal_status=internal_status,
         runs=run_views if include_runs else None,
+    )
+
+
+_TERMINAL_STATUSES: frozenset[str] = frozenset({"SUCCEEDED", "FAILED", "CANCELLED"})
+
+
+async def cancel_job(
+    session: AsyncSession,
+    *,
+    user_id: str,
+    job_id: int,
+) -> JobView:
+    """Cancel all non-terminal JobRuns for a job, writing outbox events atomically.
+
+    Raises JobNotFoundError if job_id does not exist or belongs to another user.
+    Raises InvalidStateError if all runs are already in a terminal status.
+    Returns a JobView reflecting the post-cancel state (internal_status='CANCELLED').
+    """
+    from app.mcp.status_mapping import to_external
+
+    async with session.begin():
+        job_result = await session.execute(
+            select(Job).where(Job.job_id == job_id, Job.user_id == user_id)
+        )
+        job = job_result.scalar_one_or_none()
+        if job is None:
+            raise JobNotFoundError(job_id)
+
+        runs_result = await session.execute(select(JobRun).where(JobRun.job_id == job_id))
+        all_runs = runs_result.scalars().all()
+
+        non_terminal = [r for r in all_runs if r.status not in _TERMINAL_STATUSES]
+
+        if not non_terminal:
+            current_status = all_runs[0].status if all_runs else "PENDING"
+            external = to_external(current_status)
+            raise InvalidStateError(
+                f"Job {job_id} cannot be cancelled; current status is {external!r}"
+            )
+
+        for run in non_terminal:
+            await session.execute(
+                update(JobRun)
+                .where(JobRun.run_id == run.run_id, JobRun.time_bucket == run.time_bucket)
+                .values(status="CANCELLED")
+            )
+            event = RunEvent(
+                run_id=run.run_id,
+                job_id=job_id,
+                event_type="CANCELLED",
+                status_from=run.status,
+                status_to="CANCELLED",
+            )
+            session.add(event)
+
+    return JobView(
+        job_id=job.job_id,
+        action=job.action,
+        internal_status="CANCELLED",
+        runs=None,
     )
