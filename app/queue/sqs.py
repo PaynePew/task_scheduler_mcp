@@ -15,9 +15,12 @@ from app.config.settings import settings as _settings
 
 
 def _endpoint_from_queue_url(queue_url: str) -> str:
-    """Extract scheme + netloc from a queue URL, e.g. http://elasticmq:9324/queue/… → http://elasticmq:9324."""
-    p = urlparse(queue_url)
-    return f"{p.scheme}://{p.netloc}"
+    """Extract scheme + netloc from a queue URL.
+
+    e.g. ``http://elasticmq:9324/queue/task-queue`` → ``http://elasticmq:9324``.
+    """
+    parsed = urlparse(queue_url)
+    return f"{parsed.scheme}://{parsed.netloc}"
 
 
 class SQSClient:
