@@ -2,8 +2,8 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# Install uv
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
+# Install uv (pin to a specific release for reproducible builds; bump deliberately)
+COPY --from=ghcr.io/astral-sh/uv:0.5.20 /uv /uvx /usr/local/bin/
 
 # Copy dependency files first for layer caching
 COPY pyproject.toml uv.lock ./
