@@ -2,7 +2,7 @@
 
 - **Status**: Accepted
 - **Date**: 2026-05-12
-- **Source**: .doc/session/grilling-state.md Q15
+- **Source**: internal grilling session Q15 (local-only, not in git)
 - **Related**: ADR-005 (ALB front door), ADR-006 (dual transport)
 
 ## Context

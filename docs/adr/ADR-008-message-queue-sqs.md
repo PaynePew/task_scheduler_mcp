@@ -2,7 +2,7 @@
 
 - **Status**: Accepted
 - **Date**: 2026-05-12
-- **Source**: .doc/session/grilling-state.md Q8
+- **Source**: internal grilling session Q8 (local-only, not in git)
 - **Related**: ADR-003 (Postgres), ADR-007 (Watcher HA), ADR-004 (ECS Fargate)
 
 ## Context

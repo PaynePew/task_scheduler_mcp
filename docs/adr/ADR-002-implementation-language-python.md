@@ -2,7 +2,7 @@
 
 - **Status**: Accepted
 - **Date**: 2026-05-12
-- **Source**: .doc/session/grilling-state.md Q3
+- **Source**: internal grilling session Q3 (local-only, not in git)
 
 ## Context
 

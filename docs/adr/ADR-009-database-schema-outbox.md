@@ -2,7 +2,7 @@
 
 - **Status**: Accepted
 - **Date**: 2026-05-12
-- **Source**: .doc/session/grilling-state.md Q9
+- **Source**: internal grilling session Q9 (local-only, not in git)
 - **Related**: ADR-003 (Postgres), ADR-007 (Watcher HA), ADR-013 (action catalog)
 
 ## Context

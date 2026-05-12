@@ -2,7 +2,7 @@
 
 - **Status**: Accepted
 - **Date**: 2026-05-12
-- **Source**: .doc/session/grilling-state.md Q5
+- **Source**: internal grilling session Q5 (local-only, not in git)
 - **Related**: ADR-005 (front door), ADR-010 (module layout)
 
 ## Context

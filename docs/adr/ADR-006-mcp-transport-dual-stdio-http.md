@@ -2,7 +2,7 @@
 
 - **Status**: Accepted
 - **Date**: 2026-05-12
-- **Source**: .doc/session/grilling-state.md Q6
+- **Source**: internal grilling session Q6 (local-only, not in git)
 - **Related**: ADR-010 (module layout), ADR-015 (user_id resolver)
 
 ## Context

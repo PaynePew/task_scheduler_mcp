@@ -2,7 +2,7 @@
 
 - **Status**: Accepted
 - **Date**: 2026-05-12
-- **Source**: .doc/session/grilling-state.md Q4
+- **Source**: internal grilling session Q4 (local-only, not in git)
 - **Related**: ADR-008 (queue), ADR-009 (schema)
 
 ## Context

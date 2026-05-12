@@ -2,7 +2,7 @@
 
 - **Status**: Accepted
 - **Date**: 2026-05-12
-- **Source**: .doc/session/grilling-state.md Q10
+- **Source**: internal grilling session Q10 (local-only, not in git)
 - **Related**: ADR-002 (Python), ADR-004 (ECS Fargate), ADR-006 (transport)
 
 ## Context

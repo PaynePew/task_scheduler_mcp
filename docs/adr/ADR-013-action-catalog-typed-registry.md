@@ -2,7 +2,7 @@
 
 - **Status**: Accepted
 - **Date**: 2026-05-12
-- **Source**: .doc/session/grilling-state.md Q13
+- **Source**: internal grilling session Q13 (local-only, not in git)
 - **Related**: ADR-010 (module layout), ADR-014 (tool surface)
 
 ## Context

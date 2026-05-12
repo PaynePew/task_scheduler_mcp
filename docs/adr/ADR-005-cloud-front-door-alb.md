@@ -2,7 +2,7 @@
 
 - **Status**: Accepted
 - **Date**: 2026-05-12
-- **Source**: .doc/session/grilling-state.md Q5b
+- **Source**: internal grilling session Q5b (local-only, not in git)
 - **Related**: ADR-004 (ECS Fargate), ADR-006 (MCP transport)
 
 ## Context
