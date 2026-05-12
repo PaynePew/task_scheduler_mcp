@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Pre-commit hook: mirror the CI ruff checks before allowing the commit.
+#
+# Activated per-clone by running:
+#   git config core.hooksPath .githooks
+#
+# The hook is intentionally check-only (matches CI exactly, no auto-edit
+# of staged files). If a check fails, run the fix command it prints, stage
+# the result, and re-commit.
+
+set -e
+
+# Skip if no Python files are staged — keeps doc/config-only commits instant.
+staged_py=$(git diff --cached --name-only --diff-filter=ACMR | grep -E '\.py$' || true)
+if [ -z "$staged_py" ]; then
+    exit 0
+fi
+
+echo "[pre-commit] uv run ruff check ."
+if ! uv run ruff check .; then
+    echo ""
+    echo "  Lint failed. To auto-fix what's safe:"
+    echo "    uv run ruff check --fix ."
+    echo "  Then re-stage and re-commit."
+    exit 1
+fi
+
+echo "[pre-commit] uv run ruff format --check ."
+if ! uv run ruff format --check .; then
+    echo ""
+    echo "  Format check failed. To apply formatting:"
+    echo "    uv run ruff format ."
+    echo "  Then re-stage and re-commit."
+    exit 1
+fi
