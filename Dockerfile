@@ -11,8 +11,10 @@ COPY pyproject.toml uv.lock ./
 # Install production dependencies (no dev extras)
 RUN uv sync --frozen --no-dev
 
-# Copy application source
+# Copy application source and migration files
 COPY app/ ./app/
+COPY alembic.ini ./
+COPY migrations/ ./migrations/
 
 # uv-managed venv is at /app/.venv; add it to PATH
 ENV PATH="/app/.venv/bin:$PATH"

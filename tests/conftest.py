@@ -1,21 +1,32 @@
-"""Shared pytest fixtures.
-
-async_session and sqs_client are stubbed out here so S02/S06 can activate them
-without changing the fixture interface. Tests that use these fixtures will be
-skipped until the underlying infrastructure is wired.
-"""
+"""Shared pytest fixtures."""
 
 import pytest
+import pytest_asyncio
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from app.db.engine import create_async_engine
 
 
-@pytest.fixture
-async def async_session():
-    """Yield an AsyncSession with automatic rollback at teardown.
+@pytest_asyncio.fixture
+async def async_session() -> AsyncSession:
+    """Per-test engine + session with auto-rollback.
 
-    TODO (S02): activate once app/db/engine.py exists.
+    Creating a fresh engine per test avoids cross-event-loop pool reuse —
+    pytest-asyncio's default function scope gives each test its own loop,
+    and asyncpg connection pools are loop-bound. The module-level
+    `async_session_factory` in `app/db/engine.py` is safe for runtime
+    services (one engine per process / one loop per process) but unsafe
+    for tests where many loops share a process.
     """
-    pytest.skip("async_session not available until S02 lands app/db/engine.py")
-    yield  # pragma: no cover
+    engine = create_async_engine()
+    try:
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with factory() as session:
+            async with session.begin():
+                yield session
+                await session.rollback()
+    finally:
+        await engine.dispose()
 
 
 @pytest.fixture(scope="session")

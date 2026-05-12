@@ -11,5 +11,9 @@ class Settings(BaseSettings):
     port: int = 8000
     log_level: str = "INFO"
 
+    # Per-process DB pool defaults per ADR-011 (mcp-server / worker profile)
+    db_pool_size: int = 5
+    db_max_overflow: int = 10
+
 
 settings = Settings()
