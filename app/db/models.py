@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from sqlalchemy import (
     BigInteger,
     Boolean,
@@ -30,7 +32,7 @@ class Job(Base):
     action: Mapped[str] = mapped_column(Text, nullable=False)
     action_params: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
     job_type: Mapped[str] = mapped_column(Text, nullable=False, server_default="one_shot")
-    scheduled_at: Mapped[str | None] = mapped_column(TZ, nullable=True)
+    scheduled_at: Mapped[datetime | None] = mapped_column(TZ, nullable=True)
     # W2 bonus columns landed in W1 schema
     cron_expr: Mapped[str | None] = mapped_column(Text, nullable=True)
     timezone: Mapped[str] = mapped_column(Text, nullable=False, server_default="UTC")
@@ -42,8 +44,8 @@ class Job(Base):
     trigger_on_status: Mapped[str | None] = mapped_column(Text, nullable=True)
     idempotency_key: Mapped[str | None] = mapped_column(Text, nullable=True, unique=True)
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
-    created_at: Mapped[str] = mapped_column(TZ, nullable=False, server_default=func.now())
-    updated_at: Mapped[str] = mapped_column(TZ, nullable=False, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(TZ, nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(TZ, nullable=False, server_default=func.now())
 
     runs: Mapped[list["JobRun"]] = relationship("JobRun", back_populates="job")
 
@@ -70,7 +72,7 @@ class JobRun(Base):
     time_bucket: Mapped[str] = mapped_column(Text, primary_key=True)
     run_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     job_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("jobs.job_id"), nullable=False)
-    scheduled_at: Mapped[str] = mapped_column(TZ, nullable=False)
+    scheduled_at: Mapped[datetime] = mapped_column(TZ, nullable=False)
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default="PENDING")
     result: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -78,10 +80,10 @@ class JobRun(Base):
     max_retries: Mapped[int] = mapped_column(Integer, nullable=False, server_default="3")
     # W2 bonus column landed in W1 schema
     wait_for_run_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
-    start_at: Mapped[str | None] = mapped_column(TZ, nullable=True)
-    finish_at: Mapped[str | None] = mapped_column(TZ, nullable=True)
-    created_at: Mapped[str] = mapped_column(TZ, nullable=False, server_default=func.now())
-    updated_at: Mapped[str] = mapped_column(TZ, nullable=False, server_default=func.now())
+    start_at: Mapped[datetime | None] = mapped_column(TZ, nullable=True)
+    finish_at: Mapped[datetime | None] = mapped_column(TZ, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(TZ, nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(TZ, nullable=False, server_default=func.now())
 
     job: Mapped["Job"] = relationship("Job", back_populates="runs")
 
@@ -112,7 +114,7 @@ class RunEvent(Base):
     status_from: Mapped[str | None] = mapped_column(Text, nullable=True)
     status_to: Mapped[str | None] = mapped_column(Text, nullable=True)
     event_data: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
-    occurred_at: Mapped[str] = mapped_column(TZ, nullable=False, server_default=func.now())
+    occurred_at: Mapped[datetime] = mapped_column(TZ, nullable=False, server_default=func.now())
     # JSONB cursor for RecurringJobWatcher / ChainWatcher per ADR-009
     processed_by: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
 
