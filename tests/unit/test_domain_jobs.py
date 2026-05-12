@@ -1,11 +1,15 @@
 """Unit tests for app/domain/jobs.py — non-DB paths only."""
 
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 
 from app.domain.jobs import (
+    JobNotFoundError,
     UnknownActionError,
     UnsupportedScheduleTypeError,
     create_job,
+    get_job_with_runs,
 )
 
 
@@ -40,3 +44,16 @@ async def test_unsupported_schedule_type_raises_before_db(bad_schedule_type):
             action_params={},
             schedule_type=bad_schedule_type,
         )
+
+
+@pytest.mark.asyncio
+async def test_get_job_with_runs_raises_not_found_when_no_job():
+    """get_job_with_runs raises JobNotFoundError when the DB returns no matching job."""
+    mock_result = MagicMock()
+    mock_result.scalar_one_or_none.return_value = None
+
+    session = AsyncMock()
+    session.execute = AsyncMock(return_value=mock_result)
+
+    with pytest.raises(JobNotFoundError):
+        await get_job_with_runs(session, user_id="u1", job_id=999, include_runs=False)
