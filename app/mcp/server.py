@@ -14,6 +14,7 @@ from app.db.engine import async_session_factory
 from app.domain.jobs import create_job
 from app.mcp.envelope import error, success
 from app.mcp.errors import map_domain_error
+from app.mcp.handlers.cancel import TASK_CANCEL_SCHEMA, handle_task_cancel
 from app.mcp.handlers.status import TASK_STATUS_SCHEMA, handle_task_status
 
 logger = logging.getLogger(__name__)
@@ -106,6 +107,14 @@ def create_server(user_id: str) -> Server:
                 inputSchema=TASK_STATUS_SCHEMA,
             ),
             types.Tool(
+                name="task.cancel@v1",
+                description=(
+                    "Cancel a job by transitioning all non-terminal runs to CANCELLED. "
+                    "Returns INVALID_STATE if all runs are already terminal."
+                ),
+                inputSchema=TASK_CANCEL_SCHEMA,
+            ),
+            types.Tool(
                 name="task.list_actions@v1",
                 description=(
                     "List all registered actions with their descriptions, timeouts, "
@@ -123,6 +132,8 @@ def create_server(user_id: str) -> Server:
             result = await _handle_task_create(arguments, user_id)
         elif name == "task.status@v1":
             result = await handle_task_status(arguments, user_id)
+        elif name == "task.cancel@v1":
+            result = await handle_task_cancel(arguments, user_id)
         else:
             result = error("INTERNAL", f"Unknown tool: {name}")
         return [types.TextContent(type="text", text=json.dumps(result))]
