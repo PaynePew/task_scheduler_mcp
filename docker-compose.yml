@@ -1,0 +1,89 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+      POSTGRES_DB: app
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d app"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  elasticmq:
+    image: softwaremill/elasticmq-native:latest
+    ports:
+      - "9324:9324"
+      - "9325:9325"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9325 || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - ./elasticmq.conf:/opt/elasticmq.conf:ro
+
+  migrate:
+    build: .
+    command: ["python", "-m", "app.entrypoints.migrate"]
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  # Full-profile services (add --profile full to bring these up)
+  mcp-server:
+    build: .
+    profiles: ["full"]
+    command: ["python", "-m", "app.entrypoints.mcp_http"]
+    env_file: .env
+    ports:
+      - "8000:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  watcher:
+    build: .
+    profiles: ["full"]
+    command: ["python", "-m", "app.entrypoints.watcher"]
+    env_file: .env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  worker:
+    build: .
+    profiles: ["full"]
+    command: ["python", "-m", "app.entrypoints.worker"]
+    env_file: .env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  recurring-watcher:
+    build: .
+    profiles: ["full"]
+    command: ["python", "-m", "app.entrypoints.recurring_watcher"]
+    env_file: .env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  chain-watcher:
+    build: .
+    profiles: ["full"]
+    command: ["python", "-m", "app.entrypoints.chain_watcher"]
+    env_file: .env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  postgres_data:

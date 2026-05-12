@@ -1,4 +1,77 @@
-# ChatGPT Task Scheduler — Exercise
+# ChatGPT Task Scheduler
+
+MCP-based job scheduler exposing `task.create / list / status / cancel / list_actions` tools backed by Postgres + SQS (ElasticMQ locally).
+
+## Quickstart
+
+### Prerequisites
+
+- [Docker](https://docs.docker.com/get-docker/) + Docker Compose
+- [uv](https://docs.astral.sh/uv/getting-started/installation/) — `curl -LsSf https://astral.sh/uv/install.sh | sh`
+
+### Setup
+
+```bash
+# 1. Install Python dependencies (creates .venv)
+uv sync
+
+# 2. Copy the env-var template
+cp .env.example .env
+# Edit .env if you need non-default values (defaults work with docker compose)
+
+# 3. Start infra (Postgres + ElasticMQ + one-shot migration)
+docker compose up
+```
+
+Services:
+| Service | URL |
+|---------|-----|
+| Postgres | `localhost:5432` |
+| ElasticMQ (SQS API) | `http://localhost:9324` |
+| ElasticMQ (stats UI) | `http://localhost:9325` |
+
+### Run unit tests
+
+```bash
+uv run pytest -m "not integration"
+```
+
+### Run integration tests (requires running Compose services)
+
+```bash
+docker compose up -d postgres elasticmq
+uv run pytest -m integration
+```
+
+### Lint + format check
+
+```bash
+uv run ruff check .
+uv run ruff format --check .
+```
+
+### Full stack (all six entrypoints)
+
+```bash
+docker compose --profile full up
+```
+
+## Project layout
+
+```
+app/
+├── config/        # pydantic-settings; env-var contract
+├── db/            # engine, session factory, ORM models, repositories
+├── domain/        # business logic (stateless; no MCP awareness)
+├── mcp/           # tool definitions, handlers, server wiring
+├── workers/       # watcher / executor loops
+├── queue/         # SQS / ElasticMQ client wrapper
+├── actions/       # action handlers + registry
+└── entrypoints/   # thin python -m targets (~10 lines each)
+tests/
+├── unit/          # fast, no external services
+└── integration/   # require running Compose services
+```
 
 ## How to Use
 

@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          python-version: "3.12"
+      - run: uv sync
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          python-version: "3.12"
+      - run: uv sync
+      - run: uv run pytest -m "not integration"
+
+  integration:
+    runs-on: ubuntu-latest
+    continue-on-error: true  # S01: removed in the PR that lands the first real integration test (S02)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          python-version: "3.12"
+      - name: Start Compose services
+        run: docker compose up -d postgres elasticmq
+      - name: Wait for services to be healthy
+        run: |
+          healthy=0
+          for i in $(seq 1 30); do
+            if docker compose ps --format json | python3 -c "
+          import json, sys
+          services = [json.loads(l) for l in sys.stdin if l.strip()]
+          unhealthy = [s['Name'] for s in services if s.get('Health') not in ('healthy', '')]
+          if unhealthy:
+              print('Not yet healthy:', unhealthy); sys.exit(1)
+          "; then
+              healthy=1
+              break
+            fi
+            sleep 2
+          done
+          if [ "$healthy" -ne 1 ]; then
+            echo "::error::Services failed to become healthy within 60s"
+            docker compose ps
+            docker compose logs
+            exit 1
+          fi
+      - run: uv sync
+      # pytest exit 5 = "no tests collected" — expected until S02 adds the first
+      # integration test. Treat 0 and 5 as success; any other code is a real failure.
+      - name: Run integration tests
+        run: |
+          set +e
+          uv run pytest -m integration
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ] && [ "$rc" -ne 5 ]; then
+            exit "$rc"
+          fi
