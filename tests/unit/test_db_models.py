@@ -22,9 +22,11 @@ def test_run_event_table_name():
     assert RunEvent.__tablename__ == "run_events"
 
 
-def test_job_has_idempotency_key_unique():
-    col = Job.__table__.c["idempotency_key"]
-    assert col.unique is True
+def test_job_has_idempotency_key_user_scoped_unique():
+    # Uniqueness is on (user_id, idempotency_key) — not column-level — so two users
+    # can share an idempotency key (per CONTEXT.md §5 + ADR-015).
+    constraints = {c.name for c in Job.__table__.constraints}
+    assert "uq_jobs_user_idempotency" in constraints
 
 
 def test_job_has_w2_bonus_columns():
