@@ -72,7 +72,7 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("job_id"),
         sa.UniqueConstraint("idempotency_key", name="uq_jobs_idempotency_key"),
     )
-    op.create_index("idx_jobs_user_created", "jobs", ["user_id", "created_at"])
+    op.create_index("idx_jobs_user_created", "jobs", ["user_id", sa.text("created_at DESC")])
     op.create_index(
         "idx_jobs_active_recurring",
         "jobs",

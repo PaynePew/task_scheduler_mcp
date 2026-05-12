@@ -8,6 +8,7 @@ from sqlalchemy import (
     Integer,
     Text,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -52,7 +53,7 @@ class Job(Base):
             " OR (job_type = 'recurring' AND cron_expr IS NOT NULL)",
             name="ck_jobs_schedule_consistency",
         ),
-        Index("idx_jobs_user_created", "user_id", "created_at"),
+        Index("idx_jobs_user_created", "user_id", text("created_at DESC")),
         Index(
             "idx_jobs_active_recurring",
             "job_type",

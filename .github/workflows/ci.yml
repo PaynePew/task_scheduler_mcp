@@ -29,7 +29,9 @@ jobs:
 
   integration:
     runs-on: ubuntu-latest
-    continue-on-error: true  # S01: removed in the PR that lands the first real integration test (S02)
+    env:
+      DATABASE_URL: postgresql+asyncpg://app:app@localhost:5432/app
+      ALEMBIC_DATABASE_URL: postgresql+psycopg://app:app@localhost:5432/app
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v3
@@ -60,14 +62,7 @@ jobs:
             exit 1
           fi
       - run: uv sync
-      # pytest exit 5 = "no tests collected" — expected until S02 adds the first
-      # integration test. Treat 0 and 5 as success; any other code is a real failure.
+      - name: Run migrations
+        run: uv run alembic upgrade head
       - name: Run integration tests
-        run: |
-          set +e
-          uv run pytest -m integration
-          rc=$?
-          set -e
-          if [ "$rc" -ne 0 ] && [ "$rc" -ne 5 ]; then
-            exit "$rc"
-          fi
+        run: uv run pytest -m integration
