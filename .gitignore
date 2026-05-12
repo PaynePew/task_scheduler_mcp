@@ -98,3 +98,8 @@ yarn-error.log*
 # Claude Code local settings (per-machine, per-user)
 # ─────────────────────────────────────────────
 .claude/settings.local.json
+
+# ─────────────────────────────────────────────
+# Local issue drafts — reviewed locally then published to GitHub
+# ─────────────────────────────────────────────
+.scratch/

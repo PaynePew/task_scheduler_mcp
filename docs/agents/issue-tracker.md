@@ -3,16 +3,9 @@
 Issues for this repo live in GitHub Issues. Skills that read or write issues
 (`to-issues`, `triage`, `to-prd`, `qa`) use the `gh` CLI.
 
-## Prerequisite: remote not yet configured
+## Repo
 
-As of this file's creation, no GitHub remote is set on this repo. Before any
-issue-writing skill can publish, do one of:
-
-- `gh repo create <owner>/<name> --source=. --remote=origin --push`
-- Create the repo manually on github.com, then
-  `git remote add origin git@github.com:<owner>/<name>.git && git push -u origin master`
-
-Verify with `gh repo view` — it should print the repo metadata, not error.
+`PaynePew/chatgpt_task` on GitHub. The `origin` remote is configured.
 
 ## Creating issues
 

@@ -6,7 +6,7 @@ MCP-based job scheduler exposing `task.create / list / status / cancel / list_ac
 
 ### Issue tracker
 
-GitHub Issues via the `gh` CLI. **Prerequisite:** GitHub repo not yet created — run `gh repo create` and add as remote before any issue-writing skill (`to-issues`, `triage`, `to-prd`, `qa`) can publish. See `docs/agents/issue-tracker.md`.
+GitHub Issues via the `gh` CLI. Repo: `PaynePew/chatgpt_task`. See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 

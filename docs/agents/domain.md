@@ -5,8 +5,8 @@ files at the repo root:
 
 | File | Purpose |
 |---|---|
-| `CONTEXT.md` | Domain glossary and language for this project. Not yet created — skills should treat its absence as "no domain context yet" rather than erroring. |
-| `docs/adr/` | Architecture Decision Records. Not yet created. |
+| `CONTEXT.md` | Domain glossary and language for this project. |
+| `docs/adr/` | Architecture Decision Records (ADR-001..ADR-015). |
 
 ## Existing documentation under `doc/` (singular)
 
