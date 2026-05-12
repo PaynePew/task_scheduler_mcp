@@ -15,11 +15,14 @@ MCP-based job scheduler exposing `task.create / list / status / cancel / list_ac
 # 1. Install Python dependencies (creates .venv)
 uv sync
 
-# 2. Copy the env-var template
+# 2. Enable the local pre-commit hook (runs ruff check + format --check before each commit)
+git config core.hooksPath .githooks
+
+# 3. Copy the env-var template
 cp .env.example .env
 # Edit .env if you need non-default values (defaults work with docker compose)
 
-# 3. Start infra (Postgres + ElasticMQ + one-shot migration)
+# 4. Start infra (Postgres + ElasticMQ + one-shot migration)
 docker compose up
 ```
 
