@@ -1,0 +1,61 @@
+# Agent harness configuration — copy to config.yml and edit for your project.
+#
+# Required keys: image, branch_prefix, tracker.type, tracker.repo.
+# All other keys are optional with sensible defaults — delete the lines you
+# don't need rather than leaving placeholders.
+
+image: agent-harness:latest
+
+# Branch naming convention: {prefix}{N}-{slug-from-issue-title}
+# Examples: "kanban-issue", "feat-", "issue-".
+branch_prefix: kanban-issue
+
+tracker:
+  type: github
+  # Replace with <your-org>/<your-repo>. Used for `gh --repo <value>`.
+  repo: acme/example
+
+defaults:
+  model: claude-sonnet-4-6
+
+agents:
+  implement:
+    model: claude-sonnet-4-6
+    max_turns: 80
+  plan:
+    model: claude-opus-4-7
+    max_turns: 10
+  review:
+    model: claude-opus-4-7
+    max_turns: 30
+  merge:
+    model: claude-sonnet-4-6
+    max_turns: 20
+
+# Doc paths relative to the repo root. Omit any block your project doesn't have.
+docs:
+  prd_dir: docs/prd
+  context: CONTEXT.md
+  adr_dir: docs/adr
+
+# Replace with your project's test command, or delete the block entirely if
+# you don't gate on tests. Default below is commented out so a fresh clone
+# does not assume `pytest .` exists.
+# Examples:
+#   pytest .
+#   pytest backend/ && npm test --prefix frontend
+#   go test ./...
+#   cargo test
+# tests:
+#   block: <your test command>
+
+# Replace with your project's typecheck command, or omit the block entirely.
+# Examples:
+#   npm run typecheck --prefix frontend
+#   mypy .
+#   tsc --noEmit
+# typecheck:
+#   block: <your typecheck command>
+
+commit:
+  style: Conventional Commits (feat/fix/test/docs/chore/refactor). One logical change per commit.

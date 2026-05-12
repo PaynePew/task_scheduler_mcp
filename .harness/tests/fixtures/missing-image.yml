@@ -1,0 +1,3 @@
+branch_prefix: kanban-issue
+tracker:
+  type: github

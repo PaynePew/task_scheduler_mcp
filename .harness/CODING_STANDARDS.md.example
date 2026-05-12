@@ -1,0 +1,55 @@
+# Coding Standards (harness review)
+
+The review agent loads this file (substituted into the review prompt as `{{CODING_STANDARDS_BLOCK}}`) and enforces these standards during code review. Implementation agents are *not* required to read it — keeping it review-only saves implementer tokens and gives the review phase a clear job.
+
+**Setup:** copy this template to `.harness/CODING_STANDARDS.md` and edit. The real file is gitignored — each project keeps its own.
+
+> The sections below are placeholders. Keep what's relevant for your stack, delete what isn't, add domain-specific rules. The review agent treats whatever you put here as ground truth.
+
+## Style
+
+<!-- Add language-specific rules per stack. Examples below — replace with your own. -->
+
+### TypeScript / React (example — delete if not applicable)
+
+- Prefer **named exports** over default exports.
+- No `any`. If unavoidable, comment why on the same line.
+- Function components only. Hooks at top level.
+- File naming: `PascalCase.tsx` for components, `camelCase.ts` for utilities.
+
+### Python (example — delete if not applicable)
+
+- `snake_case` for functions and variables, `PascalCase` for classes.
+- Type hints on every public function.
+- Prefer `pathlib.Path` over `os.path`.
+
+<!-- Add Go / Rust / Java / etc. as needed. -->
+
+## Commits
+
+- Conventional Commits: `feat`, `fix`, `refactor`, `test`, `docs`, `chore`, `perf`, `ci`.
+- Subject line ≤ 72 chars, imperative mood (`add X`, not `added X`).
+- Body explains **why**, not what (the diff already shows what).
+- One logical change per commit.
+
+## Tests
+
+- Every new public function gets at least one test.
+- Test names describe behavior, not implementation: `'rejects 4xx with normalized ApiError'` ✅, `'test1'` ❌.
+- <!-- List your project's test framework conventions: file naming, fixture style, mocking rules, etc. -->
+
+## Architecture
+
+- Single Responsibility per module. If a file does two things, split it.
+- <!-- Add project-specific layering rules: which directories own what, where logic goes vs glue, naming of layers, etc. -->
+- Domain language must match the project's CONTEXT/glossary doc. Don't introduce a new term without updating that doc in the same branch.
+
+## What NOT to do
+
+- No silent error swallowing. At minimum: log + rethrow. Better: handle it deliberately at a known boundary.
+- No hardcoded secrets — env vars, validated at startup.
+- No mutation of function arguments. Spread or build new.
+- No nested ternaries. Use `if/else` or extract a helper.
+- No `as any` / `// @ts-ignore` / `# type: ignore` (or language-equivalent) without an inline comment explaining why.
+- No `console.log` / `print()` debugging statements in committed code.
+- <!-- Add project-specific anti-patterns: deprecated APIs, removed dependencies, banned helpers, etc. -->

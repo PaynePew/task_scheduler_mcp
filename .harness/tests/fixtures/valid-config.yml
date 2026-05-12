@@ -1,0 +1,7 @@
+image: agent-harness:latest
+branch_prefix: kanban-issue
+tracker:
+  type: github
+  repo: acme/example
+defaults:
+  model: claude-opus-4-7
