@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, ClassVar, Protocol
+from dataclasses import dataclass
+from typing import Any, ClassVar, Protocol
 
 from pydantic import BaseModel
-
-if TYPE_CHECKING:
-    pass
 
 
 @dataclass
@@ -16,7 +13,7 @@ class ActionResult:
     ok: bool
     result: dict | None
     error: str | None
-    retryable: bool = field(default=True)
+    retryable: bool = True
 
 
 class ActionHandler(Protocol):

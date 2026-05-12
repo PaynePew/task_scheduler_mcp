@@ -18,5 +18,5 @@ class EchoHandler:
     params_model: ClassVar[type[BaseModel]] = EchoParams
     timeout_seconds: ClassVar[int] = 10
 
-    async def execute(self, run: Any, params: EchoParams) -> ActionResult:  # type: ignore[override]
+    async def execute(self, run: Any, params: EchoParams) -> ActionResult:
         return ActionResult(ok=True, result={"echoed": params.message}, error=None)

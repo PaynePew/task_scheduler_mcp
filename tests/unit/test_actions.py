@@ -24,4 +24,4 @@ async def test_echo_handler_happy_path():
 
 def test_echo_params_missing_required_field_raises_validation_error():
     with pytest.raises(ValidationError):
-        EchoParams()  # type: ignore[call-arg]
+        EchoParams()  # type: ignore[call-arg]  # intentional: omit required `message` to assert pydantic raises
