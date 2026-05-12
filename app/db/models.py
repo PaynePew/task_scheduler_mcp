@@ -9,6 +9,7 @@ from sqlalchemy import (
     Index,
     Integer,
     Text,
+    UniqueConstraint,
     func,
     text,
 )
@@ -42,7 +43,7 @@ class Job(Base):
         BigInteger, ForeignKey("jobs.job_id", ondelete="SET NULL"), nullable=True
     )
     trigger_on_status: Mapped[str | None] = mapped_column(Text, nullable=True)
-    idempotency_key: Mapped[str | None] = mapped_column(Text, nullable=True, unique=True)
+    idempotency_key: Mapped[str | None] = mapped_column(Text, nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
     created_at: Mapped[datetime] = mapped_column(TZ, nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(TZ, nullable=False, server_default=func.now())
@@ -55,6 +56,7 @@ class Job(Base):
             " OR (job_type = 'recurring' AND cron_expr IS NOT NULL)",
             name="ck_jobs_schedule_consistency",
         ),
+        UniqueConstraint("user_id", "idempotency_key", name="uq_jobs_user_idempotency"),
         Index("idx_jobs_user_created", "user_id", text("created_at DESC")),
         Index(
             "idx_jobs_active_recurring",
