@@ -100,7 +100,13 @@ Before making any claim about the working tree state, **verify it against the wo
      (Source of the error: the slice spec or another issue's body mentioned these files. They do not exist on this branch.)
    - ✅ Good: Run `git ls-files app/actions/` first. If only `__init__.py` is tracked, say: "`app/actions/` currently contains only an empty `__init__.py`; the handler / registry files referenced in slice S03's spec are not yet present on this branch."
 
-2. **Claims about test results MUST cite the command and the exit code.** If you successfully ran `uv run pytest -m "not integration"` and N tests passed, say so. If the venv was broken and you could not actually execute tests, say *that* — never summarise what you *expect* the tests would have done.
+2. **Claims about test results MUST cite the command and the exit code, and you MUST run both suites before claiming COMPLETE.**
+   - `uv run pytest -m "not integration"` (unit)
+   - `uv run pytest -m integration` (integration — Postgres + ElasticMQ are available at `host.docker.internal` and the relevant `DATABASE_URL`/`QUEUE_URL` env vars are pre-set; the harness host-side `before-tests.sh` brought the stack up before this container started)
+
+   The single most common failure mode for past PRs has been: unit green, integration red, ship to CI, agent comes back to fix. Running integration here closes that loop. If integration fails and the diff is responsible, fix it (within turn budget) or flag it in "Concerns" — never silently omit the integration result from the report.
+
+   If the venv was broken and you could not actually execute tests, say *that* — never summarise what you *expect* the tests would have done.
 
 3. **Claims about the diff MUST be verified via `git diff` / `git show`.** Don't describe what the implementer *probably* did based on the issue body — look at what they actually committed.
 

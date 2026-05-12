@@ -79,8 +79,10 @@ Apply these rules before posting the COMPLETE report:
 
 1. **Run the full test suite, not a subset.**
    - Unit: `uv run pytest -m "not integration"` — every test, not just the new ones.
-   - Integration (if the slice touches DB / queue / network): `uv run pytest -m integration`.
+   - Integration: `uv run pytest -m integration` — **always run this, not only "if the slice touches DB/queue"**. Past PRs have shipped with integration regressions in code paths the author thought were isolated (SQLAlchemy session sync, ORM autoflush, async engine lifecycle) — the only reliable filter is "did the integration suite go green".
    - A subset passing while the full run fails is a real risk — only the full run is a valid "tests pass" claim.
+
+   **Integration runtime is wired for you.** The host has Postgres + ElasticMQ already running on `host.docker.internal:5432` / `host.docker.internal:9324`, brought up by `.harness/hooks/before-tests.sh` before this container starts. The container env already has `DATABASE_URL`, `ALEMBIC_DATABASE_URL`, and `QUEUE_URL` pointing to them — you do NOT need to `docker compose up` or export anything. If `pytest -m integration` errors with ECONNREFUSED, that is a real environment failure (report BLOCKED), not something to silently skip.
 
 2. **Exercise startup / migration paths end-to-end** if the slice touches them:
    - Migration slices: `alembic upgrade head` against a clean DB, then `alembic downgrade base`. Both must succeed.

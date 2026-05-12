@@ -1,19 +1,18 @@
-# Agent harness configuration — copy to config.yml and edit for your project.
+# Agent harness configuration — copy to config.yml and edit if needed.
 #
-# Required keys: image, branch_prefix, tracker.type, tracker.repo.
-# All other keys are optional with sensible defaults — delete the lines you
-# don't need rather than leaving placeholders.
+# This file is the project-specific starting point for chatgpt_task.
+# After copying:
+#   - Adjust agent models / turn budgets if you want.
+#   - Drop in the right CLAUDE_CODE_OAUTH_TOKEN in .env.local (separate file).
 
 image: agent-harness:latest
 
 # Branch naming convention: {prefix}{N}-{slug-from-issue-title}
-# Examples: "kanban-issue", "feat-", "issue-".
-branch_prefix: kanban-issue
+branch_prefix: issue-
 
 tracker:
   type: github
-  # Replace with <your-org>/<your-repo>. Used for `gh --repo <value>`.
-  repo: acme/example
+  repo: PaynePew/chatgpt_task
 
 defaults:
   model: claude-sonnet-4-6
@@ -28,34 +27,34 @@ agents:
   review:
     model: claude-opus-4-7
     max_turns: 30
+  # Merge is mechanical (rebase, conflict resolution, push) — haiku is enough.
   merge:
-    model: claude-sonnet-4-6
-    max_turns: 20
+    model: claude-haiku-4-5
+    max_turns: 30
 
-# Doc paths relative to the repo root. Omit any block your project doesn't have.
+# Doc paths follow the CLAUDE.md convention:
+#   doc/  (singular) — human-authored course / PRD docs
+#   docs/ (plural)   — agent-facing context (ADRs, agent guides)
 docs:
-  prd_dir: docs/prd
+  prd_dir: doc/PRD
   context: CONTEXT.md
   adr_dir: docs/adr
 
-# Replace with your project's test command, or delete the block entirely if
-# you don't gate on tests. Default below is commented out so a fresh clone
-# does not assume `pytest .` exists.
-# Examples:
-#   pytest .
-#   pytest backend/ && npm test --prefix frontend
-#   go test ./...
-#   cargo test
-# tests:
-#   block: <your test command>
+# Test gate runs in CI and locally before merge. Linting is folded in so a PR
+# with lint failures fails the test phase (one fewer round-trip).
+#
+# Integration tests are INCLUDED here because the agent container is now wired
+# to reach host Postgres/ElasticMQ via host.docker.internal (see run.ps1) and
+# `before-tests.sh` brings up the compose stack on the host before each run.
+# This prevents the "PR opens, CI red, agent comes back" loop that issue #10
+# triggered when integration regressions slipped past the review phase.
+tests:
+  block: uv run ruff check . && uv run ruff format --check . && uv run pytest
 
-# Replace with your project's typecheck command, or omit the block entirely.
-# Examples:
-#   npm run typecheck --prefix frontend
-#   mypy .
-#   tsc --noEmit
+# Typecheck is off in W1: ADR-002 explicitly defers mypy adoption.
+# Re-enable in W2 by uncommenting:
 # typecheck:
-#   block: <your typecheck command>
+#   block: uv run mypy app/
 
 commit:
-  style: Conventional Commits (feat/fix/test/docs/chore/refactor). One logical change per commit.
+  style: Conventional Commits (feat/fix/test/docs/chore/refactor/perf/ci). One logical change per commit. Reference the GitHub issue (Refs #N or Closes #N).

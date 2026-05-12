@@ -611,6 +611,14 @@ if ($SmokeTest) {
         # container and break `uv run`. The /tmp path is container-local;
         # each docker run rebuilds it via `uv sync` on demand (~30s).
         '--env',    'UV_PROJECT_ENVIRONMENT=/tmp/venv',
+        # Make the host's Postgres + ElasticMQ reachable from inside the
+        # container so the agent can run `pytest -m integration`. On Docker
+        # Desktop (Win/Mac) host.docker.internal resolves automatically;
+        # --add-host makes the same name work on Linux Docker too.
+        '--add-host', 'host.docker.internal:host-gateway',
+        '--env',    'DATABASE_URL=postgresql+asyncpg://app:app@host.docker.internal:5432/app',
+        '--env',    'ALEMBIC_DATABASE_URL=postgresql+psycopg://app:app@host.docker.internal:5432/app',
+        '--env',    'QUEUE_URL=http://host.docker.internal:9324/queue/task-queue',
         '--workdir', '/workspace',
         $imageName,
         'bash', '-lc', $claudeCmd
@@ -774,6 +782,14 @@ $dockerArgs = @(
     # container and break `uv run`. The /tmp path is container-local;
     # each docker run rebuilds it via `uv sync` on demand (~30s).
     '--env',    'UV_PROJECT_ENVIRONMENT=/tmp/venv',
+    # Make the host's Postgres + ElasticMQ reachable from inside the
+    # container so the agent can run `pytest -m integration`. On Docker
+    # Desktop (Win/Mac) host.docker.internal resolves automatically;
+    # --add-host makes the same name work on Linux Docker too.
+    '--add-host', 'host.docker.internal:host-gateway',
+    '--env',    'DATABASE_URL=postgresql+asyncpg://app:app@host.docker.internal:5432/app',
+    '--env',    'ALEMBIC_DATABASE_URL=postgresql+psycopg://app:app@host.docker.internal:5432/app',
+    '--env',    'QUEUE_URL=http://host.docker.internal:9324/queue/task-queue',
     '--workdir', '/workspace',
     $imageName,
     'bash', '-lc', $claudeInvocation
@@ -879,6 +895,14 @@ if ($Issue -and -not $SmokeTest -and $StartPhase -eq 'merge') {
         # container and break `uv run`. The /tmp path is container-local;
         # each docker run rebuilds it via `uv sync` on demand (~30s).
         '--env',    'UV_PROJECT_ENVIRONMENT=/tmp/venv',
+        # Make the host's Postgres + ElasticMQ reachable from inside the
+        # container so the agent can run `pytest -m integration`. On Docker
+        # Desktop (Win/Mac) host.docker.internal resolves automatically;
+        # --add-host makes the same name work on Linux Docker too.
+        '--add-host', 'host.docker.internal:host-gateway',
+        '--env',    'DATABASE_URL=postgresql+asyncpg://app:app@host.docker.internal:5432/app',
+        '--env',    'ALEMBIC_DATABASE_URL=postgresql+psycopg://app:app@host.docker.internal:5432/app',
+        '--env',    'QUEUE_URL=http://host.docker.internal:9324/queue/task-queue',
         '--workdir', '/workspace',
         $imageName,
         'bash', '-lc', $reviewCmd
@@ -957,6 +981,14 @@ if ($reviewOk -and $Issue -and -not $SmokeTest -and -not $SkipMerge) {
         # container and break `uv run`. The /tmp path is container-local;
         # each docker run rebuilds it via `uv sync` on demand (~30s).
         '--env',    'UV_PROJECT_ENVIRONMENT=/tmp/venv',
+        # Make the host's Postgres + ElasticMQ reachable from inside the
+        # container so the agent can run `pytest -m integration`. On Docker
+        # Desktop (Win/Mac) host.docker.internal resolves automatically;
+        # --add-host makes the same name work on Linux Docker too.
+        '--add-host', 'host.docker.internal:host-gateway',
+        '--env',    'DATABASE_URL=postgresql+asyncpg://app:app@host.docker.internal:5432/app',
+        '--env',    'ALEMBIC_DATABASE_URL=postgresql+psycopg://app:app@host.docker.internal:5432/app',
+        '--env',    'QUEUE_URL=http://host.docker.internal:9324/queue/task-queue',
         '--workdir', '/workspace',
         $imageName,
         'bash', '-lc', $mergeCmd

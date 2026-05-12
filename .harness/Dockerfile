@@ -1,24 +1,18 @@
-# Generic agent harness — base image
+# Project-customised agent harness — chatgpt_task
 #
-# Toolchain every project we've seen needs:
-# - Node 22 LTS (also a hard dependency of the claude CLI install)
-# - Python 3 + pip (for projects that use it)
-# - git, gh CLI, jq (VCS + GitHub API + JSON wrangling)
-# - claude CLI (the agent runtime; uses OAuth via env var)
+# Forked from kanban-harness v0.1.1 (upstream sha 90fb5fb).
+# Project-specific additions beyond the generic base:
+#   - `uv` binary copied from astral-sh image (matches the runtime Dockerfile
+#     at repo root; required because prompts/implement.md tells the agent to
+#     run `uv run pytest`).
+#   - `postgresql-client` for ad-hoc DB introspection during integration tests.
 #
-# Project-level dependencies (npm install / pip install -r requirements.txt /
-# go mod download / etc.) are NOT baked in. The orchestrator runs them
-# per-container on startup so the image stays generic across projects.
-# Add language-specific toolchains by extending this file in your project's
-# fork or by maintaining a project-specific Dockerfile that FROMs this one.
-#
-# Patterns adopted from .sandcastle/Dockerfile:
-#   - Rename the base image's `node` user (UID 1000) to `agent` instead of
-#     creating a new one — keeps UID 1000 stable for bind-mount ownership.
-#   - PIP_BREAK_SYSTEM_PACKAGES=1 so per-run pip install hooks don't fail
-#     under Debian 12's PEP 668 lockdown.
-#   - Install Claude CLI via the official install.sh — sets up ~/.claude
-#     skeleton correctly and matches Anthropic's recommended install path.
+# Why uv is baked into the image and not installed per-run:
+#   Earlier slices (issue #10) had the agent hit `uv: command not found`,
+#   fall back to `pip3 install pytest`, and skip integration tests entirely.
+#   That mode let SQLAlchemy-session / migration / queue bugs slip through to
+#   GitHub Actions CI. Baking uv in lets the agent honour the prompt's
+#   "run integration before claiming COMPLETE" instruction.
 
 FROM node:22-bookworm-slim
 
@@ -26,6 +20,7 @@ FROM node:22-bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git curl ca-certificates build-essential jq \
     python3 python3-pip python3-venv \
+    postgresql-client \
     && rm -rf /var/lib/apt/lists/*
 
 # Allow pip to install into system Python inside the container
@@ -39,6 +34,10 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
       | tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
     && apt-get update && apt-get install -y --no-install-recommends gh \
     && rm -rf /var/lib/apt/lists/*
+
+# uv — pinned to match the project runtime Dockerfile at repo root.
+# Bump deliberately when the runtime image is bumped.
+COPY --from=ghcr.io/astral-sh/uv:0.5.20 /uv /uvx /usr/local/bin/
 
 # Rename the base image's `node` user (UID 1000) to `agent` and move its
 # home dir. Avoids a UID collision that would happen if we created a new
@@ -58,4 +57,4 @@ ENV PATH="/home/agent/.local/bin:$PATH"
 WORKDIR /workspace
 
 # Sanity: print versions on container start unless overridden
-CMD ["bash", "-lc", "node --version && python3 --version && git --version && gh --version | head -1 && claude --version"]
+CMD ["bash", "-lc", "node --version && python3 --version && uv --version && git --version && gh --version | head -1 && claude --version"]
