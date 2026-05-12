@@ -42,7 +42,7 @@ async def handle_task_status(
     include_runs = bool(arguments.get("include_runs", False))
 
     try:
-        job_id = int(job_id_raw)  # type: ignore[arg-type]
+        job_id = int(job_id_raw)
     except (TypeError, ValueError):
         return error(
             "USER_INPUT",
