@@ -1,21 +1,19 @@
-"""Shared pytest fixtures.
-
-async_session and sqs_client are stubbed out here so S02/S06 can activate them
-without changing the fixture interface. Tests that use these fixtures will be
-skipped until the underlying infrastructure is wired.
-"""
+"""Shared pytest fixtures."""
 
 import pytest
+import pytest_asyncio
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.db.engine import async_session_factory
 
 
-@pytest.fixture
-async def async_session():
-    """Yield an AsyncSession with automatic rollback at teardown.
-
-    TODO (S02): activate once app/db/engine.py exists.
-    """
-    pytest.skip("async_session not available until S02 lands app/db/engine.py")
-    yield  # pragma: no cover
+@pytest_asyncio.fixture
+async def async_session() -> AsyncSession:
+    """Yield an AsyncSession with automatic rollback at teardown."""
+    async with async_session_factory() as session:
+        async with session.begin():
+            yield session
+            await session.rollback()
 
 
 @pytest.fixture(scope="session")
