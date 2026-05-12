@@ -12,7 +12,7 @@ from app.mcp.status_mapping import to_external
 
 logger = logging.getLogger(__name__)
 
-_TASK_STATUS_SCHEMA: dict[str, Any] = {
+TASK_STATUS_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "job_id": {

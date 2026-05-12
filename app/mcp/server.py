@@ -14,7 +14,7 @@ from app.db.engine import async_session_factory
 from app.domain.jobs import create_job
 from app.mcp.envelope import error, success
 from app.mcp.errors import map_domain_error
-from app.mcp.handlers.status import _TASK_STATUS_SCHEMA, handle_task_status
+from app.mcp.handlers.status import TASK_STATUS_SCHEMA, handle_task_status
 
 logger = logging.getLogger(__name__)
 
@@ -103,7 +103,7 @@ def create_server(user_id: str) -> Server:
                     "returns the most recent 10 execution runs. Returns NOT_FOUND for "
                     "unknown or cross-user job_id."
                 ),
-                inputSchema=_TASK_STATUS_SCHEMA,
+                inputSchema=TASK_STATUS_SCHEMA,
             ),
             types.Tool(
                 name="task.list_actions@v1",
