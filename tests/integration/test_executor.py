@@ -260,3 +260,91 @@ async def test_concurrent_workers_duplicate_message_exactly_one_execution(sessio
 
     # Both workers call delete_message: winner after completion, loser after no-op claim
     assert delete_count == 2
+
+
+@pytest.mark.integration
+async def test_invalid_params_marks_run_failed_and_deletes_message(session_factory, sqs):
+    """Echo job with missing 'message' field → FAILED within one cycle; SQS message gone."""
+    job, run = await _insert_queued_run(
+        session_factory,
+        action="echo",
+        action_params={},  # missing required "message"
+    )
+    message = _make_sqs_message(run.run_id, job.job_id)
+
+    deleted_receipts: list[str] = []
+    sqs.delete_message = deleted_receipts.append
+
+    await process_one(session_factory, sqs, message, registry=ACTION_REGISTRY)
+
+    async with session_factory() as session:
+        async with session.begin():
+            updated_run = (
+                await session.execute(select(JobRun).where(JobRun.run_id == run.run_id))
+            ).scalar_one()
+            events = (
+                (await session.execute(select(RunEvent).where(RunEvent.run_id == run.run_id)))
+                .scalars()
+                .all()
+            )
+
+    assert updated_run.status == "FAILED"
+    assert updated_run.finish_at is not None
+    assert updated_run.error_message is not None
+    assert "invalid params" in updated_run.error_message
+
+    event_types = {e.event_type for e in events}
+    assert "STARTED" in event_types
+    assert "FAILED" in event_types
+
+    failed_event = next(e for e in events if e.event_type == "FAILED")
+    assert failed_event.status_from == "RUNNING"
+    assert failed_event.status_to == "FAILED"
+    assert failed_event.event_data is not None
+
+    # SQS message must be deleted — no more redelivery
+    assert message["ReceiptHandle"] in deleted_receipts
+
+
+@pytest.mark.integration
+async def test_unknown_action_marks_run_failed_and_deletes_message(session_factory, sqs):
+    """Job with unregistered action → FAILED within one cycle; SQS message gone."""
+    job, run = await _insert_queued_run(
+        session_factory,
+        action="nonexistent_action_xyz",
+        action_params={"key": "val"},
+    )
+    message = _make_sqs_message(run.run_id, job.job_id)
+
+    deleted_receipts: list[str] = []
+    sqs.delete_message = deleted_receipts.append
+
+    # Use the real ACTION_REGISTRY (which has no "nonexistent_action_xyz")
+    await process_one(session_factory, sqs, message, registry=ACTION_REGISTRY)
+
+    async with session_factory() as session:
+        async with session.begin():
+            updated_run = (
+                await session.execute(select(JobRun).where(JobRun.run_id == run.run_id))
+            ).scalar_one()
+            events = (
+                (await session.execute(select(RunEvent).where(RunEvent.run_id == run.run_id)))
+                .scalars()
+                .all()
+            )
+
+    assert updated_run.status == "FAILED"
+    assert updated_run.finish_at is not None
+    assert updated_run.error_message is not None
+    assert "unknown action" in updated_run.error_message
+
+    event_types = {e.event_type for e in events}
+    assert "STARTED" in event_types
+    assert "FAILED" in event_types
+
+    failed_event = next(e for e in events if e.event_type == "FAILED")
+    assert failed_event.status_from == "RUNNING"
+    assert failed_event.status_to == "FAILED"
+
+    # SQS message must be deleted — no more redelivery
+    assert message["ReceiptHandle"] in deleted_receipts

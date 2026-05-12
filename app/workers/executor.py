@@ -96,6 +96,35 @@ async def _write_terminal(
     )
 
 
+async def _write_permanent_failure(
+    session: AsyncSession,
+    run_id: int,
+    job_id: int,
+    error_message: str,
+    event_data: dict | None = None,
+) -> None:
+    """Write FAILED terminal status + RunEvent for a permanently-invalid job.
+
+    Called inside session.begin(). Does not DeleteMessage — caller is responsible.
+    """
+    now = datetime.now(tz=UTC)
+    await session.execute(
+        update(JobRun)
+        .where(JobRun.run_id == run_id)
+        .values(status="FAILED", finish_at=now, updated_at=now, error_message=error_message)
+    )
+    session.add(
+        RunEvent(
+            run_id=run_id,
+            job_id=job_id,
+            event_type="FAILED",
+            status_from="RUNNING",
+            status_to="FAILED",
+            event_data=event_data,
+        )
+    )
+
+
 async def process_one(
     session_factory: async_sessionmaker[AsyncSession],
     sqs: SQSClient,
@@ -136,19 +165,54 @@ async def process_one(
         return
 
     if job is None or run is None:
-        logger.error("run_id=%s: job or run not found after claim; leaving message", run_id)
+        # Row was deleted between claim and load — can't write terminal state.
+        logger.error(
+            "run_id=%s job_id=%s: job/run row missing after successful claim; deleting message",
+            run_id,
+            job_id,
+        )
+        sqs.delete_message(receipt)
         return
 
     # Phase 2: resolve handler + parse params
     handler = registry.get(job.action)
     if handler is None:
-        logger.error("run_id=%s: unknown action %r; leaving message", run_id, job.action)
+        logger.warning(
+            "run_id=%s job_id=%s action=%r: unknown action; marking FAILED",
+            run_id,
+            job_id,
+            job.action,
+        )
+        async with session_factory() as session:
+            async with session.begin():
+                await _write_permanent_failure(
+                    session,
+                    run_id,
+                    job_id,
+                    error_message=f"unknown action: {job.action!r}",
+                )
+        sqs.delete_message(receipt)
         return
 
     try:
         params = handler.params_model.model_validate(job.action_params)
-    except Exception:
-        logger.exception("run_id=%s: params validation failed; leaving message", run_id)
+    except Exception as exc:
+        logger.warning(
+            "run_id=%s job_id=%s action=%r: params validation failed; marking FAILED",
+            run_id,
+            job_id,
+            job.action,
+        )
+        async with session_factory() as session:
+            async with session.begin():
+                await _write_permanent_failure(
+                    session,
+                    run_id,
+                    job_id,
+                    error_message=f"invalid params: {exc}",
+                    event_data={"error": str(exc)},
+                )
+        sqs.delete_message(receipt)
         return
 
     # Phase 3: dispatch with per-action timeout (S07a: exception/timeout → leave message)
