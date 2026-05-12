@@ -18,9 +18,8 @@ import json
 import logging
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-from sqlalchemy.future import select
 
 from app.db.models import JobRun, RunEvent
 from app.queue.sqs import SQSClient
