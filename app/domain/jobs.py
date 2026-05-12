@@ -205,6 +205,10 @@ async def cancel_job(
             raise InvalidStateError(current_status)
 
         for run in non_terminal:
+            # Capture the pre-update status: SQLAlchemy's bulk update() with the
+            # default synchronize_session="auto" mutates the in-memory ORM
+            # instance, so reading run.status after execute() yields 'CANCELLED'.
+            original_status = run.status
             await session.execute(
                 update(JobRun)
                 .where(JobRun.run_id == run.run_id, JobRun.time_bucket == run.time_bucket)
@@ -214,7 +218,7 @@ async def cancel_job(
                 run_id=run.run_id,
                 job_id=job_id,
                 event_type="CANCELLED",
-                status_from=run.status,
+                status_from=original_status,
                 status_to="CANCELLED",
             )
             session.add(event)
