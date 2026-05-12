@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from app.actions.base import ActionResult
-from app.workers.executor import _claim, _write_terminal, process_one
+from app.workers.executor import _claim, _write_permanent_failure, _write_terminal, process_one
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -410,3 +410,255 @@ async def test_process_one_duplicate_delivery_exactly_one_wins():
     assert handler.execute.await_count == 1
     # delete_message called twice: winner completes + loser no-ops
     assert sqs.delete_message.call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# _write_permanent_failure unit tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_write_permanent_failure_updates_run_and_inserts_event():
+    """_write_permanent_failure writes FAILED status and a FAILED RunEvent."""
+    session = MagicMock()
+    session.execute = AsyncMock(return_value=MagicMock())
+    session.add = MagicMock()
+
+    await _write_permanent_failure(
+        session,
+        run_id=7,
+        job_id=3,
+        error_message="invalid params: missing field",
+        event_data={"error": "missing field"},
+    )
+
+    session.execute.assert_awaited_once()
+    session.add.assert_called_once()
+    added = session.add.call_args[0][0]
+    assert added.event_type == "FAILED"
+    assert added.status_from == "RUNNING"
+    assert added.status_to == "FAILED"
+    assert added.event_data == {"error": "missing field"}
+
+
+# ---------------------------------------------------------------------------
+# process_one — job/run row missing after claim (permanent failure)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_process_one_job_not_found_deletes_message():
+    """Job row missing after claim → DeleteMessage, no terminal write."""
+    run = _make_run()
+    session = _make_session(claim_wins=True, job=None, run=run)
+    factory = _make_factory(session)
+    sqs = MagicMock()
+
+    await process_one(factory, sqs, _make_message(), registry={"echo": MagicMock()})
+
+    sqs.delete_message.assert_called_once_with("receipt-1")
+    # Only RunEvent(STARTED) written — no FAILED since row is gone
+    assert session.add.call_count == 1
+    assert session.add.call_args[0][0].event_type == "STARTED"
+
+
+@pytest.mark.asyncio
+async def test_process_one_run_not_found_deletes_message():
+    """Run row missing after claim → DeleteMessage, no terminal write."""
+    job = _make_job()
+    session = _make_session(claim_wins=True, job=job, run=None)
+    factory = _make_factory(session)
+    sqs = MagicMock()
+
+    await process_one(factory, sqs, _make_message(), registry={"echo": MagicMock()})
+
+    sqs.delete_message.assert_called_once_with("receipt-1")
+    assert session.add.call_count == 1
+    assert session.add.call_args[0][0].event_type == "STARTED"
+
+
+# ---------------------------------------------------------------------------
+# process_one — unknown action (permanent failure → FAILED + DeleteMessage)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_process_one_unknown_action_deletes_message():
+    """Unknown action → DeleteMessage."""
+    job = _make_job(action="nonexistent")
+    run = _make_run()
+    session = _make_session(claim_wins=True, job=job, run=run)
+    factory = _make_factory(session)
+    sqs = MagicMock()
+
+    await process_one(factory, sqs, _make_message(), registry={})
+
+    sqs.delete_message.assert_called_once_with("receipt-1")
+
+
+@pytest.mark.asyncio
+async def test_process_one_unknown_action_writes_failed_event():
+    """Unknown action → FAILED RunEvent written."""
+    job = _make_job(action="nonexistent")
+    run = _make_run()
+    session = _make_session(claim_wins=True, job=job, run=run)
+    factory = _make_factory(session)
+    sqs = MagicMock()
+
+    await process_one(factory, sqs, _make_message(), registry={})
+
+    # session.add: RunEvent(STARTED) + RunEvent(FAILED)
+    assert session.add.call_count == 2
+    events = [c[0][0] for c in session.add.call_args_list]
+    event_types = {e.event_type for e in events}
+    assert "STARTED" in event_types
+    assert "FAILED" in event_types
+
+    failed_event = next(e for e in events if e.event_type == "FAILED")
+    assert failed_event.status_from == "RUNNING"
+    assert failed_event.status_to == "FAILED"
+
+
+@pytest.mark.asyncio
+async def test_process_one_unknown_action_does_not_call_handler():
+    """Unknown action → handler is never invoked."""
+    job = _make_job(action="nonexistent")
+    run = _make_run()
+    session = _make_session(claim_wins=True, job=job, run=run)
+    factory = _make_factory(session)
+    sqs = MagicMock()
+    handler = _make_handler(ActionResult(ok=True, result={}, error=None))
+
+    # "echo" handler registered but job uses "nonexistent" — should never execute
+    await process_one(factory, sqs, _make_message(), registry={"echo": handler})
+
+    handler.execute.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# process_one — invalid params (permanent failure → FAILED + DeleteMessage)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_process_one_invalid_params_deletes_message():
+    """Params validation failure → DeleteMessage."""
+    job = _make_job(action="echo", action_params={})  # missing "message"
+    run = _make_run()
+    session = _make_session(claim_wins=True, job=job, run=run)
+    factory = _make_factory(session)
+    sqs = MagicMock()
+
+    broken_handler = MagicMock()
+    broken_handler.params_model = MagicMock()
+    broken_handler.params_model.model_validate = MagicMock(
+        side_effect=ValueError("missing required field")
+    )
+    registry = {"echo": broken_handler}
+
+    await process_one(factory, sqs, _make_message(), registry=registry)
+
+    sqs.delete_message.assert_called_once_with("receipt-1")
+
+
+@pytest.mark.asyncio
+async def test_process_one_invalid_params_writes_failed_event():
+    """Params validation failure → FAILED RunEvent with error in event_data."""
+    job = _make_job(action="echo", action_params={})
+    run = _make_run()
+    session = _make_session(claim_wins=True, job=job, run=run)
+    factory = _make_factory(session)
+    sqs = MagicMock()
+
+    broken_handler = MagicMock()
+    broken_handler.params_model = MagicMock()
+    broken_handler.params_model.model_validate = MagicMock(
+        side_effect=ValueError("missing required field")
+    )
+    registry = {"echo": broken_handler}
+
+    await process_one(factory, sqs, _make_message(), registry=registry)
+
+    assert session.add.call_count == 2
+    events = [c[0][0] for c in session.add.call_args_list]
+    failed_event = next(e for e in events if e.event_type == "FAILED")
+    assert failed_event.status_from == "RUNNING"
+    assert failed_event.status_to == "FAILED"
+    assert failed_event.event_data is not None
+    assert "error" in failed_event.event_data
+
+
+@pytest.mark.asyncio
+async def test_process_one_invalid_params_error_message_contains_detail():
+    """Params validation failure → error_message in job_runs includes the exception text."""
+    job = _make_job(action="echo", action_params={})
+    run = _make_run()
+
+    # Capture the UPDATE call to inspect the values dict
+    claim_result = MagicMock()
+    claim_result.first.return_value = MagicMock()
+    run_result = MagicMock()
+    run_result.scalar_one_or_none.return_value = run
+    terminal_result = MagicMock()
+
+    session = MagicMock()
+    session.execute = AsyncMock(side_effect=[claim_result, run_result, terminal_result])
+    session.get = AsyncMock(return_value=job)
+    session.add = MagicMock()
+    session.begin = MagicMock(return_value=_async_cm(None))
+
+    factory = _make_factory(session)
+    sqs = MagicMock()
+
+    broken_handler = MagicMock()
+    broken_handler.params_model = MagicMock()
+    broken_handler.params_model.model_validate = MagicMock(
+        side_effect=ValueError("missing required field")
+    )
+    registry = {"echo": broken_handler}
+
+    await process_one(factory, sqs, _make_message(), registry=registry)
+
+    # Verify the FAILED event's error info is set via session.add
+    failed_event = next(
+        e for e in [c[0][0] for c in session.add.call_args_list] if e.event_type == "FAILED"
+    )
+    assert "missing required field" in str(failed_event.event_data)
+
+
+# ---------------------------------------------------------------------------
+# process_one — handler exception still leaves message (S07a regression guard)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_process_one_handler_exception_still_leaves_message_after_fix():
+    """S07a regression: handler exception must still leave message (not FAILED)."""
+    job = _make_job()
+    run = _make_run()
+
+    claim_result = MagicMock()
+    claim_result.first.return_value = MagicMock()
+    run_result = MagicMock()
+    run_result.scalar_one_or_none.return_value = run
+
+    session = MagicMock()
+    session.execute = AsyncMock(side_effect=[claim_result, run_result])
+    session.get = AsyncMock(return_value=job)
+    session.add = MagicMock()
+    session.begin = MagicMock(return_value=_async_cm(None))
+
+    factory = _make_factory(session)
+    sqs = MagicMock()
+
+    broken_handler = MagicMock()
+    broken_handler.execute = AsyncMock(side_effect=RuntimeError("transient network failure"))
+    broken_handler.timeout_seconds = 10
+    broken_handler.params_model = MagicMock()
+    broken_handler.params_model.model_validate = MagicMock(return_value=MagicMock())
+    registry = {"echo": broken_handler}
+
+    await process_one(factory, sqs, _make_message(), registry=registry)
+
+    # Message must NOT be deleted — S07b will handle retry
+    sqs.delete_message.assert_not_called()
