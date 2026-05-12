@@ -1,10 +1,16 @@
-"""Worker executor — happy path (claim, dispatch, terminal).
+"""Worker executor — claim, dispatch, terminal.
 
 S07a scope (per issue #7):
 - receive → claim → dispatch → SUCCEEDED (ok=True) → DeleteMessage
 - receive → claim → dispatch → FAILED (ok=False, retryable=False) → DeleteMessage
 - ok=False, retryable=True: log + leave message (S07b adds retry/heartbeat)
 - exception / timeout: log + leave message (SQS visibility expiry handles redelivery)
+
+Issue #26 — pre-dispatch permanent failures (write FAILED + DeleteMessage so
+the message exits the queue instead of infinite-looping via redelivery):
+- job/row missing after successful claim → DeleteMessage only (no row to update)
+- unknown action → FAILED + DeleteMessage
+- params validation raises → FAILED + DeleteMessage
 
 The claim is atomic: UPDATE ... WHERE status IN ('PENDING','QUEUED') RETURNING ...
 Only one worker wins on duplicate delivery; the other no-ops and DeleteMessages.
