@@ -1,10 +1,10 @@
 # ─────────────────────────────────────────────
 # Personal learning notes (kept local only)
 # 包含 grilling session 的決策紀錄、面試題庫、AWS 速查、講義整理。
+# 整個資料夾改名為 .doc/(hidden)以視覺上區隔於 docs/。
 # 之後若想備份建議另開 private repo。
 # ─────────────────────────────────────────────
-doc/learn/
-doc/session/
+.doc/
 
 # ─────────────────────────────────────────────
 # Python

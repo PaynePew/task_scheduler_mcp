@@ -10,29 +10,30 @@ files at the repo root:
 | `docs/PRD/` | Product requirements (e.g. `prototype-w1.md`). |
 | `docs/agents/` | Agent-facing process docs (this file, issue-tracker, triage-labels). |
 
-## Legacy course material under `doc/` (singular)
+## Local-only course material under `.doc/` (hidden, gitignored)
 
-Earlier course / grilling-session artefacts still live under `doc/`
-(singular) for historical reasons. They are background-only — do NOT
-treat them as authoritative when they disagree with `CONTEXT.md` or an
-ADR:
+Author's course notes and grilling-session artefacts live under `.doc/`
+(hidden dir, **not in git** — see `.gitignore`). They exist on the
+author's machine only and are background-only — do NOT treat them as
+authoritative when they disagree with `CONTEXT.md` or an ADR:
 
-- `doc/learn/` — course study notes (system-design, mcp-protocol,
+- `.doc/learn/` — course study notes (system-design, mcp-protocol,
   aws-deep-dive, course-spec, interview-questions)
-- `doc/session/` — grilling-session decision logs (`grilling-state.md`,
+- `.doc/session/` — grilling-session decision logs (`grilling-state.md`,
   cited by ADRs as their `Source:` line)
 
 When a skill needs project context, it should read `CONTEXT.md` first,
 then the PRD under `docs/PRD/`, then relevant ADRs under `docs/adr/`.
-Fall back to `doc/session/grilling-state.md` only when tracing *why* an
-ADR was decided the way it was.
+Fall back to `.doc/session/grilling-state.md` only when tracing *why* an
+ADR was decided the way it was — and only when the file actually exists
+locally; on a fresh clone this path is intentionally absent.
 
 ## Reading rules
 
 - Read `CONTEXT.md` whenever a skill needs domain vocabulary.
 - Read every file under `docs/adr/` whose subject overlaps the area being
   changed — ADRs encode prior decisions and the reasoning to revisit them.
-- `doc/learn/*.md` files are study notes, not authoritative; use them as
+- `.doc/learn/*.md` files are study notes, not authoritative; use them as
   background, not as a substitute for `CONTEXT.md` or ADRs.
 
 ## Multi-context (not used)

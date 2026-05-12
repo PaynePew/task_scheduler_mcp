@@ -2,7 +2,7 @@
 
 - **Status**: Accepted
 - **Date**: 2026-05-12
-- **Source**: doc/session/grilling-state.md Q4
+- **Source**: .doc/session/grilling-state.md Q4
 - **Related**: ADR-008 (queue), ADR-009 (schema)
 
 ## Context
@@ -28,4 +28,4 @@ Non-functional requirement states "10K jobs/sec peak". The course material sugge
 
 - We commit to a single-writer Postgres in W3; horizontal scale path is RDS Proxy + read replicas (for read-heavy bonuses) and sharding only if 10K is confirmed sustained (open question with instructor).
 - `FOR UPDATE SKIP LOCKED` becomes the load-bearing primitive — the same pattern used in Oban / River / PgBoss.
-- We must defend "Postgres over DynamoDB" in interview; the answer-back is documented in `doc/learn/course-spec.md` § 10.
+- We must defend "Postgres over DynamoDB" in interview; the answer-back is documented in `.doc/learn/course-spec.md` § 10.

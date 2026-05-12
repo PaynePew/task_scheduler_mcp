@@ -2,7 +2,7 @@
 
 - **Status**: Accepted
 - **Date**: 2026-05-12
-- **Source**: doc/session/grilling-state.md Q5b
+- **Source**: .doc/session/grilling-state.md Q5b
 - **Related**: ADR-004 (ECS Fargate), ADR-006 (MCP transport)
 
 ## Context
@@ -15,7 +15,7 @@ Use **AWS Application Load Balancer (ALB)** as the public entrypoint. ALB termin
 
 ## Alternatives considered
 
-- **API Gateway HTTP API** — cheapest, but the **30-second idle timeout is not configurable** and will sever MCP SSE responses that take longer. Full reasoning in `doc/learn/aws-deep-dive.md` § 1.
+- **API Gateway HTTP API** — cheapest, but the **30-second idle timeout is not configurable** and will sever MCP SSE responses that take longer. Full reasoning in `.doc/learn/aws-deep-dive.md` § 1.
 - **API Gateway REST API** — same 30s idle limitation; more expensive than HTTP API.
 - **NLB (Network Load Balancer)** — layer-4 only, no path routing, no TLS termination convenience; we'd need a sidecar.
 - **CloudFront in front of ALB** — adds latency and edge complexity for no resume-narrative win at W3 scope.

@@ -2,7 +2,7 @@
 
 - **Status**: Accepted
 - **Date**: 2026-05-12
-- **Source**: doc/session/grilling-state.md Q9
+- **Source**: .doc/session/grilling-state.md Q9
 - **Related**: ADR-003 (Postgres), ADR-007 (Watcher HA), ADR-013 (action catalog)
 
 ## Context
@@ -39,4 +39,4 @@ We deliberately **do not** physically partition `jobs` by `user_id`. At prototyp
 - Audit trail is free.
 - Schema includes W2 bonus columns (`cron_expr`, `trigger_on_job_id`, `trigger_on_status`, `raw_user_input`, `parsing_metadata`) from day 1 to avoid W2 migration churn.
 - W1 partitioning via column-only means watcher queries are still O(log n) within the current `time_bucket`; W2 native partitioning makes pruning explicit.
-- Full schema lives in `doc/learn/system-design.md` § 7.4 — this ADR records *why*, not the column list.
+- Full schema lives in `.doc/learn/system-design.md` § 7.4 — this ADR records *why*, not the column list.

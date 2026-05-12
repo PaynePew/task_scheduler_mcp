@@ -2,7 +2,7 @@
 
 - **Status**: Accepted
 - **Date**: 2026-05-12
-- **Source**: doc/session/grilling-state.md Q13
+- **Source**: .doc/session/grilling-state.md Q13
 - **Related**: ADR-010 (module layout), ADR-014 (tool surface)
 
 ## Context

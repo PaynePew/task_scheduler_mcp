@@ -2,7 +2,7 @@
 
 - **Status**: Accepted
 - **Date**: 2026-05-12
-- **Source**: doc/session/grilling-state.md Q7
+- **Source**: .doc/session/grilling-state.md Q7
 - **Related**: ADR-003 (Postgres), ADR-009 (schema)
 
 ## Context

@@ -2,7 +2,7 @@
 
 - **Status**: Accepted
 - **Date**: 2026-05-12
-- **Source**: doc/session/grilling-state.md Q14
+- **Source**: .doc/session/grilling-state.md Q14
 - **Related**: ADR-013 (action catalog), ADR-015 (user_id resolver)
 
 ## Context

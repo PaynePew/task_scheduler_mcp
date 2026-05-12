@@ -2,7 +2,7 @@
 
 - **Status**: Accepted
 - **Date**: 2026-05-12
-- **Source**: doc/session/grilling-state.md Q11
+- **Source**: .doc/session/grilling-state.md Q11
 - **Related**: ADR-002 (Python), ADR-003 (Postgres), ADR-010 (module layout)
 
 ## Context

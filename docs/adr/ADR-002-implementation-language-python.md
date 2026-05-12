@@ -2,7 +2,7 @@
 
 - **Status**: Accepted
 - **Date**: 2026-05-12
-- **Source**: doc/session/grilling-state.md Q3
+- **Source**: .doc/session/grilling-state.md Q3
 
 ## Context
 

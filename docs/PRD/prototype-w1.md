@@ -1,10 +1,10 @@
 # PRD: ChatGPT Task Scheduler — W1 Prototype
 
-> **Scope**: Local prototype (W1 of 4-week plan). Postgres + SQS-emulator + Docker Compose. **Not** in scope here: bonuses (W2), AWS deployment (W3), observability/CI/CD (W4) — see "Out of Scope" + companion docs in `doc/learn/`.
+> **Scope**: Local prototype (W1 of 4-week plan). Postgres + SQS-emulator + Docker Compose. **Not** in scope here: bonuses (W2), AWS deployment (W3), observability/CI/CD (W4) — see "Out of Scope" + companion docs in `.doc/learn/`.
 >
 > **Deliverable**: A runnable MCP-based job scheduler validated by the inspector flow in `PROMPT.md`.
 >
-> **Status**: Design 100% locked. Source decisions in `doc/session/grilling-state.md` (Q1–Q15) + `doc/learn/`.
+> **Status**: Design 100% locked. Source decisions in `.doc/session/grilling-state.md` (Q1–Q15) + `.doc/learn/`.
 >
 > **Generated**: 2026-05-12 via `/to-prd` after Grilling Session #2.
 
@@ -127,7 +127,7 @@ W1 runs all six locally via Docker Compose. W3 each becomes its own ECS Fargate 
 
 ### D2. Data model (Q9, Q13)
 
-Three tables — full schema in `doc/learn/system-design.md` § 7.4. Concept summary:
+Three tables — full schema in `.doc/learn/system-design.md` § 7.4. Concept summary:
 
 - **`jobs`** — mutable definition. Includes `user_id`, `description`, `action`, `action_params (JSONB)`, scheduling fields (`scheduled_at` for one-shot, `cron_expr` for recurring, `timezone`), `idempotency_key UNIQUE`, chaining fields (`trigger_on_job_id`, `trigger_on_status`), LLM-bonus fields (`raw_user_input`, `parsing_metadata`).
 - **`job_runs`** — execution instance. Partition key column `time_bucket` (W1 indexed; W2 upgrades to native `PARTITION BY RANGE`). Composite PK `(time_bucket, run_id)`. Includes lifecycle status, retry counters, `wait_for_run_id` (chaining), audit timestamps. Partial index on `(time_bucket, scheduled_at) WHERE status IN ('PENDING','WAITING')` is the watcher's hot query.
@@ -160,7 +160,7 @@ Failure: {"ok": false, "error": {"code", "message", "field", "expected"}}
 
 with `code` drawn from a fixed vocabulary: `USER_INPUT`, `NOT_FOUND`, `INVALID_STATE`, `UNKNOWN_ACTION`, `DUPLICATE`, `INTERNAL`.
 
-The complete inputSchema for each tool is locked in `doc/learn/system-design.md` § 7.4 and re-stated in `course-spec.md`. The five tools are:
+The complete inputSchema for each tool is locked in `.doc/learn/system-design.md` § 7.4 and re-stated in `course-spec.md`. The five tools are:
 
 - **`task.create@v1`** — creates a `Job` (and an initial `JobRun` for one-shot/immediate).
 - **`task.list@v1`** — returns the user's jobs newest-first with optional status filter, time range, and offset pagination.
@@ -168,7 +168,7 @@ The complete inputSchema for each tool is locked in `doc/learn/system-design.md`
 - **`task.cancel@v1`** — flips eligible jobs to `CANCELLED`, errors with `INVALID_STATE` for terminal jobs.
 - **`task.list_actions@v1`** — returns the action registry: name, description, timeout, JSON Schema for params. The LLM is instructed to call this once per thread to learn parameter shapes.
 
-A `~125`-token system instruction guides the LLM to call `task.list_actions@v1` once at the start of a thread and to default timezone to UTC + schedule_type to `immediate` when the user is silent — full text in `doc/learn/course-spec.md` § 7.4.
+A `~125`-token system instruction guides the LLM to call `task.list_actions@v1` once at the start of a thread and to default timezone to UTC + schedule_type to `immediate` when the user is silent — full text in `.doc/learn/course-spec.md` § 7.4.
 
 ### D5. Action handler protocol (Q13)
 
@@ -352,12 +352,12 @@ These belong to later weeks (W2/W3/W4) or the future-upgrade list in `system-des
 
 ### Companion documents (must-read for implementers)
 
-- **`doc/session/grilling-state.md`** — decision ledger Q1–Q15, single source of truth for "why each thing is the way it is".
-- **`doc/learn/system-design.md`** — full schema, 4-week plan, 27-item upgrade backlog.
-- **`doc/learn/mcp-protocol.md`** — MCP transport details and tool design rationale.
-- **`doc/learn/course-spec.md`** — course material structured + our deviations defended.
-- **`doc/learn/aws-deep-dive.md`** — quotas/gotchas relevant for W3.
-- **`doc/learn/interview-questions.md`** — accumulated 60+ Q&A keyed by topic; use as study guide before interviews.
+- **`.doc/session/grilling-state.md`** — decision ledger Q1–Q15, single source of truth for "why each thing is the way it is".
+- **`.doc/learn/system-design.md`** — full schema, 4-week plan, 27-item upgrade backlog.
+- **`.doc/learn/mcp-protocol.md`** — MCP transport details and tool design rationale.
+- **`.doc/learn/course-spec.md`** — course material structured + our deviations defended.
+- **`.doc/learn/aws-deep-dive.md`** — quotas/gotchas relevant for W3.
+- **`.doc/learn/interview-questions.md`** — accumulated 60+ Q&A keyed by topic; use as study guide before interviews.
 - **`PROMPT.md`** — the original course assignment + verification checklist for W1 inspector flow.
 
 ### Verification
@@ -390,4 +390,4 @@ If a future implementer disagrees with any decision, that's the audit trail to r
 
 ---
 
-*Generated 2026-05-12 from doc/session/grilling-state.md (Q1–Q15) + doc/learn/* via /to-prd.*
+*Generated 2026-05-12 from .doc/session/grilling-state.md (Q1–Q15) + .doc/learn/* via /to-prd.*
