@@ -29,7 +29,8 @@ async def test_unsupported_schedule_type_raises_before_db(bad_schedule_type):
     """create_job must reject any schedule_type other than 'immediate' before
     touching the DB. Prevents silent degradation to one-shot-now when a future
     slice (S10 future scheduling, S13 recurring) passes an unimplemented value."""
-    with pytest.raises(UnsupportedScheduleTypeError, match=bad_schedule_type if bad_schedule_type else ""):
+    match_pattern = bad_schedule_type if bad_schedule_type else ""
+    with pytest.raises(UnsupportedScheduleTypeError, match=match_pattern):
         await create_job(
             None,  # session intentionally None — should never be accessed
             user_id="u1",
