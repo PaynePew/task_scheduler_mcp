@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock
 
@@ -342,8 +343,6 @@ async def test_process_one_handler_exception_leaves_message():
 @pytest.mark.asyncio
 async def test_process_one_handler_timeout_leaves_message():
     """Handler times out → do NOT DeleteMessage."""
-    import asyncio as _asyncio
-
     job = _make_job()
     run = _make_run()
 
@@ -362,7 +361,7 @@ async def test_process_one_handler_timeout_leaves_message():
     sqs = MagicMock()
 
     async def _slow(*_a, **_kw):
-        await _asyncio.sleep(100)
+        await asyncio.sleep(100)
 
     slow_handler = MagicMock()
     slow_handler.execute = _slow
@@ -388,8 +387,6 @@ async def test_process_one_duplicate_delivery_exactly_one_wins():
     Winner factory claims successfully; loser factory returns no-row (already claimed).
     Each gets its own session to avoid interleaving mock call-order issues.
     """
-    import asyncio as _asyncio
-
     job = _make_job()
     run = _make_run()
 
@@ -404,7 +401,7 @@ async def test_process_one_duplicate_delivery_exactly_one_wins():
     registry = {"echo": handler}
 
     msg = _make_message()
-    await _asyncio.gather(
+    await asyncio.gather(
         process_one(winner_factory, sqs, msg, registry=registry),
         process_one(loser_factory, sqs, msg, registry=registry),
     )
