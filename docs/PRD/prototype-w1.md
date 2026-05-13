@@ -291,7 +291,8 @@ Two intentional deviations from the course material, both defended in `course-sp
 | `domain.jobs` / `domain.runs` | Integration (real Postgres) | Create one-shot job creates 1 JobRun + 1 RunEvent; cancel terminates correctly; claim_run wins exactly one for two competing workers |
 | `actions.echo`, `actions.http_call` | Unit (mock httpx) | Echo returns expected; http_call retryable=true for 5xx, false for 4xx, timeout → retryable error |
 | `workers.watcher` | Integration | Inserts a future-dated run, advances time, watcher publishes to (mock) SQS; doesn't pick up CANCELLED jobs |
-| `workers.executor` | Integration | Pulls a queued run, dispatches echo action, completes; on action failure, marks RETRYING and re-queues; on max retries, marks FAILED |
+| `workers.executor` | Integration | Pulls a queued run, dispatches echo action, completes; on action failure, marks RETRYING and re-queues; on max retries, executor marks RETRYING (reconciler closes to FAILED — see `workers.reconciler`) |
+| `workers.reconciler` | Integration | DLQ-orphaned RETRYING row past grace → flipped to FAILED + RunEvent(dlq_reconcile); stuck QUEUED row past grace → SQS re-enqueued + RunEvent(REENQUEUED); fresh rows inside grace window → untouched |
 | End-to-end inspector flow | Integration | The 6-step `PROMPT.md` validation script: create immediate → status becomes completed; create future → cancel → status cancelled; list shows both |
 
 ### Coverage target

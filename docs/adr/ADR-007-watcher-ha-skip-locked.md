@@ -32,4 +32,4 @@ The Watcher transaction:
 - Horizontal scaling is trivial — add another Watcher ECS task and it joins the pool.
 - The pattern is well-trodden in production: Oban (Elixir), River (Go), PgBoss (Node.js) all use SKIP LOCKED.
 - We must explain "why no leader election" in interviews — the answer is "Postgres already gives us mutual exclusion per-row; coordination is free".
-- If SQS send fails after the row is updated to QUEUED, the row sits stuck. Mitigation: a recovery query for "QUEUED for too long" rows that re-enqueues them. This is a known operational concern; deferred to W2/W4.
+- If SQS send fails after the row is updated to QUEUED, the row sits stuck. This is addressed by the reconciler (Sweep B in `app/workers/reconciler.py`): a periodic background sweep re-enqueues `QUEUED` rows whose `updated_at` exceeds the `RECONCILER_QUEUED_GRACE_SECONDS` window. See issue #30.
