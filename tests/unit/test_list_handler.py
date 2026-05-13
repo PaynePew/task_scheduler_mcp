@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.mcp.handlers.list import handle_task_list  # noqa: F401 (used in tests)
+from app.mcp.handlers.list import handle_task_list
 
 # ---------------------------------------------------------------------------
 # Helpers
