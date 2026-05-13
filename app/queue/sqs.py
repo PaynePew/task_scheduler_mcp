@@ -73,6 +73,7 @@ class SQSClient:
             MaxNumberOfMessages=max_messages,
             WaitTimeSeconds=wait_seconds,
             VisibilityTimeout=visibility_timeout,
+            AttributeNames=["ApproximateReceiveCount"],
         )
         return resp.get("Messages", [])
 

@@ -46,14 +46,22 @@ async def _claim(
 ) -> bool:
     """Atomic claim: UPDATE status→RUNNING + insert RunEvent(STARTED).
 
+    Accepts PENDING/QUEUED (first delivery) and RETRYING (redelivery after a
+    retryable failure) — without RETRYING, the next redelivery would fail to
+    claim and the message would be deleted as if already-processed.
+
     Returns True if this worker won the claim, False if already claimed.
     """
     now = datetime.now(tz=UTC)
+    prev_status = (
+        await session.execute(select(JobRun.status).where(JobRun.run_id == run_id))
+    ).scalar_one_or_none()
+
     result = await session.execute(
         update(JobRun)
         .where(
             JobRun.run_id == run_id,
-            JobRun.status.in_(["PENDING", "QUEUED"]),
+            JobRun.status.in_(["PENDING", "QUEUED", "RETRYING"]),
         )
         .values(status="RUNNING", start_at=now, updated_at=now)
         .returning(JobRun.run_id, JobRun.job_id)
@@ -66,7 +74,7 @@ async def _claim(
             run_id=run_id,
             job_id=job_id,
             event_type="STARTED",
-            status_from="QUEUED",
+            status_from=prev_status or "QUEUED",
             status_to="RUNNING",
         )
     )
@@ -235,6 +243,16 @@ async def process_one(
     run_id: int = body["run_id"]
     job_id: int = body["job_id"]
     receipt: str = message["ReceiptHandle"]
+
+    # 一筆訊息的審計起點: DLQ入隊時可往回追
+    receive_count = message.get("Attributes", {}).get("ApproximateReceiveCount", "?")
+    logger.info(
+        "processing run_id=%s job_id=%s msg=%s receive_count=%s",
+        run_id,
+        job_id,
+        message.get("MessageId"),
+        receive_count,
+    )
 
     # Phase 1: atomic claim + load job/run in one transaction
     claimed = False

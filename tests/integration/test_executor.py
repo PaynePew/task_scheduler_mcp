@@ -538,3 +538,75 @@ async def test_heartbeat_extends_visibility_and_cancels_cleanly(session_factory,
     # 4) 沒洩漏 — issue #8 HITL 明文要求
     leaked = [t for t in (asyncio.all_tasks() - tasks_before) if not t.done()]
     assert leaked == [], f"heartbeat task leaked: {leaked}"
+
+
+@pytest.mark.integration
+async def test_retryable_three_times_lands_in_dlq(session_factory, sqs):
+    """3 次 retryable 後進入 DLQ (end-to-end via ElasticMQ + redrive policy)."""
+    from app.config.settings import settings
+
+    class NoParams(BaseModel):
+        pass
+
+    class AlwaysRetryHandler:
+        name = "always_retry"
+        params_model = NoParams
+        timeout_seconds = 10
+
+        async def execute(self, run, params) -> ActionResult:
+            return ActionResult(ok=False, result=None, error="transient", retryable=True)
+
+    job, run = await _insert_queued_run(session_factory, action="always_retry", action_params={})
+
+    # 真的把 message 丟到 task-queue (非合成)
+    sqs.send_message_batch(
+        [
+            {
+                "Id": str(run.run_id),
+                "MessageBody": json.dumps({"run_id": run.run_id, "job_id": job.job_id}),
+            }
+        ]
+    )
+
+    registry = {"always_retry": AlwaysRetryHandler()}
+
+    # 連續3次: receive -> process_one(-> RETRYING, 不刪) -> 等 visibility過期
+    SHORT_VISIBILITY = 1
+    for attempt in range(3):
+        msg = sqs.receive_messages(
+            max_messages=1,
+            wait_seconds=2,
+            visibility_timeout=SHORT_VISIBILITY,
+        )
+        assert len(msg) == 1, f"attempt {attempt + 1}: main queue should have message"
+        await process_one(session_factory, sqs, msg[0], registry=registry)
+        await asyncio.sleep(SHORT_VISIBILITY + 0.3)  # 等 visibility 過
+
+    # ElasticMQ 把第3+次的 deliver 視為超過 maxReceiveCount=3，redirect 到 DQL
+    # 給SQS 一拍 sweep
+    await asyncio.sleep(1)
+
+    # 1) Main queue 不該再有這筆
+    main_msgs = sqs.receive_messages(max_messages=1, wait_seconds=3)
+    assert main_msgs == [], "message should no longer be in main queue"
+
+    # 2) DLQ 應該收到這筆
+    dlq_client = SQSClient(queue_url=settings.queue_dlq_url)
+    dlq_msgs = dlq_client.receive_messages(max_messages=1, wait_seconds=3)
+    assert len(dlq_msgs) == 1, "message should land in DLQ"
+
+    body = json.loads(dlq_msgs[0]["Body"])
+    assert body["run_id"] == run.run_id
+
+    # 3) DB 那邊 run 留在 RETRYING (最後一次 process_one 寫的) --非終態
+    #    這是個know design - 訊息進DLQ後，DB沒人去把 RETRYING翻 FAILED。
+    #    這條留給之後的 reconcile sweep 處理(issue#8 的 follow-up))
+    async with session_factory() as session:
+        async with session.begin():
+            updated_run = (
+                await session.execute(select(JobRun).where(JobRun.run_id == run.run_id))
+            ).scalar_one()
+    assert updated_run.status == "RETRYING"
+
+    for msg in dlq_msgs:
+        dlq_client.delete_message(msg["ReceiptHandle"])
