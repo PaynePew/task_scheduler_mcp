@@ -13,7 +13,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import select, text
+from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.db.engine import create_async_engine
@@ -212,8 +212,6 @@ async def test_chain_watcher_two_cursors_independent(session_factory):
             ).scalar_one()
             new_pb = dict(ev.processed_by)
             new_pb["recurring_watcher"] = datetime.now(tz=UTC).isoformat()
-            from sqlalchemy import update
-
             await session.execute(
                 update(RunEvent)
                 .where(RunEvent.event_id == event.event_id)
