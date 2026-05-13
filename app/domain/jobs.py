@@ -13,7 +13,7 @@ never the mutable status column.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 from sqlalchemy import func, select, update
@@ -248,3 +248,89 @@ async def cancel_job(
         internal_status="CANCELLED",
         runs=None,
     )
+
+
+@dataclass
+class JobListItem:
+    job_id: int
+    action: str
+    created_at: datetime
+    internal_status: str
+
+
+@dataclass
+class PagedJobs:
+    items: list[JobListItem] = field(default_factory=list)
+    total: int = 0
+    page: int = 1
+    page_size: int = 20
+
+
+async def list_jobs(
+    session: AsyncSession,
+    *,
+    user_id: str,
+    status_filter: frozenset[str] | None = None,
+    created_at_from: datetime | None = None,
+    created_at_to: datetime | None = None,
+    page: int = 1,
+    page_size: int = 20,
+) -> PagedJobs:
+    """Return paged jobs for user_id sorted newest-first via idx_jobs_user_created.
+
+    status_filter: frozenset of *internal* statuses to include (caller maps external→internal).
+    created_at_from / created_at_to: inclusive bounds on Job.created_at.
+    page / page_size: 1-based offset pagination.
+    """
+    # Subquery: latest run status per job using DISTINCT ON (Postgres-specific).
+    # Ordered by (job_id, newest run first) so DISTINCT ON picks the most recent run.
+    latest_run_sq = (
+        select(JobRun.job_id.label("job_id"), JobRun.status.label("status"))
+        .distinct(JobRun.job_id)
+        .order_by(JobRun.job_id, func.coalesce(JobRun.start_at, JobRun.scheduled_at).desc())
+        .subquery("latest_run")
+    )
+
+    def _base_where(q):
+        q = q.where(Job.user_id == user_id)
+        if created_at_from is not None:
+            q = q.where(Job.created_at >= created_at_from)
+        if created_at_to is not None:
+            q = q.where(Job.created_at <= created_at_to)
+        if status_filter is not None:
+            q = q.where(latest_run_sq.c.status.in_(list(status_filter)))
+        return q
+
+    # Count query — join to latest_run for status filtering
+    count_q = _base_where(
+        select(func.count())
+        .select_from(Job)
+        .outerjoin(latest_run_sq, Job.job_id == latest_run_sq.c.job_id)
+    )
+    total: int = (await session.execute(count_q)).scalar_one()
+
+    # Data query — same join, ordered newest-first, with pagination
+    data_q = (
+        _base_where(
+            select(Job, latest_run_sq.c.status.label("run_status")).outerjoin(
+                latest_run_sq, Job.job_id == latest_run_sq.c.job_id
+            )
+        )
+        .order_by(Job.created_at.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    )
+
+    rows = (await session.execute(data_q)).all()
+
+    items = [
+        JobListItem(
+            job_id=row.Job.job_id,
+            action=row.Job.action,
+            created_at=row.Job.created_at,
+            internal_status=row.run_status if row.run_status is not None else "PENDING",
+        )
+        for row in rows
+    ]
+
+    return PagedJobs(items=items, total=total, page=page, page_size=page_size)
