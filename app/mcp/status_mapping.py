@@ -17,6 +17,14 @@ _MAPPING: dict[str, str] = {
     "CANCELLED": "cancelled",
 }
 
+_REVERSE_MAPPING: dict[str, frozenset[str]] = {
+    "scheduled": frozenset({"PENDING", "QUEUED", "WAITING"}),
+    "running": frozenset({"RUNNING", "RETRYING"}),
+    "completed": frozenset({"SUCCEEDED"}),
+    "failed": frozenset({"FAILED"}),
+    "cancelled": frozenset({"CANCELLED"}),
+}
+
 
 def to_external(internal_status: str) -> str:
     """Map one of the 8 internal statuses to one of the 5 external statuses."""
@@ -24,3 +32,11 @@ def to_external(internal_status: str) -> str:
         return _MAPPING[internal_status]
     except KeyError:
         raise ValueError(f"Unknown internal status: {internal_status!r}") from None
+
+
+def to_internal_set(external_status: str) -> frozenset[str]:
+    """Map one of the 5 external statuses to the set of internal statuses it covers."""
+    try:
+        return _REVERSE_MAPPING[external_status]
+    except KeyError:
+        raise ValueError(f"Unknown external status: {external_status!r}") from None

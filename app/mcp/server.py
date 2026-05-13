@@ -15,6 +15,7 @@ from app.domain.jobs import create_job
 from app.mcp.envelope import error, success
 from app.mcp.errors import map_domain_error
 from app.mcp.handlers.cancel import TASK_CANCEL_SCHEMA, handle_task_cancel
+from app.mcp.handlers.list import TASK_LIST_SCHEMA, handle_task_list
 from app.mcp.handlers.status import TASK_STATUS_SCHEMA, handle_task_status
 
 logger = logging.getLogger(__name__)
@@ -115,6 +116,14 @@ def create_server(user_id: str) -> Server:
                 inputSchema=TASK_CANCEL_SCHEMA,
             ),
             types.Tool(
+                name="task.list@v1",
+                description=(
+                    "List the caller's jobs newest-first. Supports status filter, "
+                    "created_at range, and offset pagination (page + pageSize)."
+                ),
+                inputSchema=TASK_LIST_SCHEMA,
+            ),
+            types.Tool(
                 name="task.list_actions@v1",
                 description=(
                     "List all registered actions with their descriptions, timeouts, "
@@ -134,6 +143,8 @@ def create_server(user_id: str) -> Server:
             result = await handle_task_status(arguments, user_id)
         elif name == "task.cancel@v1":
             result = await handle_task_cancel(arguments, user_id)
+        elif name == "task.list@v1":
+            result = await handle_task_list(arguments, user_id)
         else:
             result = error("INTERNAL", f"Unknown tool: {name}")
         return [types.TextContent(type="text", text=json.dumps(result))]
