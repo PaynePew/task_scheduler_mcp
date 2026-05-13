@@ -1,4 +1,15 @@
-"""Domain logic for job operations."""
+"""Business logic for jobs — pure functions on (session, args).
+
+Per ADR-010 this layer **knows nothing about MCP**. It accepts an
+``AsyncSession``, mutates DB state, and raises domain exceptions. The MCP
+handlers in ``app.mcp.handlers`` wrap each call, map exceptions to the
+6-code error vocabulary, and shape the envelope.
+
+Anything that writes a status transition also writes a matching
+``RunEvent`` *in the same transaction* — the transactional outbox pattern
+(CONTEXT.md §5). Downstream watchers consume the immutable event log,
+never the mutable status column.
+"""
 
 from __future__ import annotations
 
@@ -63,6 +74,11 @@ async def create_job(
 
     async with session.begin():
         if idempotency_key is not None:
+            # Idempotency short-circuit: return the existing Job verbatim instead
+            # of creating a duplicate. Caller-side retry safety — a flaky network
+            # making the caller retry create_job twice won't spawn two jobs. The
+            # uniqueness constraint (user_id, idempotency_key) backs this up at
+            # the DB level for the concurrent case.
             result = await session.execute(
                 select(Job).where(
                     Job.idempotency_key == idempotency_key,
@@ -74,6 +90,9 @@ async def create_job(
                 return existing
 
         now = datetime.now(tz=UTC)
+        # Hour-truncated partition key. See JobRun.time_bucket in db/models.py
+        # for the full rationale — it lets the watcher's hot query scan one
+        # bucket instead of the whole table.
         time_bucket = now.replace(minute=0, second=0, microsecond=0).isoformat()
 
         job = Job(

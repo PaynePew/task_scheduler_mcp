@@ -34,7 +34,12 @@ class SQSClient:
     ) -> None:
         self._queue_url = queue_url or _settings.queue_url
         endpoint = endpoint_url or _endpoint_from_queue_url(self._queue_url)
-        # Credentials are only meaningful for ElasticMQ; production uses the ECS task role.
+        # The hard-coded "local" credentials are intentional and only apply to
+        # ElasticMQ, which doesn't authenticate. In production (W3) the
+        # ``AWS_*`` env vars or the ECS task role take precedence via boto3's
+        # default credential chain, so these literals are ignored. Don't
+        # "fix" them — boto3 refuses to construct a client with no creds at
+        # all, even when pointed at a local endpoint.
         self._client = boto3.client(
             "sqs",
             endpoint_url=endpoint,
