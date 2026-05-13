@@ -96,8 +96,8 @@ async def claim_and_publish(
                 }
             )
 
-        # 5. Publish AFTER commit. If this fails, rows stay QUEUED; a recovery sweep
-        #    re-enqueues them (deferred concern per ADR-007 consequences).
+        # 5. Publish AFTER commit. If this fails, rows stay QUEUED; the reconciler
+        #    (app/workers/reconciler.py sweep B) re-enqueues them — see issue #30.
         try:
             sqs.send_message_batch(entries)
         except Exception:
