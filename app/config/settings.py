@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     alembic_database_url: str = "postgresql+psycopg://app:app@postgres:5432/app"
     # ElasticMQ locally; in W3 this becomes the real SQS URL via env override.
     queue_url: str = "http://elasticmq:9324/queue/task-queue"
+    queue_dlq_url: str = "http://elasticmq:9324/queue/task-dlq"
     # Default identity when stdio transport runs without MCP_USER_ID set (ADR-015).
     mcp_user_id: str = "default-user"
     port: int = 8000
