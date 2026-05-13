@@ -479,3 +479,62 @@ async def test_action_exception_marks_retrying_and_does_not_delete(session_facto
     assert updated_run.status == "RETRYING"
     assert "connection refused" in (updated_run.error_message or "")
     assert deleted_receipts == [], "DeleteMessage must not be called on exception"
+
+
+@pytest.mark.integration
+async def test_heartbeat_extends_visibility_and_cancels_cleanly(session_factory, sqs):
+    """Heartbeat fires periodically during action; cancelled cleanly on return; no task leak."""
+
+    class NoParams(BaseModel):
+        pass
+
+    class SlowOkHandler:
+        name = "slow_ok"
+        params_model = NoParams
+        timeout_seconds = 10  # 不會 timeout
+
+        async def execute(self, run, params) -> ActionResult:
+            await asyncio.sleep(0.3)
+            return ActionResult(ok=True, result={}, error=None)
+
+    job, run = await _insert_queued_run(session_factory, action="slow_ok", action_params={})
+    message = _make_sqs_message(run.run_id, job.job_id)
+
+    cmv_calls: list[tuple[str, int]] = []
+
+    def _spy_cmv(receipt_handle, *, visibility_timeout):
+        cmv_calls.append((receipt_handle, visibility_timeout))
+
+    sqs.change_message_visibility = _spy_cmv
+    sqs.delete_message = lambda r: None
+
+    registry = {"slow_ok": SlowOkHandler()}
+    tasks_before = asyncio.all_tasks()
+
+    await process_one(
+        session_factory,
+        sqs,
+        message,
+        registry=registry,
+        heartbeat_interval=0.1,  # 0.3s 動作預期 2~3 次 heartbeat
+    )
+
+    # 1) Heartbeat ≥ 2 次
+    assert len(cmv_calls) >= 2
+
+    # 2) Receipt + extension 正確
+    for receipt, vt in cmv_calls:
+        assert receipt == message["ReceiptHandle"]
+        assert vt == 60
+
+    # 3) 主路徑沒被影響
+    async with session_factory() as session:
+        async with session.begin():
+            updated_run = (
+                await session.execute(select(JobRun).where(JobRun.run_id == run.run_id))
+            ).scalar_one()
+    assert updated_run.status == "SUCCEEDED"
+
+    # 4) 沒洩漏 — issue #8 HITL 明文要求
+    leaked = [t for t in (asyncio.all_tasks() - tasks_before) if not t.done()]
+    assert leaked == [], f"heartbeat task leaked: {leaked}"

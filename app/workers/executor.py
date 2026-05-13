@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 
 from sqlalchemy import select, update
@@ -34,6 +35,8 @@ from app.queue.sqs import SQSClient
 logger = logging.getLogger(__name__)
 
 POLL_WAIT_SECONDS = 20
+HEARTBEAT_INTERVAL_SECONDS = 30
+HEARTBEAT_EXTENSION_SECONDS = 60
 
 
 async def _claim(
@@ -162,12 +165,63 @@ async def _write_retrying(
     )
 
 
+async def _heartbeat_loop(
+    sqs: SQSClient,
+    receipt_handle: str,
+    *,
+    interval: float = HEARTBEAT_INTERVAL_SECONDS,
+    extension: int = HEARTBEAT_EXTENSION_SECONDS,
+) -> None:
+    """Extend SQS visibility while a long action runs.
+
+    Designed to be run as a background Task and cancelled by the caller
+    when the action returns. Failures are logged but not raised - if SQS
+    becomes unreachable the visibility expires naturally and the message
+    redelivers, which is the correct fallback.
+    """
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            sqs.change_message_visibility(
+                receipt_handle,
+                visibility_timeout=extension,
+            )
+        except Exception:
+            logger.exception(
+                "heartbeat failed for receipt=%s; visibility may expire",
+                receipt_handle,
+            )
+
+
+@asynccontextmanager
+async def _heartbeat(
+    sqs: SQSClient,
+    receipt_handle: str,
+    *,
+    interval: float = HEARTBEAT_INTERVAL_SECONDS,
+):
+    """Run _heartbeat_loop in the background for the `async with` block,
+    Cancels cleanly on exit (success, exception, or outer cancellation),
+    so no asyncio task leaks.
+    """
+    task = asyncio.create_task(_heartbeat_loop(sqs, receipt_handle, interval=interval))
+    try:
+        yield
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
 async def process_one(
     session_factory: async_sessionmaker[AsyncSession],
     sqs: SQSClient,
     message: dict,
     *,
     registry: dict[str, ActionHandler] | None = None,
+    heartbeat_interval: float = HEARTBEAT_INTERVAL_SECONDS,
 ) -> None:
     """Process a single SQS message: claim → dispatch → terminal.
 
@@ -254,10 +308,11 @@ async def process_one(
 
     # Phase 3: dispatch with per-action timeout
     try:
-        action_result = await asyncio.wait_for(
-            handler.execute(run, params),
-            timeout=handler.timeout_seconds,
-        )
+        async with _heartbeat(sqs, receipt, interval=heartbeat_interval):
+            action_result = await asyncio.wait_for(
+                handler.execute(run, params),
+                timeout=handler.timeout_seconds,
+            )
     except TimeoutError:
         logger.warning(
             "run_id=%s action=%r timed out after %ds; marking RETRYING",
