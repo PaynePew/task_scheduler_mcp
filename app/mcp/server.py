@@ -8,9 +8,10 @@ from typing import Any
 
 import mcp.types as types
 from mcp.server.lowlevel import Server
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.actions.registry import ACTION_REGISTRY
-from app.db.engine import async_session_factory
+from app.db.engine import async_session_factory as default_session_factory
 from app.domain.jobs import create_job
 from app.mcp.envelope import error, success
 from app.mcp.errors import map_domain_error
@@ -97,8 +98,17 @@ def _build_action_list() -> list[dict[str, Any]]:
     ]
 
 
-def create_server(user_id: str) -> Server:
-    """Return a fully configured, transport-agnostic MCP Server bound to *user_id*."""
+def create_server(
+    user_id: str,
+    session_factory: async_sessionmaker[AsyncSession] | None = None,
+) -> Server:
+    """Return a fully configured, transport-agnostic MCP Server bound to *user_id*.
+
+    `session_factory` is injectable so tests can pass a per-test factory that
+    avoids asyncpg cross-event-loop errors (each pytest-asyncio test gets its
+    own loop). Defaults to the module-level factory at runtime.
+    """
+    _session_factory = session_factory or default_session_factory
     server = Server("task-scheduler", instructions=SYSTEM_INSTRUCTION)
 
     @server.list_tools()
@@ -152,13 +162,13 @@ def create_server(user_id: str) -> Server:
         if name == "task.list_actions@v1":
             result = success({"actions": _build_action_list()})
         elif name == "task.create@v1":
-            result = await _handle_task_create(arguments, user_id)
+            result = await _handle_task_create(arguments, user_id, _session_factory)
         elif name == "task.status@v1":
-            result = await handle_task_status(arguments, user_id)
+            result = await handle_task_status(arguments, user_id, session_factory=_session_factory)
         elif name == "task.cancel@v1":
-            result = await handle_task_cancel(arguments, user_id)
+            result = await handle_task_cancel(arguments, user_id, session_factory=_session_factory)
         elif name == "task.list@v1":
-            result = await handle_task_list(arguments, user_id)
+            result = await handle_task_list(arguments, user_id, session_factory=_session_factory)
         else:
             result = error("INTERNAL", f"Unknown tool: {name}")
         return [types.TextContent(type="text", text=json.dumps(result))]
@@ -166,7 +176,11 @@ def create_server(user_id: str) -> Server:
     return server
 
 
-async def _handle_task_create(arguments: dict[str, Any], user_id: str) -> dict[str, Any]:
+async def _handle_task_create(
+    arguments: dict[str, Any],
+    user_id: str,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> dict[str, Any]:
     action = arguments.get("action")
     action_params = arguments.get("action_params", {})
     schedule_type = arguments.get("schedule_type", "immediate")
@@ -175,7 +189,7 @@ async def _handle_task_create(arguments: dict[str, Any], user_id: str) -> dict[s
     timezone = arguments.get("timezone", "UTC")
 
     try:
-        async with async_session_factory() as session:
+        async with session_factory() as session:
             job = await create_job(
                 session,
                 user_id=user_id,
