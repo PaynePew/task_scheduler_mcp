@@ -61,8 +61,15 @@ async def sweep_dlq_retrying(
             if not runs:
                 return 0
 
+            # Snapshot pre-UPDATE values: SQLAlchemy 2.x bulk update with the
+            # default synchronize_session="auto" mutates loaded ORM instances
+            # for columns in .values(...) — reading run.updated_at after the
+            # UPDATE would return `now` instead of the actual stale timestamp.
+            # (Project anti-pattern #1; see CODING_STANDARDS and Issue #10.)
+            snapshots = [(r.run_id, r.job_id, r.updated_at) for r in runs]
+
             now = datetime.now(tz=UTC)
-            run_ids = [r.run_id for r in runs]
+            run_ids = [run_id for run_id, _, _ in snapshots]
             await session.execute(
                 update(JobRun)
                 .where(JobRun.run_id.in_(run_ids))
@@ -73,27 +80,27 @@ async def sweep_dlq_retrying(
                     error_message="exceeded_max_receive (likely DLQ)",
                 )
             )
-            for run in runs:
+            for run_id, job_id, last_updated_at in snapshots:
                 logger.warning(
                     "reconciler sweep_a: RETRYING→FAILED run_id=%s job_id=%s last_updated_at=%s",
-                    run.run_id,
-                    run.job_id,
-                    run.updated_at,
+                    run_id,
+                    job_id,
+                    last_updated_at,
                 )
                 session.add(
                     RunEvent(
-                        run_id=run.run_id,
-                        job_id=run.job_id,
+                        run_id=run_id,
+                        job_id=job_id,
                         event_type="FAILED",
                         status_from="RETRYING",
                         status_to="FAILED",
                         event_data={
                             "reason": "dlq_reconcile",
-                            "last_seen_at": run.updated_at.isoformat(),
+                            "last_seen_at": last_updated_at.isoformat(),
                         },
                     )
                 )
-    return len(runs)
+    return len(snapshots)
 
 
 async def sweep_queued_stuck(
