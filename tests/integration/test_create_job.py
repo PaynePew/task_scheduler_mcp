@@ -5,6 +5,8 @@ Run with:
     uv run pytest -m integration tests/integration/test_create_job.py
 """
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
 import pytest_asyncio
 from sqlalchemy import func, select, text
@@ -12,7 +14,12 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.db.engine import create_async_engine
 from app.db.models import Job, JobRun, RunEvent
-from app.domain.jobs import UnknownActionError, create_job
+from app.domain.jobs import (
+    InvalidScheduledAtError,
+    InvalidTimezoneError,
+    UnknownActionError,
+    create_job,
+)
 
 
 @pytest_asyncio.fixture
@@ -143,3 +150,131 @@ async def test_unknown_action_raises_domain_error(session_factory):
                 action_params={},
                 schedule_type="immediate",
             )
+
+
+# ---------------------------------------------------------------------------
+# one-shot scheduling integration tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+async def test_one_shot_future_creates_pending_run(session_factory):
+    """one-shot job 2 min in future → PENDING run + CREATED event at the right scheduled_at."""
+    future = datetime.now(tz=UTC) + timedelta(minutes=2)
+    future_str = future.isoformat()
+
+    async with session_factory() as session:
+        job = await create_job(
+            session,
+            user_id="oneshot-user",
+            action="echo",
+            action_params={"message": "scheduled"},
+            schedule_type="one-shot",
+            scheduled_at=future_str,
+            timezone="UTC",
+        )
+
+    job_id = job.job_id
+
+    async with session_factory() as session:
+        async with session.begin():
+            job_count = await session.scalar(
+                select(func.count()).select_from(Job).where(Job.job_id == job_id)
+            )
+            runs = (
+                (await session.execute(select(JobRun).where(JobRun.job_id == job_id)))
+                .scalars()
+                .all()
+            )
+            events = (
+                (await session.execute(select(RunEvent).where(RunEvent.job_id == job_id)))
+                .scalars()
+                .all()
+            )
+
+    assert job_count == 1
+    assert len(runs) == 1
+    assert runs[0].status == "PENDING"
+    # scheduled_at stored in DB must be within a second of the future time we asked for
+    delta = abs((runs[0].scheduled_at - future).total_seconds())
+    assert delta < 2, f"scheduled_at drifted by {delta}s"
+    assert len(events) == 1
+    assert events[0].event_type == "CREATED"
+
+
+@pytest.mark.integration
+async def test_one_shot_past_scheduled_at_raises(session_factory):
+    """one-shot with past scheduled_at raises InvalidScheduledAtError — no rows written."""
+    past = (datetime.now(tz=UTC) - timedelta(seconds=30)).isoformat()
+
+    async with session_factory() as session:
+        with pytest.raises(InvalidScheduledAtError, match="must be in the future"):
+            await create_job(
+                session,
+                user_id="oneshot-user",
+                action="echo",
+                action_params={"message": "late"},
+                schedule_type="one-shot",
+                scheduled_at=past,
+                timezone="UTC",
+            )
+
+
+@pytest.mark.integration
+async def test_one_shot_invalid_timezone_raises(session_factory):
+    """one-shot with an invalid IANA timezone raises InvalidTimezoneError — no rows written."""
+    future = (datetime.now(tz=UTC) + timedelta(hours=1)).isoformat()
+
+    async with session_factory() as session:
+        with pytest.raises(InvalidTimezoneError):
+            await create_job(
+                session,
+                user_id="oneshot-user",
+                action="echo",
+                action_params={"message": "tz-bad"},
+                schedule_type="one-shot",
+                scheduled_at=future,
+                timezone="UTC+8",
+            )
+
+
+@pytest.mark.integration
+async def test_one_shot_timezone_normalises_to_utc(session_factory):
+    """scheduled_at expressed in Asia/Taipei (+08:00) is stored as UTC in the DB."""
+    # 10:00 Taipei time = 02:00 UTC
+    future_taipei = (datetime.now(tz=UTC) + timedelta(hours=9)).replace(
+        minute=0, second=0, microsecond=0
+    )
+    # Express the same moment as a naive datetime interpreted in Asia/Taipei
+    naive_future = future_taipei.replace(tzinfo=None)
+    naive_str = naive_future.isoformat()
+
+    async with session_factory() as session:
+        job = await create_job(
+            session,
+            user_id="tz-user",
+            action="echo",
+            action_params={"message": "taipei"},
+            schedule_type="one-shot",
+            scheduled_at=naive_str,
+            timezone="Asia/Taipei",
+        )
+
+    async with session_factory() as session:
+        async with session.begin():
+            runs = (
+                (await session.execute(select(JobRun).where(JobRun.job_id == job.job_id)))
+                .scalars()
+                .all()
+            )
+
+    assert len(runs) == 1
+    stored = runs[0].scheduled_at
+    # Stored value must be UTC-aware
+    assert stored.tzinfo is not None
+    # Must differ from the naive input by ~8 hours (Asia/Taipei offset)
+    from zoneinfo import ZoneInfo
+
+    expected_utc = naive_future.replace(tzinfo=ZoneInfo("Asia/Taipei")).astimezone(UTC)
+    delta = abs((stored - expected_utc).total_seconds())
+    assert delta < 2, f"UTC normalisation off by {delta}s"

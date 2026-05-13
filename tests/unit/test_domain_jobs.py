@@ -1,11 +1,14 @@
 """Unit tests for app/domain/jobs.py — non-DB paths only."""
 
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from app.domain.jobs import (
+    InvalidScheduledAtError,
     InvalidStateError,
+    InvalidTimezoneError,
     JobNotFoundError,
     UnknownActionError,
     UnsupportedScheduleTypeError,
@@ -32,11 +35,8 @@ async def test_unknown_action_raises_before_db():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("bad_schedule_type", ["one_shot", "recurring", "scheduled", ""])
 async def test_unsupported_schedule_type_raises_before_db(bad_schedule_type):
-    """create_job must reject any schedule_type other than 'immediate' before
-    touching the DB. Prevents silent degradation to one-shot-now when a future
-    slice (S10 future scheduling, S13 recurring) passes an unimplemented value."""
-    # match="" would trigger pytest's "always passes" warning; use None to skip
-    # message matching for the empty-string case (the exception class is enough).
+    """create_job must reject unimplemented schedule_type values before touching the DB.
+    'one_shot' (underscore) is distinct from the supported 'one-shot' (hyphen)."""
     match_pattern = bad_schedule_type if bad_schedule_type else None
     with pytest.raises(UnsupportedScheduleTypeError, match=match_pattern):
         await create_job(
@@ -45,6 +45,119 @@ async def test_unsupported_schedule_type_raises_before_db(bad_schedule_type):
             action="echo",  # valid action so the schedule_type guard is what fires
             action_params={},
             schedule_type=bad_schedule_type,
+        )
+
+
+# ---------------------------------------------------------------------------
+# one-shot: timezone validation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "bad_timezone",
+    ["UTC+8", "+08:00", "Taipei Standard Time", "GMT+5:30", "US/Eastern-notexist"],
+)
+async def test_one_shot_invalid_timezone_raises_before_db(bad_timezone):
+    """Invalid IANA timezone key raises InvalidTimezoneError before DB is touched."""
+    future = (datetime.now(tz=UTC) + timedelta(hours=1)).isoformat()
+    with pytest.raises(InvalidTimezoneError):
+        await create_job(
+            None,
+            user_id="u1",
+            action="echo",
+            action_params={},
+            schedule_type="one-shot",
+            scheduled_at=future,
+            timezone=bad_timezone,
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "good_timezone", ["UTC", "Asia/Taipei", "Europe/London", "America/New_York"]
+)
+async def test_one_shot_valid_timezone_passes_validation(good_timezone):
+    """Valid IANA timezone keys pass timezone validation; DB call is expected next."""
+    future = (datetime.now(tz=UTC) + timedelta(hours=1)).isoformat()
+    # session=None → AttributeError when session.begin() is reached, confirming
+    # all pre-DB validation passed without raising a domain error.
+    with pytest.raises(AttributeError):
+        await create_job(
+            None,
+            user_id="u1",
+            action="echo",
+            action_params={},
+            schedule_type="one-shot",
+            scheduled_at=future,
+            timezone=good_timezone,
+        )
+
+
+# ---------------------------------------------------------------------------
+# one-shot: scheduled_at validation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_one_shot_missing_scheduled_at_raises():
+    """one-shot without scheduled_at raises InvalidScheduledAtError before DB."""
+    with pytest.raises(InvalidScheduledAtError):
+        await create_job(
+            None,
+            user_id="u1",
+            action="echo",
+            action_params={},
+            schedule_type="one-shot",
+            scheduled_at=None,
+            timezone="UTC",
+        )
+
+
+@pytest.mark.asyncio
+async def test_one_shot_past_scheduled_at_raises():
+    """one-shot with a past scheduled_at raises InvalidScheduledAtError before DB."""
+    past = (datetime.now(tz=UTC) - timedelta(seconds=10)).isoformat()
+    with pytest.raises(InvalidScheduledAtError, match="must be in the future"):
+        await create_job(
+            None,
+            user_id="u1",
+            action="echo",
+            action_params={},
+            schedule_type="one-shot",
+            scheduled_at=past,
+            timezone="UTC",
+        )
+
+
+@pytest.mark.asyncio
+async def test_one_shot_unparseable_scheduled_at_raises():
+    """Non-ISO-8601 scheduled_at raises InvalidScheduledAtError before DB."""
+    with pytest.raises(InvalidScheduledAtError):
+        await create_job(
+            None,
+            user_id="u1",
+            action="echo",
+            action_params={},
+            schedule_type="one-shot",
+            scheduled_at="not-a-date",
+            timezone="UTC",
+        )
+
+
+@pytest.mark.asyncio
+async def test_one_shot_future_scheduled_at_passes_validation():
+    """Valid future scheduled_at passes all pre-DB validation."""
+    future = (datetime.now(tz=UTC) + timedelta(hours=2)).isoformat()
+    with pytest.raises(AttributeError):
+        await create_job(
+            None,
+            user_id="u1",
+            action="echo",
+            action_params={},
+            schedule_type="one-shot",
+            scheduled_at=future,
+            timezone="UTC",
         )
 
 

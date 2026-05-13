@@ -44,9 +44,20 @@ _TASK_CREATE_SCHEMA: dict[str, Any] = {
         },
         "schedule_type": {
             "type": "string",
-            "enum": ["immediate"],
+            "enum": ["immediate", "one-shot"],
             "default": "immediate",
-            "description": "When to run the task. Only 'immediate' is supported in v1.",
+            "description": (
+                "When to run the task. 'immediate' runs as soon as a worker is free; "
+                "'one-shot' runs at the specified scheduled_at datetime."
+            ),
+        },
+        "scheduled_at": {
+            "type": ["string", "null"],
+            "default": None,
+            "description": (
+                "ISO 8601 timezone-aware datetime for one-shot scheduling "
+                "(e.g. '2026-05-14T09:00:00+00:00'). Required when schedule_type='one-shot'."
+            ),
         },
         "idempotency_key": {
             "type": ["string", "null"],
@@ -56,7 +67,10 @@ _TASK_CREATE_SCHEMA: dict[str, Any] = {
         "timezone": {
             "type": "string",
             "default": "UTC",
-            "description": "IANA timezone name; defaults to UTC.",
+            "description": (
+                "IANA timezone key (e.g. 'Asia/Taipei', 'Europe/London', 'UTC'). "
+                "Used to interpret naive scheduled_at datetimes. Defaults to UTC."
+            ),
         },
     },
     "required": ["action", "action_params"],
@@ -145,7 +159,9 @@ async def _handle_task_create(arguments: dict[str, Any], user_id: str) -> dict[s
     action = arguments.get("action")
     action_params = arguments.get("action_params", {})
     schedule_type = arguments.get("schedule_type", "immediate")
+    scheduled_at = arguments.get("scheduled_at")
     idempotency_key = arguments.get("idempotency_key")
+    timezone = arguments.get("timezone", "UTC")
 
     try:
         async with async_session_factory() as session:
@@ -155,7 +171,9 @@ async def _handle_task_create(arguments: dict[str, Any], user_id: str) -> dict[s
                 action=action,
                 action_params=action_params,
                 schedule_type=schedule_type,
+                scheduled_at=scheduled_at,
                 idempotency_key=idempotency_key,
+                timezone=timezone,
             )
         return success({"job_id": job.job_id, "status": "scheduled"})
     except Exception as exc:
