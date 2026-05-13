@@ -6,6 +6,7 @@ Run with:
 """
 
 from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 import pytest_asyncio
@@ -272,9 +273,8 @@ async def test_one_shot_timezone_normalises_to_utc(session_factory):
     stored = runs[0].scheduled_at
     # Stored value must be UTC-aware
     assert stored.tzinfo is not None
-    # Must differ from the naive input by ~8 hours (Asia/Taipei offset)
-    from zoneinfo import ZoneInfo
-
+    # The naive input, interpreted as Asia/Taipei, must normalise to the same
+    # UTC instant in the DB (within round-trip microsecond drift).
     expected_utc = naive_future.replace(tzinfo=ZoneInfo("Asia/Taipei")).astimezone(UTC)
     delta = abs((stored - expected_utc).total_seconds())
     assert delta < 2, f"UTC normalisation off by {delta}s"
