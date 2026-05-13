@@ -149,7 +149,11 @@ async def test_reconcile_a_retrying_past_grace_flipped_to_failed(session_factory
     assert evt.status_to == "FAILED"
     assert evt.event_data is not None
     assert evt.event_data["reason"] == "dlq_reconcile"
-    assert "last_seen_at" in evt.event_data
+    # last_seen_at must be the pre-UPDATE stale timestamp, not the reconcile
+    # time. Guards against the SQLAlchemy synchronize_session="auto" anti-pattern
+    # where reading run.updated_at after a bulk UPDATE returns the new value.
+    last_seen = datetime.fromisoformat(evt.event_data["last_seen_at"])
+    assert last_seen < datetime.now(tz=UTC) - timedelta(seconds=60)
 
 
 # ---------------------------------------------------------------------------
