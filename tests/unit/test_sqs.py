@@ -53,6 +53,7 @@ def test_receive_messages_returns_list(mock_boto3_client):
         MaxNumberOfMessages=5,
         WaitTimeSeconds=0,
         VisibilityTimeout=60,
+        AttributeNames=["ApproximateReceiveCount"],
     )
 
 
