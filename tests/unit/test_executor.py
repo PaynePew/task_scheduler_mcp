@@ -59,23 +59,33 @@ def _make_handler(result: ActionResult) -> MagicMock:
 def _make_session(
     *,
     claim_wins: bool = True,
+    prev_status: str = "QUEUED",
     job: MagicMock | None = None,
     run: MagicMock | None = None,
 ) -> MagicMock:
-    """Build a mock session whose execute() drives the claim + run-load calls."""
-    # execute call 1: claim UPDATE — returns a row if claim_wins, else None
+    """Build a mock session that satisfies the four ``session.execute()`` calls
+    a full ``process_one`` invocation issues against a single shared session mock.
+
+    Slot 1 — ``_claim``'s prev_status ``SELECT``: drives ``RunEvent(STARTED).status_from``.
+    Slot 2 — ``_claim``'s ``UPDATE ... RETURNING``: ``.first()`` drives ``claim_wins``.
+    Slot 3 — ``process_one``'s run-load ``SELECT``: ``.scalar_one_or_none()`` returns ``run``.
+    Slot 4 — terminal / retrying / permanent-failure ``UPDATE`` (separate ``session.begin()``).
+    """
+    prev_status_result = MagicMock()
+    prev_status_result.scalar_one_or_none.return_value = prev_status
+
     claim_result = MagicMock()
     claim_result.first.return_value = MagicMock() if claim_wins else None
 
-    # execute call 2: SELECT JobRun (only reached if claim_wins)
     run_result = MagicMock()
     run_result.scalar_one_or_none.return_value = run
 
-    # execute call 3: terminal UPDATE (second session invocation)
     terminal_result = MagicMock()
 
     session = MagicMock()
-    session.execute = AsyncMock(side_effect=[claim_result, run_result, terminal_result])
+    session.execute = AsyncMock(
+        side_effect=[prev_status_result, claim_result, run_result, terminal_result]
+    )
     session.get = AsyncMock(return_value=job)
     session.add = MagicMock()
     session.begin = MagicMock(return_value=_async_cm(None))
@@ -191,8 +201,9 @@ async def test_process_one_no_claim_does_not_write_terminal():
 
     await process_one(factory, sqs, _make_message(), registry={})
 
-    # session.execute should only be called once (the claim attempt)
-    assert session.execute.await_count == 1
+    # _claim issues 2 executes (prev_status SELECT + UPDATE...RETURNING); after the
+    # UPDATE matches 0 rows, process_one short-circuits before the run-load SELECT.
+    assert session.execute.await_count == 2
 
 
 # ---------------------------------------------------------------------------
@@ -275,18 +286,8 @@ async def test_process_one_retryable_leaves_message():
     """ok=False, retryable=True → do NOT DeleteMessage (S07b handles retry)."""
     job = _make_job()
     run = _make_run()
-    # Only 2 execute calls needed: claim + run-load; terminal NOT called
-    claim_result = MagicMock()
-    claim_result.first.return_value = MagicMock()
-    run_result = MagicMock()
-    run_result.scalar_one_or_none.return_value = run
-
-    session = MagicMock()
-    session.execute = AsyncMock(side_effect=[claim_result, run_result])
-    session.get = AsyncMock(return_value=job)
-    session.add = MagicMock()
-    session.begin = MagicMock(return_value=_async_cm(None))
-
+    # 4 slots: prev_status, claim_update, run_load, _write_retrying's UPDATE.
+    session = _make_session(claim_wins=True, job=job, run=run)
     factory = _make_factory(session)
     sqs = MagicMock()
 
@@ -308,18 +309,8 @@ async def test_process_one_handler_exception_leaves_message():
     """Handler raises → do NOT DeleteMessage (SQS visibility expiry handles redelivery)."""
     job = _make_job()
     run = _make_run()
-
-    claim_result = MagicMock()
-    claim_result.first.return_value = MagicMock()
-    run_result = MagicMock()
-    run_result.scalar_one_or_none.return_value = run
-
-    session = MagicMock()
-    session.execute = AsyncMock(side_effect=[claim_result, run_result])
-    session.get = AsyncMock(return_value=job)
-    session.add = MagicMock()
-    session.begin = MagicMock(return_value=_async_cm(None))
-
+    # 4 slots: prev_status, claim_update, run_load, _write_retrying's UPDATE.
+    session = _make_session(claim_wins=True, job=job, run=run)
     factory = _make_factory(session)
     sqs = MagicMock()
 
@@ -345,18 +336,8 @@ async def test_process_one_handler_timeout_leaves_message():
     """Handler times out → do NOT DeleteMessage."""
     job = _make_job()
     run = _make_run()
-
-    claim_result = MagicMock()
-    claim_result.first.return_value = MagicMock()
-    run_result = MagicMock()
-    run_result.scalar_one_or_none.return_value = run
-
-    session = MagicMock()
-    session.execute = AsyncMock(side_effect=[claim_result, run_result])
-    session.get = AsyncMock(return_value=job)
-    session.add = MagicMock()
-    session.begin = MagicMock(return_value=_async_cm(None))
-
+    # 4 slots: prev_status, claim_update, run_load, _write_retrying's UPDATE.
+    session = _make_session(claim_wins=True, job=job, run=run)
     factory = _make_factory(session)
     sqs = MagicMock()
 
@@ -593,20 +574,8 @@ async def test_process_one_invalid_params_error_message_contains_detail():
     """Params validation failure → error_message in job_runs includes the exception text."""
     job = _make_job(action="echo", action_params={})
     run = _make_run()
-
-    # Capture the UPDATE call to inspect the values dict
-    claim_result = MagicMock()
-    claim_result.first.return_value = MagicMock()
-    run_result = MagicMock()
-    run_result.scalar_one_or_none.return_value = run
-    terminal_result = MagicMock()
-
-    session = MagicMock()
-    session.execute = AsyncMock(side_effect=[claim_result, run_result, terminal_result])
-    session.get = AsyncMock(return_value=job)
-    session.add = MagicMock()
-    session.begin = MagicMock(return_value=_async_cm(None))
-
+    # 4 slots: prev_status, claim_update, run_load, _write_permanent_failure's UPDATE.
+    session = _make_session(claim_wins=True, job=job, run=run)
     factory = _make_factory(session)
     sqs = MagicMock()
 
@@ -636,18 +605,8 @@ async def test_process_one_handler_exception_still_leaves_message_after_fix():
     """S07a regression: handler exception must still leave message (not FAILED)."""
     job = _make_job()
     run = _make_run()
-
-    claim_result = MagicMock()
-    claim_result.first.return_value = MagicMock()
-    run_result = MagicMock()
-    run_result.scalar_one_or_none.return_value = run
-
-    session = MagicMock()
-    session.execute = AsyncMock(side_effect=[claim_result, run_result])
-    session.get = AsyncMock(return_value=job)
-    session.add = MagicMock()
-    session.begin = MagicMock(return_value=_async_cm(None))
-
+    # 4 slots: prev_status, claim_update, run_load, _write_retrying's UPDATE.
+    session = _make_session(claim_wins=True, job=job, run=run)
     factory = _make_factory(session)
     sqs = MagicMock()
 
