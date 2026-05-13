@@ -398,3 +398,84 @@ async def test_retryable_failure_marks_retrying_and_does_not_delete(session_fact
 
     # 3) 訊息沒有被刪 - 留給 SQS visibility expiry 處理 redelivery
     assert deleted_receipts == [], "DeleteMessage must not be called for retryable failure"
+
+
+@pytest.mark.integration
+async def test_action_timeout_marks_retrying_and_does_not_delete(session_factory, sqs):
+    """Action exceeding timeout_seconds -> RETRYING, no DeleteMessage."""
+
+    class NoParams(BaseModel):
+        pass
+
+    class SlowHandler:
+        name = "slow"
+        params_model = NoParams
+        timeout_seconds = 1
+
+        async def execute(self, run, params) -> ActionResult:
+            await asyncio.sleep(5)
+            return ActionResult(ok=True, result={}, error=None)
+
+    job, run = await _insert_queued_run(session_factory, action="slow", action_params={})
+    message = _make_sqs_message(run.run_id, job.job_id)
+
+    deleted_receipts: list[str] = []
+    sqs.delete_message = deleted_receipts.append
+
+    registry = {"slow": SlowHandler()}
+    await process_one(session_factory, sqs, message, registry=registry)
+
+    async with session_factory() as session:
+        async with session.begin():
+            updated_run = (
+                await session.execute(select(JobRun).where(JobRun.run_id == run.run_id))
+            ).scalar_one()
+            events = (
+                (await session.execute(select(RunEvent).where(RunEvent.run_id == run.run_id)))
+                .scalars()
+                .all()
+            )
+
+    assert updated_run.status == "RETRYING"
+    assert updated_run.finish_at is None
+    assert "timed out" in (updated_run.error_message or "")
+
+    event_types = [e.event_type for e in sorted(events, key=lambda e: e.event_id)]
+    assert event_types == ["STARTED", "RETRY"]
+
+    assert deleted_receipts == [], "DeleteMessage must not be called on timeout"
+
+
+@pytest.mark.integration
+async def test_action_exception_marks_retrying_and_does_not_delete(session_factory, sqs):
+    """Handler raising an unexpected exception -> RETRYING, no DeleteMessage."""
+
+    class NoParams(BaseModel):
+        pass
+
+    class BrokenHandler:
+        name = "broken"
+        params_model = NoParams
+        timeout_seconds = 10
+
+        async def execute(self, run, params) -> ActionResult:
+            raise RuntimeError("upstream API connection refused")
+
+    job, run = await _insert_queued_run(session_factory, action="broken", action_params={})
+    message = _make_sqs_message(run.run_id, job.job_id)
+
+    deleted_receipts: list[str] = []
+    sqs.delete_message = deleted_receipts.append
+
+    registry = {"broken": BrokenHandler()}
+    await process_one(session_factory, sqs, message, registry=registry)
+
+    async with session_factory() as session:
+        async with session.begin():
+            updated_run = (
+                await session.execute(select(JobRun).where(JobRun.run_id == run.run_id))
+            ).scalar_one()
+
+    assert updated_run.status == "RETRYING"
+    assert "connection refused" in (updated_run.error_message or "")
+    assert deleted_receipts == [], "DeleteMessage must not be called on exception"

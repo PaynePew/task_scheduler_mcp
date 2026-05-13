@@ -252,18 +252,42 @@ async def process_one(
         sqs.delete_message(receipt)
         return
 
-    # Phase 3: dispatch with per-action timeout (S07a: exception/timeout → leave message)
+    # Phase 3: dispatch with per-action timeout
     try:
         action_result = await asyncio.wait_for(
             handler.execute(run, params),
             timeout=handler.timeout_seconds,
         )
-    except Exception:
+    except TimeoutError:
+        logger.warning(
+            "run_id=%s action=%r timed out after %ds; marking RETRYING",
+            run_id,
+            job.action,
+            handler.timeout_seconds,
+        )
+        async with session_factory() as session:
+            async with session.begin():
+                await _write_retrying(
+                    session,
+                    run_id,
+                    job_id,
+                    error_message=f"action timed out after {handler.timeout_seconds}s",
+                )
+        return
+    except Exception as exc:
         logger.exception(
-            "run_id=%s action=%r raised or timed out; leaving message for redelivery",
+            "run_id=%s action=%r raised; marking RETRYING",
             run_id,
             job.action,
         )
+        async with session_factory() as session:
+            async with session.begin():
+                await _write_retrying(
+                    session,
+                    run_id,
+                    job_id,
+                    error_message=f"action raised: {exc!r}",
+                )
         return
 
     # Phase 4: write terminal status in one transaction + DeleteMessage
