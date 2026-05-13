@@ -162,7 +162,7 @@ def create_server(
         if name == "task.list_actions@v1":
             result = success({"actions": _build_action_list()})
         elif name == "task.create@v1":
-            result = await _handle_task_create(arguments, user_id, _session_factory)
+            result = await _handle_task_create(arguments, user_id, session_factory=_session_factory)
         elif name == "task.status@v1":
             result = await handle_task_status(arguments, user_id, session_factory=_session_factory)
         elif name == "task.cancel@v1":
@@ -179,6 +179,7 @@ def create_server(
 async def _handle_task_create(
     arguments: dict[str, Any],
     user_id: str,
+    *,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> dict[str, Any]:
     action = arguments.get("action")
