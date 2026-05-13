@@ -242,12 +242,14 @@ async def test_one_shot_invalid_timezone_raises(session_factory):
 @pytest.mark.integration
 async def test_one_shot_timezone_normalises_to_utc(session_factory):
     """scheduled_at expressed in Asia/Taipei (+08:00) is stored as UTC in the DB."""
-    # 10:00 Taipei time = 02:00 UTC
-    future_taipei = (datetime.now(tz=UTC) + timedelta(hours=9)).replace(
+    # Build a naive ISO string far enough in the future that, after being
+    # reinterpreted in Asia/Taipei (UTC+8) and converted back to UTC, it still
+    # lies in the future of the validation `now`. 9h in UTC strips to a naive
+    # wall-clock that, read as Taipei, lands ~1h in the future of UTC `now`.
+    base_utc = (datetime.now(tz=UTC) + timedelta(hours=9)).replace(
         minute=0, second=0, microsecond=0
     )
-    # Express the same moment as a naive datetime interpreted in Asia/Taipei
-    naive_future = future_taipei.replace(tzinfo=None)
+    naive_future = base_utc.replace(tzinfo=None)
     naive_str = naive_future.isoformat()
 
     async with session_factory() as session:
