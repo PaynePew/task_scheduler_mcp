@@ -45,6 +45,7 @@ async def poll_once(
                 .join(Job, Job.job_id == RunEvent.job_id)
                 .where(
                     RunEvent.event_type.in_(TERMINAL_EVENTS),
+                    # type: ignore: SQLAlchemy's JSONB.has_key is dynamically attached.
                     ~RunEvent.processed_by.has_key(PROCESSED_BY_KEY),  # type: ignore[attr-defined]
                     Job.cron_expr.isnot(None),
                 )

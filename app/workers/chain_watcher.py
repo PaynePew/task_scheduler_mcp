@@ -49,6 +49,7 @@ async def poll_once(
                 select(RunEvent)
                 .where(
                     RunEvent.event_type.in_(TERMINAL_EVENTS),
+                    # type: ignore: SQLAlchemy's JSONB.has_key is dynamically attached.
                     ~RunEvent.processed_by.has_key(PROCESSED_BY_KEY),  # type: ignore[attr-defined]
                     has_downstream,
                 )
