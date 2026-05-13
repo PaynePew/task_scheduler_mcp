@@ -33,5 +33,11 @@ class Settings(BaseSettings):
     db_pool_size: int = 5
     db_max_overflow: int = 10
 
+    # Reconciler grace windows (issue #30).
+    # DLQ grace: VisibilityTimeout(30s) * (MaxReceiveCount(3) + 1) + slack(60s) = 180s.
+    # QUEUED grace: VisibilityTimeout(30s) * 2 + slack(30s) = 90s.
+    reconciler_dlq_grace_seconds: int = 180
+    reconciler_queued_grace_seconds: int = 90
+
 
 settings = Settings()
