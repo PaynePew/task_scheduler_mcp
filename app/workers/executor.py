@@ -131,6 +131,37 @@ async def _write_permanent_failure(
     )
 
 
+async def _write_retrying(
+    session: AsyncSession,
+    run_id: int,
+    job_id: int,
+    error_message: str,
+) -> None:
+    """Write RETRYING status + RunEvent(RETRY) in one transaction.
+    Caller does NOT DeleteMessage - SQS visibility expiry handles redelivery,
+    and after MaxReceiveCount = 3 the message routes to the DLQ.
+    """
+    now = datetime.now(tz=UTC)
+    await session.execute(
+        update(JobRun)
+        .where(JobRun.run_id == run_id)
+        .values(
+            status="RETRYING",
+            updated_at=now,
+            error_message=error_message,
+        )
+    )
+    session.add(
+        RunEvent(
+            run_id=run_id,
+            job_id=job_id,
+            event_type="RETRY",
+            status_from="RUNNING",
+            status_to="RETRYING",
+        )
+    )
+
+
 async def process_one(
     session_factory: async_sessionmaker[AsyncSession],
     sqs: SQSClient,
@@ -241,12 +272,20 @@ async def process_one(
     elif not action_result.retryable:
         terminal_status = "FAILED"
     else:
-        # retryable=True — S07b handles retry/heartbeat; S07a leaves message
+        # retryable=True —> RETRYING + RunEvent(RETRY); SQS visibility expiry redelivers.
         logger.info(
-            "run_id=%s action=%r returned retryable failure; leaving message (S07b)",
+            "run_id=%s action=%r returned retryable failure; marking RETRYING",
             run_id,
             job.action,
         )
+        async with session_factory() as session:
+            async with session.begin():
+                await _write_retrying(
+                    session,
+                    run_id,
+                    job_id,
+                    error_message=action_result.error or "retryable failure",
+                )
         return
 
     async with session_factory() as session:

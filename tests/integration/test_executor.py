@@ -348,3 +348,53 @@ async def test_unknown_action_marks_run_failed_and_deletes_message(session_facto
 
     # SQS message must be deleted — no more redelivery
     assert message["ReceiptHandle"] in deleted_receipts
+
+
+@pytest.mark.integration
+async def test_retryable_failure_marks_retrying_and_does_not_delete(session_factory, sqs):
+    """Handler returning ok=False, retryable=True -> RETRYING + no DeleteMessage."""
+
+    class NoParams(BaseModel):
+        pass
+
+    class RetryableFailHandler:
+        name = "retryable_fail"
+        params_model = NoParams
+        timeout_seconds = 10
+
+        async def execute(self, run, params) -> ActionResult:
+            return ActionResult(ok=False, result=None, error="transient error", retryable=True)
+
+    job, run = await _insert_queued_run(session_factory, action="retryable_fail", action_params={})
+    message = _make_sqs_message(run.run_id, job.job_id)
+
+    deleted_receipts: list[str] = []
+    sqs.delete_message = deleted_receipts.append
+
+    registry = {"retryable_fail": RetryableFailHandler()}
+    await process_one(session_factory, sqs, message, registry=registry)
+
+    async with session_factory() as session:
+        async with session.begin():
+            updated_run = (
+                await session.execute(select(JobRun).where(JobRun.run_id == run.run_id))
+            ).scalar_one()
+            events = (
+                (await session.execute(select(RunEvent).where(RunEvent.run_id == run.run_id)))
+                .scalars()
+                .all()
+            )
+    # 1) Run 留在 RETRYING (非終態)
+    assert updated_run.status == "RETRYING"
+    assert updated_run.finish_at is None, "RETRYING is not terminal - finish_at must stay None"
+    assert updated_run.error_message == "transient error"
+
+    # 2) 事件序: STARTED -> RETRY
+    event_types = [e.event_type for e in sorted(events, key=lambda e: e.event_id)]
+    assert event_types == ["STARTED", "RETRY"]
+    retry_event = next(e for e in events if e.event_type == "RETRY")
+    assert retry_event.status_from == "RUNNING"
+    assert retry_event.status_to == "RETRYING"
+
+    # 3) 訊息沒有被刪 - 留給 SQS visibility expiry 處理 redelivery
+    assert deleted_receipts == [], "DeleteMessage must not be called for retryable failure"
