@@ -60,18 +60,11 @@ async def _force_run_status(
     status: str,
 ) -> None:
     """Directly set all job_runs for a job to a given status (for test setup)."""
-    from sqlalchemy import select
-
     async with factory() as session:
         async with session.begin():
-            result = await session.execute(select(JobRun).where(JobRun.job_id == job_id))
-            runs = result.scalars().all()
-            for run in runs:
-                await session.execute(
-                    update(JobRun)
-                    .where(JobRun.run_id == run.run_id, JobRun.time_bucket == run.time_bucket)
-                    .values(status=status)
-                )
+            await session.execute(
+                update(JobRun).where(JobRun.job_id == job_id).values(status=status)
+            )
 
 
 # ---------------------------------------------------------------------------
