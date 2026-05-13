@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -44,12 +45,57 @@ class InvalidStateError(Exception):
 class UnsupportedScheduleTypeError(Exception):
     """Raised when schedule_type is not yet implemented (maps to USER_INPUT).
 
-    S04 only implements 'immediate'. One-shot-with-future-datetime and
-    recurring/chain schedules land in later slices (S10, S13). Until then,
-    passing anything other than 'immediate' is rejected explicitly rather
-    than silently degraded to one-shot-now (which would mask scheduling bugs
-    far from their cause).
+    W1 implements 'immediate' and 'one-shot'. Recurring/chain schedules land
+    in later slices (S13). Passing anything else is rejected explicitly rather
+    than silently degraded, which would mask scheduling bugs far from their cause.
     """
+
+
+class InvalidScheduledAtError(Exception):
+    """Raised when scheduled_at is missing, unparseable, or not in the future (USER_INPUT)."""
+
+
+class InvalidTimezoneError(Exception):
+    """Raised when timezone is not a valid IANA tz key (USER_INPUT).
+
+    Offset strings (UTC+8, +08:00) and Windows IDs (Taipei Standard Time) are
+    rejected here; only IANA keys accepted by zoneinfo.ZoneInfo are valid.
+    """
+
+
+_SUPPORTED_SCHEDULE_TYPES = frozenset({"immediate", "one-shot"})
+
+
+def _validate_iana_timezone(tz_str: str) -> ZoneInfo:
+    """Return ZoneInfo for tz_str; raise InvalidTimezoneError if not a valid IANA key."""
+    try:
+        return ZoneInfo(tz_str)
+    except (ZoneInfoNotFoundError, KeyError):
+        raise InvalidTimezoneError(tz_str)
+
+
+def _parse_and_normalize_scheduled_at(scheduled_at_str: str | None, tz: ZoneInfo) -> datetime:
+    """Parse scheduled_at string, apply tz if naive, convert to UTC, validate future.
+
+    Raises InvalidScheduledAtError for None, unparseable, or past values.
+    """
+    if scheduled_at_str is None:
+        raise InvalidScheduledAtError("scheduled_at is required for one-shot scheduling")
+
+    try:
+        dt = datetime.fromisoformat(scheduled_at_str)
+    except (ValueError, TypeError):
+        raise InvalidScheduledAtError(f"Cannot parse scheduled_at '{scheduled_at_str}' as ISO 8601")
+
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=tz)
+
+    dt_utc = dt.astimezone(UTC)
+
+    if dt_utc <= datetime.now(tz=UTC):
+        raise InvalidScheduledAtError(f"scheduled_at '{scheduled_at_str}' must be in the future")
+
+    return dt_utc
 
 
 async def create_job(
@@ -60,17 +106,27 @@ async def create_job(
     action_params: dict,
     schedule_type: str,
     idempotency_key: str | None = None,
+    scheduled_at: str | None = None,
+    timezone: str = "UTC",
 ) -> Job:
     """Insert Job + JobRun(PENDING) + RunEvent(CREATED) in one transaction.
 
     Returns the existing Job on (user_id, idempotency_key) collision.
     Raises UnknownActionError if action is not in ACTION_REGISTRY.
-    Raises UnsupportedScheduleTypeError for any schedule_type other than 'immediate'.
+    Raises UnsupportedScheduleTypeError for unimplemented schedule_type values.
+    Raises InvalidTimezoneError if timezone is not a valid IANA key.
+    Raises InvalidScheduledAtError if scheduled_at is missing, unparseable, or past.
     """
-    if schedule_type != "immediate":
+    if schedule_type not in _SUPPORTED_SCHEDULE_TYPES:
         raise UnsupportedScheduleTypeError(schedule_type)
     if action not in ACTION_REGISTRY:
         raise UnknownActionError(action)
+
+    if schedule_type == "one-shot":
+        tz = _validate_iana_timezone(timezone)
+        run_at = _parse_and_normalize_scheduled_at(scheduled_at, tz)
+    else:
+        run_at = datetime.now(tz=UTC)
 
     async with session.begin():
         if idempotency_key is not None:
@@ -89,11 +145,10 @@ async def create_job(
             if existing is not None:
                 return existing
 
-        now = datetime.now(tz=UTC)
         # Hour-truncated partition key. See JobRun.time_bucket in db/models.py
         # for the full rationale — it lets the watcher's hot query scan one
         # bucket instead of the whole table.
-        time_bucket = now.replace(minute=0, second=0, microsecond=0).isoformat()
+        time_bucket = run_at.replace(minute=0, second=0, microsecond=0).isoformat()
 
         job = Job(
             user_id=user_id,
@@ -101,7 +156,8 @@ async def create_job(
             action=action,
             action_params=action_params,
             job_type="one_shot",
-            scheduled_at=now,
+            scheduled_at=run_at,
+            timezone=timezone,
             idempotency_key=idempotency_key,
         )
         session.add(job)
@@ -110,7 +166,7 @@ async def create_job(
         run = JobRun(
             time_bucket=time_bucket,
             job_id=job.job_id,
-            scheduled_at=now,
+            scheduled_at=run_at,
             status="PENDING",
         )
         session.add(run)

@@ -5,7 +5,9 @@ from __future__ import annotations
 from typing import Any
 
 from app.domain.jobs import (
+    InvalidScheduledAtError,
     InvalidStateError,
+    InvalidTimezoneError,
     JobNotFoundError,
     UnknownActionError,
     UnsupportedScheduleTypeError,
@@ -28,9 +30,23 @@ def map_domain_error(exc: Exception) -> dict[str, Any]:
     if isinstance(exc, UnsupportedScheduleTypeError):
         return error(
             "USER_INPUT",
-            f"Unsupported schedule_type '{exc}'. Only 'immediate' is supported in this version.",
+            f"Unsupported schedule_type '{exc}'.",
             field="schedule_type",
-            expected="immediate",
+            expected="immediate or one-shot",
+        )
+    if isinstance(exc, InvalidScheduledAtError):
+        return error(
+            "USER_INPUT",
+            str(exc),
+            field="scheduled_at",
+            expected="ISO 8601 datetime in the future",
+        )
+    if isinstance(exc, InvalidTimezoneError):
+        return error(
+            "USER_INPUT",
+            f"Invalid timezone '{exc}'.",
+            field="timezone",
+            expected='IANA timezone key (e.g. "Asia/Taipei", "UTC")',
         )
     if isinstance(exc, JobNotFoundError):
         return error("NOT_FOUND", f"Job not found: {exc}")
