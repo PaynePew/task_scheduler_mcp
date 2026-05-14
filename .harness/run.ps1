@@ -237,7 +237,19 @@ function Invoke-HarnessHook {
     $env:HARNESS_ISSUE  = "$Issue"
     $env:HARNESS_BRANCH = $Branch
     $env:HARNESS_PHASE  = $Phase
-    bash $hookPath
+    # Convert the Windows path to a form `bash` can resolve. Two failure modes
+    # are possible when PowerShell hands `bash` a `C:\...` argv:
+    #   - Git Bash / MSYS2 silently strips the backslashes → bash sees
+    #     `C:UsersMaxL...` and reports "No such file or directory" (exit 127).
+    #   - WSL bash receives the path intact but doesn't recognize Windows drive
+    #     syntax — it expects `/mnt/c/...`.
+    # `wslpath -u` (present in WSL bash and Git Bash w/ WSL integration) handles
+    # both cases; bare Git Bash falls back to plain forward-slash form.
+    $bashPath = bash -c "wslpath -u '$hookPath' 2>/dev/null"
+    if (-not $bashPath) {
+        $bashPath = $hookPath -replace '\\', '/'
+    }
+    bash $bashPath
     if ($LASTEXITCODE -ne 0) {
         Write-Host "  WARNING: hook '$HookName' exited $LASTEXITCODE — continuing." -ForegroundColor Yellow
     }
