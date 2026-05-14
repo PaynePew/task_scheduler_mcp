@@ -59,6 +59,31 @@ uv run ruff format --check .
 docker compose --profile full up
 ```
 
+### Run E2E test (W1 acceptance gate)
+
+The E2E test in `tests/integration/test_e2e_inspector_flow.py` reproduces the
+6-step MCP Inspector verification flow from `PROMPT.md` § Verification step 2
+against a real Postgres + ElasticMQ backend.
+
+**Prerequisites:** the default Compose services must be running first.
+
+```bash
+# 1. Start infra + run migrations
+docker compose up -d postgres elasticmq
+alembic upgrade head          # or: docker compose run --rm migrate
+
+# 2. Run only the E2E test
+uv run pytest -m integration tests/integration/test_e2e_inspector_flow.py -v
+
+# 3. Or run the full integration suite (includes E2E)
+uv run pytest -m integration
+```
+
+The test exercises all six steps in-process (no TCP port needed for the MCP
+server): it uses `httpx.ASGITransport` for MCP tool calls, then drives
+`claim_and_publish` (Watcher) and `process_one` (Worker) directly to complete
+the immediate-echo job — the "CI equivalent" of the full `--profile full` stack.
+
 ## Project layout
 
 ```
