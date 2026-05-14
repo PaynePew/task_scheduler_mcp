@@ -619,6 +619,7 @@ if ($SmokeTest) {
         '--env',    'DATABASE_URL=postgresql+asyncpg://app:app@host.docker.internal:5432/app',
         '--env',    'ALEMBIC_DATABASE_URL=postgresql+psycopg://app:app@host.docker.internal:5432/app',
         '--env',    'QUEUE_URL=http://host.docker.internal:9324/queue/task-queue',
+        '--env',    'QUEUE_DLQ_URL=http://host.docker.internal:9324/queue/task-dlq',
         '--workdir', '/workspace',
         $imageName,
         'bash', '-lc', $claudeCmd
@@ -790,6 +791,7 @@ $dockerArgs = @(
     '--env',    'DATABASE_URL=postgresql+asyncpg://app:app@host.docker.internal:5432/app',
     '--env',    'ALEMBIC_DATABASE_URL=postgresql+psycopg://app:app@host.docker.internal:5432/app',
     '--env',    'QUEUE_URL=http://host.docker.internal:9324/queue/task-queue',
+    '--env',    'QUEUE_DLQ_URL=http://host.docker.internal:9324/queue/task-dlq',
     '--workdir', '/workspace',
     $imageName,
     'bash', '-lc', $claudeInvocation
@@ -903,6 +905,7 @@ if ($Issue -and -not $SmokeTest -and $StartPhase -eq 'merge') {
         '--env',    'DATABASE_URL=postgresql+asyncpg://app:app@host.docker.internal:5432/app',
         '--env',    'ALEMBIC_DATABASE_URL=postgresql+psycopg://app:app@host.docker.internal:5432/app',
         '--env',    'QUEUE_URL=http://host.docker.internal:9324/queue/task-queue',
+        '--env',    'QUEUE_DLQ_URL=http://host.docker.internal:9324/queue/task-dlq',
         '--workdir', '/workspace',
         $imageName,
         'bash', '-lc', $reviewCmd
@@ -989,6 +992,7 @@ if ($reviewOk -and $Issue -and -not $SmokeTest -and -not $SkipMerge) {
         '--env',    'DATABASE_URL=postgresql+asyncpg://app:app@host.docker.internal:5432/app',
         '--env',    'ALEMBIC_DATABASE_URL=postgresql+psycopg://app:app@host.docker.internal:5432/app',
         '--env',    'QUEUE_URL=http://host.docker.internal:9324/queue/task-queue',
+        '--env',    'QUEUE_DLQ_URL=http://host.docker.internal:9324/queue/task-dlq',
         '--workdir', '/workspace',
         $imageName,
         'bash', '-lc', $mergeCmd
