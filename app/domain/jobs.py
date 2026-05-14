@@ -70,8 +70,8 @@ def _validate_iana_timezone(tz_str: str) -> ZoneInfo:
     """Return ZoneInfo for tz_str; raise InvalidTimezoneError if not a valid IANA key."""
     try:
         return ZoneInfo(tz_str)
-    except (ZoneInfoNotFoundError, KeyError):
-        raise InvalidTimezoneError(tz_str)
+    except (ZoneInfoNotFoundError, KeyError) as exc:
+        raise InvalidTimezoneError(tz_str) from exc
 
 
 def _parse_and_normalize_scheduled_at(scheduled_at_str: str | None, tz: ZoneInfo) -> datetime:
@@ -84,8 +84,10 @@ def _parse_and_normalize_scheduled_at(scheduled_at_str: str | None, tz: ZoneInfo
 
     try:
         dt = datetime.fromisoformat(scheduled_at_str)
-    except (ValueError, TypeError):
-        raise InvalidScheduledAtError(f"Cannot parse scheduled_at '{scheduled_at_str}' as ISO 8601")
+    except (ValueError, TypeError) as exc:
+        raise InvalidScheduledAtError(
+            f"Cannot parse scheduled_at '{scheduled_at_str}' as ISO 8601"
+        ) from exc
 
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=tz)
