@@ -108,7 +108,7 @@ def create_server(
     avoids asyncpg cross-event-loop errors (each pytest-asyncio test gets its
     own loop). Defaults to the module-level factory at runtime.
     """
-    _session_factory = session_factory or default_session_factory
+    factory = session_factory or default_session_factory
     server = Server("task-scheduler", instructions=SYSTEM_INSTRUCTION)
 
     @server.list_tools()
@@ -162,13 +162,13 @@ def create_server(
         if name == "task.list_actions@v1":
             result = success({"actions": _build_action_list()})
         elif name == "task.create@v1":
-            result = await _handle_task_create(arguments, user_id, session_factory=_session_factory)
+            result = await _handle_task_create(arguments, user_id, session_factory=factory)
         elif name == "task.status@v1":
-            result = await handle_task_status(arguments, user_id, session_factory=_session_factory)
+            result = await handle_task_status(arguments, user_id, session_factory=factory)
         elif name == "task.cancel@v1":
-            result = await handle_task_cancel(arguments, user_id, session_factory=_session_factory)
+            result = await handle_task_cancel(arguments, user_id, session_factory=factory)
         elif name == "task.list@v1":
-            result = await handle_task_list(arguments, user_id, session_factory=_session_factory)
+            result = await handle_task_list(arguments, user_id, session_factory=factory)
         else:
             result = error("INTERNAL", f"Unknown tool: {name}")
         return [types.TextContent(type="text", text=json.dumps(result))]
