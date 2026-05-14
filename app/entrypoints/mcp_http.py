@@ -9,7 +9,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
-from typing import Any
 
 import anyio
 from anyio.abc import TaskStatus
@@ -91,7 +90,7 @@ def build_app(
             fresh factory to avoid asyncpg cross-event-loop errors; omit in
             production (falls back to the module-level factory).
     """
-    handler: Any = _McpHttpEndpoint(json_response=json_response, session_factory=session_factory)
+    handler = _McpHttpEndpoint(json_response=json_response, session_factory=session_factory)
     return Starlette(
         routes=[Route("/mcp", endpoint=handler, methods=["GET", "POST", "DELETE"])],
     )
