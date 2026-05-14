@@ -74,7 +74,7 @@ def _validate_iana_timezone(tz_str: str) -> ZoneInfo:
         raise InvalidTimezoneError(tz_str) from exc
 
 
-def _parse_and_normalize_scheduled_at(scheduled_at_str: str | None, tz: ZoneInfo) -> datetime:
+def _parse_and_normalise_scheduled_at(scheduled_at_str: str | None, tz: ZoneInfo) -> datetime:
     """Parse scheduled_at string, apply tz if naive, convert to UTC, validate future.
 
     Raises InvalidScheduledAtError for None, unparseable, or past values.
@@ -126,7 +126,7 @@ async def create_job(
 
     if schedule_type == "one-shot":
         tz = _validate_iana_timezone(timezone)
-        run_at = _parse_and_normalize_scheduled_at(scheduled_at, tz)
+        run_at = _parse_and_normalise_scheduled_at(scheduled_at, tz)
     else:
         run_at = datetime.now(tz=UTC)
 
