@@ -108,7 +108,7 @@ async def session_factory() -> async_sessionmaker[AsyncSession]:
 
 
 @pytest.fixture
-def sqs(session_factory) -> SQSClient:
+def sqs() -> SQSClient:
     """SQSClient pointed at ElasticMQ; drains leftover messages before test."""
     client = SQSClient()
     while True:
