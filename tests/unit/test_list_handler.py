@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 
 from app.mcp.handlers.list import handle_task_list
@@ -11,9 +13,23 @@ from app.mcp.handlers.list import handle_task_list
 # ---------------------------------------------------------------------------
 
 
+def _stub_factory() -> MagicMock:
+    """Session factory whose `async with` raises — keeps unit tests off the real DB.
+
+    Validation-path tests assert on `error.field`; the handler's `except Exception`
+    branch returns INTERNAL (no field), so the assertions still hold.
+    """
+    factory = MagicMock()
+    factory.return_value.__aenter__ = AsyncMock(
+        side_effect=RuntimeError("DB not available in unit tests")
+    )
+    factory.return_value.__aexit__ = AsyncMock(return_value=None)
+    return factory
+
+
 async def _call(args: dict) -> dict:
     """Call handle_task_list without a real DB (only validation paths tested here)."""
-    return await handle_task_list(args, user_id="test-user")
+    return await handle_task_list(args, user_id="test-user", session_factory=_stub_factory())
 
 
 # ---------------------------------------------------------------------------
