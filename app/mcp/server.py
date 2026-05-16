@@ -14,6 +14,7 @@ from pydantic import AnyUrl
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.actions.registry import ACTION_REGISTRY
+from app.config.settings import settings
 from app.db.engine import async_session_factory as default_session_factory
 from app.domain.jobs import create_job
 from app.mcp.envelope import error, success
@@ -54,11 +55,12 @@ _TASK_CREATE_SCHEMA: dict[str, Any] = {
         },
         "schedule_type": {
             "type": "string",
-            "enum": ["immediate", "one-shot"],
+            "enum": ["immediate", "one-shot", "recurring"],
             "default": "immediate",
             "description": (
                 "When to run the task. 'immediate' runs as soon as a worker is free; "
-                "'one-shot' runs at the specified scheduled_at datetime."
+                "'one-shot' runs at the specified scheduled_at datetime; "
+                "'recurring' runs on a cron schedule (requires cron_expr)."
             ),
         },
         "scheduled_at": {
@@ -69,17 +71,29 @@ _TASK_CREATE_SCHEMA: dict[str, Any] = {
                 "(e.g. '2026-05-14T09:00:00+00:00'). Required when schedule_type='one-shot'."
             ),
         },
+        "cron_expr": {
+            "type": ["string", "null"],
+            "default": None,
+            "description": (
+                "5-field POSIX cron expression (minute hour dom month dow), "
+                "e.g. '0 8 * * *' for daily at 8 AM. "
+                "Also accepts @daily, @hourly, @weekly, @monthly, @yearly. "
+                "Required when schedule_type='recurring'."
+            ),
+        },
         "idempotency_key": {
             "type": ["string", "null"],
             "default": None,
             "description": "Optional caller-supplied deduplication key.",
         },
         "timezone": {
-            "type": "string",
-            "default": "UTC",
+            "type": ["string", "null"],
+            "default": None,
             "description": (
                 "IANA timezone key (e.g. 'Asia/Taipei', 'Europe/London', 'UTC'). "
-                "Used to interpret naive scheduled_at datetimes. Defaults to UTC."
+                "Used to interpret cron schedules and naive scheduled_at datetimes. "
+                "Falls back to the X-Timezone request header, then the MCP_USER_TZ "
+                "environment variable, then UTC."
             ),
         },
     },
@@ -255,13 +269,15 @@ async def _handle_task_create(
     user_id: str,
     *,
     session_factory: async_sessionmaker[AsyncSession],
+    tz_header: str | None = None,
 ) -> dict[str, Any]:
     action = arguments.get("action")
     action_params = arguments.get("action_params", {})
     schedule_type = arguments.get("schedule_type", "immediate")
     scheduled_at = arguments.get("scheduled_at")
     idempotency_key = arguments.get("idempotency_key")
-    timezone = arguments.get("timezone", "UTC")
+    timezone = arguments.get("timezone") or None
+    cron_expr = arguments.get("cron_expr") or None
 
     try:
         async with session_factory() as session:
@@ -274,6 +290,9 @@ async def _handle_task_create(
                 scheduled_at=scheduled_at,
                 idempotency_key=idempotency_key,
                 timezone=timezone,
+                cron_expr=cron_expr,
+                tz_header=tz_header,
+                tz_env=settings.mcp_user_tz,
             )
         return success({"job_id": job.job_id, "status": "scheduled"})
     except Exception as exc:

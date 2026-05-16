@@ -17,7 +17,7 @@ def test_unsupported_schedule_type_maps_to_user_input():
     assert result["ok"] is False
     assert result["error"]["code"] == "USER_INPUT"
     assert result["error"]["field"] == "schedule_type"
-    assert result["error"]["expected"] == "immediate or one-shot"
+    assert result["error"]["expected"] == "immediate, one-shot, or recurring"
 
 
 def test_generic_exception_maps_to_internal():

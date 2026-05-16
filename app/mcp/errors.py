@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.domain.jobs import (
+    InvalidCronExprError,
     InvalidScheduledAtError,
     InvalidStateError,
     InvalidTimezoneError,
@@ -32,7 +33,17 @@ def map_domain_error(exc: Exception) -> dict[str, Any]:
             "USER_INPUT",
             f"Unsupported schedule_type '{exc}'.",
             field="schedule_type",
-            expected="immediate or one-shot",
+            expected="immediate, one-shot, or recurring",
+        )
+    if isinstance(exc, InvalidCronExprError):
+        return error(
+            "USER_INPUT",
+            str(exc),
+            field="cron_expr",
+            expected=(
+                "5-field POSIX expression (minute hour dom month dow), "
+                "e.g. '0 8 * * *', or @daily/@hourly/@weekly/@monthly/@yearly"
+            ),
         )
     if isinstance(exc, InvalidScheduledAtError):
         return error(
