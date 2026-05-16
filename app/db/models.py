@@ -51,13 +51,12 @@ class Job(Base):
     # fields must be set for each type.
     job_type: Mapped[str] = mapped_column(Text, nullable=False, server_default="one_shot")
     scheduled_at: Mapped[datetime | None] = mapped_column(TZ, nullable=True)
-    # The next four columns are W2-scope features whose *schema* is intentionally
-    # frozen in W1 so the watcher/worker hot path stays migration-free later.
     # cron expansion (RecurringJobWatcher) and chain logic (ChainWatcher) land in W2.
     cron_expr: Mapped[str | None] = mapped_column(Text, nullable=True)
     timezone: Mapped[str] = mapped_column(Text, nullable=False, server_default="UTC")
-    raw_user_input: Mapped[str | None] = mapped_column(Text, nullable=True)
-    parsing_metadata: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # Set by cancel_job() the first time a cancel is requested (ADR-022).
+    # Once non-NULL, re-cancel is a no-op (idempotent best-effort semantics).
+    cancelled_at: Mapped[datetime | None] = mapped_column(TZ, nullable=True)
     trigger_on_job_id: Mapped[int | None] = mapped_column(
         BigInteger, ForeignKey("jobs.job_id", ondelete="SET NULL"), nullable=True
     )

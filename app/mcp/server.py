@@ -7,7 +7,10 @@ import logging
 from typing import Any
 
 import mcp.types as types
+from mcp import McpError
 from mcp.server.lowlevel import Server
+from mcp.types import INVALID_PARAMS, ErrorData
+from pydantic import AnyUrl
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.actions.registry import ACTION_REGISTRY
@@ -18,6 +21,11 @@ from app.mcp.errors import map_domain_error
 from app.mcp.handlers.cancel import TASK_CANCEL_SCHEMA, handle_task_cancel
 from app.mcp.handlers.list import TASK_LIST_SCHEMA, handle_task_list
 from app.mcp.handlers.status import TASK_STATUS_SCHEMA, handle_task_status
+from app.mcp.prompts import daily_review as _daily_review
+from app.mcp.prompts import setup_summary as _setup_summary
+from app.mcp.resources.actions_resource import read_tasks_actions
+from app.mcp.resources.job_resource import read_tasks_job
+from app.mcp.resources.list_resource import read_tasks_list
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +94,33 @@ _TASK_LIST_ACTIONS_SCHEMA: dict[str, Any] = {
 }
 
 
+_RESOURCE_LIST = types.Resource(
+    uri=types.AnyUrl("tasks://list"),
+    name="Task List",
+    description=(
+        "Snapshot of the caller's most recent 20 jobs, newest-first. "
+        "Snapshot taken at session start; call task.list.v1 for fresh data."
+    ),
+    mimeType="application/json",
+)
+
+_RESOURCE_ACTIONS = types.Resource(
+    uri=types.AnyUrl("tasks://actions"),
+    name="Action Registry",
+    description=(
+        "Available actions with their names, descriptions, timeouts, and parameter schemas."
+    ),
+    mimeType="application/json",
+)
+
+_RESOURCE_TEMPLATE_JOB = types.ResourceTemplate(
+    uriTemplate="tasks://job/{job_id}",
+    name="Job Detail",
+    description="Full job definition plus the 5 most recent execution runs for a given job_id.",
+    mimeType="application/json",
+)
+
+
 def _build_action_list() -> list[dict[str, Any]]:
     return [
         {
@@ -111,6 +146,22 @@ def create_server(
     factory = session_factory or default_session_factory
     server = Server("task-scheduler", instructions=SYSTEM_INSTRUCTION)
 
+    @server.list_prompts()
+    async def list_prompts() -> list[types.Prompt]:
+        return [
+            _daily_review.build_prompt(),
+            _setup_summary.build_prompt(),
+        ]
+
+    @server.get_prompt()
+    async def get_prompt(name: str, arguments: dict[str, str] | None) -> types.GetPromptResult:
+        if name == _daily_review.NAME:
+            return _daily_review.build_result()
+        if name == _setup_summary.NAME:
+            topic, schedule = _setup_summary.validate_args(arguments)
+            return _setup_summary.build_result(topic, schedule)
+        raise McpError(ErrorData(code=INVALID_PARAMS, message=f"Unknown prompt: {name}"))
+
     @server.list_tools()
     async def list_tools() -> list[types.Tool]:
         return [
@@ -134,8 +185,12 @@ def create_server(
             types.Tool(
                 name="task.cancel.v1",
                 description=(
-                    "Cancel a job by transitioning all non-terminal runs to CANCELLED. "
-                    "Returns INVALID_STATE if all runs are already terminal."
+                    "Cancel a job. Pending, queued, and waiting runs are immediately "
+                    "transitioned to CANCELLED. Runs that are currently in-flight (RUNNING) "
+                    "are left to complete naturally — cancellation is best-effort for "
+                    "currently-running executions. Re-cancelling an already-cancelled job "
+                    "is idempotent and returns success. Returns INVALID_STATE if the job "
+                    "already fully terminated (all runs SUCCEEDED or FAILED)."
                 ),
                 inputSchema=TASK_CANCEL_SCHEMA,
             ),
@@ -156,6 +211,25 @@ def create_server(
                 inputSchema=_TASK_LIST_ACTIONS_SCHEMA,
             ),
         ]
+
+    @server.list_resource_templates()
+    async def list_resource_templates() -> list[types.ResourceTemplate]:
+        return [_RESOURCE_TEMPLATE_JOB]
+
+    @server.list_resources()
+    async def list_resources() -> list[types.Resource]:
+        return [_RESOURCE_LIST, _RESOURCE_ACTIONS]
+
+    @server.read_resource()
+    async def read_resource(uri: AnyUrl):
+        if uri.scheme == "tasks":
+            if uri.host == "list":
+                return await read_tasks_list(user_id, session_factory=factory)
+            if uri.host == "actions":
+                return read_tasks_actions()
+            if uri.host == "job":
+                return await read_tasks_job(uri, user_id, session_factory=factory)
+        raise McpError(ErrorData(code=INVALID_PARAMS, message=f"Unknown resource URI: {uri}"))
 
     @server.call_tool()
     async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextContent]:

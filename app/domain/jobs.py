@@ -33,7 +33,11 @@ class JobNotFoundError(Exception):
 
 
 class InvalidStateError(Exception):
-    """Raised when all runs are already terminal (maps to INVALID_STATE).
+    """Raised when a job cannot transition into the requested state (INVALID_STATE).
+
+    For cancel_job, this means every run has completed naturally
+    (SUCCEEDED/FAILED) and there is no pending or in-flight work to cancel —
+    see ADR-022 for the best-effort semantics.
 
     Carries the current internal status as its single arg so the transport
     layer can map it to a user-facing external status (ADR-014). The domain
@@ -199,6 +203,9 @@ class JobView:
     action: str
     internal_status: str
     runs: list[RunView] | None
+    description: str | None = None
+    job_type: str | None = None
+    created_at: datetime | None = None
 
 
 async def get_job_with_runs(
@@ -207,12 +214,13 @@ async def get_job_with_runs(
     user_id: str,
     job_id: int,
     include_runs: bool,
+    run_limit: int = 10,
 ) -> JobView:
-    """Return the job's current status and optionally its 10 most recent runs.
+    """Return the job's current status and optionally its most recent runs.
 
     Raises JobNotFoundError if job_id does not exist or belongs to another user.
-    The most recent 10 runs are ordered newest-first by start_at, falling back
-    to scheduled_at when start_at is NULL.
+    Runs are ordered newest-first by start_at, falling back to scheduled_at when
+    start_at is NULL. run_limit controls how many runs to return (default 10).
     """
     job_result = await session.execute(
         select(Job).where(Job.job_id == job_id, Job.user_id == user_id)
@@ -222,7 +230,7 @@ async def get_job_with_runs(
         raise JobNotFoundError(job_id)
 
     sort_key = func.coalesce(JobRun.start_at, JobRun.scheduled_at).desc()
-    limit = 10 if include_runs else 1
+    limit = run_limit if include_runs else 1
     runs_result = await session.execute(
         select(JobRun).where(JobRun.job_id == job_id).order_by(sort_key).limit(limit)
     )
@@ -245,10 +253,16 @@ async def get_job_with_runs(
         action=job.action,
         internal_status=internal_status,
         runs=run_views if include_runs else None,
+        description=job.description,
+        job_type=job.job_type,
+        created_at=job.created_at,
     )
 
 
-_TERMINAL_STATUSES: frozenset[str] = frozenset({"SUCCEEDED", "FAILED", "CANCELLED"})
+# Statuses that represent natural job completion — not caused by a cancel request.
+_NATURALLY_TERMINAL: frozenset[str] = frozenset({"SUCCEEDED", "FAILED"})
+# Statuses that are safe to flip to CANCELLED; RUNNING runs are left to complete.
+_CANCELLABLE_STATUSES: frozenset[str] = frozenset({"PENDING", "QUEUED", "WAITING", "RETRYING"})
 
 
 async def cancel_job(
@@ -257,12 +271,16 @@ async def cancel_job(
     user_id: str,
     job_id: int,
 ) -> JobView:
-    """Cancel all non-terminal JobRuns for a job, writing outbox events atomically.
+    """Job-level cancel: set cancelled_at, flip non-RUNNING pending runs to CANCELLED.
+
+    Best-effort semantics (ADR-022):
+    - RUNNING runs are left untouched so they complete naturally.
+    - Re-cancel on an already-cancelled job is idempotent (returns success).
+    - INVALID_STATE only when all runs finished naturally (SUCCEEDED/FAILED).
 
     Raises JobNotFoundError if job_id does not exist or belongs to another user.
-    Raises InvalidStateError(internal_status) if all runs are already terminal —
-    the transport layer maps the internal status to its external counterpart.
-    Returns a JobView reflecting the post-cancel state (internal_status='CANCELLED').
+    Raises InvalidStateError(internal_status) if job fully terminated naturally.
+    Returns a JobView reflecting post-cancel state (internal_status='CANCELLED').
     """
     async with session.begin():
         job_result = await session.execute(
@@ -272,19 +290,32 @@ async def cancel_job(
         if job is None:
             raise JobNotFoundError(job_id)
 
+        # Idempotent: cancelled_at is the single source of truth for "was this job cancelled".
+        if job.cancelled_at is not None:
+            return JobView(
+                job_id=job.job_id,
+                action=job.action,
+                internal_status="CANCELLED",
+                runs=None,
+            )
+
         runs_result = await session.execute(select(JobRun).where(JobRun.job_id == job_id))
         all_runs = runs_result.scalars().all()
 
-        non_terminal = [r for r in all_runs if r.status not in _TERMINAL_STATUSES]
-
-        if not non_terminal:
-            current_status = all_runs[0].status if all_runs else "PENDING"
+        # INVALID_STATE only when every run completed naturally (no in-flight or pending work).
+        if all_runs and all(r.status in _NATURALLY_TERMINAL for r in all_runs):
+            # Either SUCCEEDED or FAILED — both naturally-terminal, so any run's status
+            # is a valid hint for the external error message.
+            current_status = all_runs[0].status
             raise InvalidStateError(current_status)
 
-        for run in non_terminal:
-            # Capture the pre-update status: SQLAlchemy's bulk update() with the
-            # default synchronize_session="auto" mutates the in-memory ORM
-            # instance, so reading run.status after execute() yields 'CANCELLED'.
+        # Mark job as cancelled.
+        job.cancelled_at = datetime.now(tz=UTC)
+
+        # Flip only the pending/queued/waiting/retrying runs; leave RUNNING alone.
+        to_cancel = [r for r in all_runs if r.status in _CANCELLABLE_STATUSES]
+        for run in to_cancel:
+            # Capture pre-update status before SQLAlchemy's synchronize_session mutates it.
             original_status = run.status
             await session.execute(
                 update(JobRun)
@@ -392,3 +423,76 @@ async def list_jobs(
     ]
 
     return PagedJobs(items=items, total=total, page=page, page_size=page_size)
+
+
+@dataclass
+class JobResourceItem:
+    job_id: int
+    description: str
+    job_type: str
+    created_at: datetime
+    internal_status: str
+    cancelled_at: datetime | None
+
+
+async def list_jobs_resource(
+    session: AsyncSession,
+    *,
+    user_id: str,
+    limit: int = 20,
+) -> tuple[list[JobResourceItem], int]:
+    """Return the top *limit* jobs newest-first for the MCP R1 resource.
+
+    Returns (items, total_count). Includes description, job_type, and
+    cancelled_at derived from the most recent CANCELLED RunEvent per job.
+    """
+    # Subquery: latest run status per job (DISTINCT ON, Postgres-specific)
+    latest_run_sq = (
+        select(JobRun.job_id.label("job_id"), JobRun.status.label("status"))
+        .distinct(JobRun.job_id)
+        .order_by(JobRun.job_id, func.coalesce(JobRun.start_at, JobRun.scheduled_at).desc())
+        .subquery("latest_run_r")
+    )
+
+    # Subquery: most recent CANCELLED event per job
+    cancelled_sq = (
+        select(
+            RunEvent.job_id.label("job_id"),
+            func.max(RunEvent.occurred_at).label("cancelled_at"),
+        )
+        .where(RunEvent.event_type == "CANCELLED")
+        .group_by(RunEvent.job_id)
+        .subquery("cancelled_r")
+    )
+
+    count_q = select(func.count()).select_from(Job).where(Job.user_id == user_id)
+    total: int = (await session.execute(count_q)).scalar_one()
+
+    data_q = (
+        select(
+            Job,
+            latest_run_sq.c.status.label("run_status"),
+            cancelled_sq.c.cancelled_at.label("cancelled_at"),
+        )
+        .where(Job.user_id == user_id)
+        .outerjoin(latest_run_sq, Job.job_id == latest_run_sq.c.job_id)
+        .outerjoin(cancelled_sq, Job.job_id == cancelled_sq.c.job_id)
+        .order_by(Job.created_at.desc())
+        .limit(limit)
+    )
+
+    rows = (await session.execute(data_q)).all()
+
+    items = [
+        JobResourceItem(
+            job_id=row.Job.job_id,
+            description=row.Job.description,
+            job_type=row.Job.job_type,
+            created_at=row.Job.created_at,
+            internal_status=row.run_status if row.run_status is not None else "PENDING",
+            cancelled_at=row.cancelled_at,
+        )
+        for row in rows
+    ]
+
+    return items, total

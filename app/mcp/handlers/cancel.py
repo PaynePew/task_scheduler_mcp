@@ -33,10 +33,14 @@ async def handle_task_cancel(
     *,
     session_factory: async_sessionmaker[AsyncSession] | None = None,
 ) -> dict[str, Any]:
-    """Handle task.cancel.v1 — cancel all non-terminal runs for a job.
+    """Handle task.cancel.v1 — job-level cancel with best-effort in-flight semantics.
+
+    Pending/queued/waiting/retrying runs are flipped to CANCELLED. Runs that are
+    currently RUNNING are left to complete naturally (best-effort, per ADR-022).
+    Re-cancelling an already-cancelled job is idempotent and returns success.
 
     Returns NOT_FOUND for unknown or cross-user job_id.
-    Returns INVALID_STATE when all runs are already terminal.
+    Returns INVALID_STATE when the job fully terminated naturally (all SUCCEEDED/FAILED).
 
     `session_factory` is injectable so tests can pass a per-test factory.
     """
