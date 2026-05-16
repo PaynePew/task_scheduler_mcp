@@ -37,5 +37,6 @@ def resolve_timezone(
     """
     for candidate in (call_value, header_value, env_value):
         if _is_valid_iana(candidate):
+            # _is_valid_iana already rejected None/empty, so candidate is str here.
             return candidate  # type: ignore[return-value]
     return "UTC"
