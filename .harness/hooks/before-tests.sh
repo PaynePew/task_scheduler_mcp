@@ -1,21 +1,27 @@
 #!/usr/bin/env bash
-# Runs on the HOST (not inside the agent container) before the implement
-# phase starts. Brings up Postgres + ElasticMQ on host ports so the agent's
-# integration tests (reaching them via host.docker.internal) succeed on the
-# first try.
+# Runs on the HOST (not inside the agent container) before any phase of
+# an Issue-bound `.harness/run.ps1` invocation starts. Brings up the
+# shared Postgres + ElasticMQ services and waits for both to be
+# reachable, so subsequent provisioning + integration-test traffic
+# doesn't race on a half-started stack.
 #
-# Why on the host: the agent container has no docker.sock and no compose,
-# so it can't bring up its own stack. This hook plus the --add-host wiring
-# in run.ps1 is what makes `pytest -m integration` work end-to-end inside
-# the implement and review phases.
+# Why on the host: the agent container has no docker.sock and no
+# compose, so it can't bring up its own stack. This hook plus the
+# --add-host wiring in run.ps1 is what makes `pytest -m integration`
+# work end-to-end inside the implement / review / merge phases.
 #
-# Idempotent: `docker compose up -d` is a no-op when the services are
-# already running. `alembic upgrade head` is a no-op when schema is current.
+# Per-issue Postgres DB + queues are NOT provisioned here — run.ps1
+# calls .harness/lib/issue-infra.sh provision directly after this hook
+# so that a provisioning failure aborts the run instead of being
+# downgraded to a warning by Invoke-HarnessHook.
+#
+# Idempotent: `docker compose up -d` is a no-op when services are
+# already healthy.
 #
 # Env (provided by run.ps1):
 #   HARNESS_ISSUE  — issue number being worked on
 #   HARNESS_BRANCH — branch name
-#   HARNESS_PHASE  — pipeline phase ("implement", "review", ...)
+#   HARNESS_PHASE  — pipeline phase ("implement", "review", "merge", ...)
 
 set -euo pipefail
 
@@ -26,9 +32,9 @@ echo "[before-tests] bringing up postgres + elasticmq for issue ${HARNESS_ISSUE:
 
 docker compose up -d postgres elasticmq
 
-# Wait for postgres to be ready before running migrations. Compose's
-# healthcheck takes care of `mcp-server`-style waits, but our migrate-only
-# step needs to gate on the same condition manually.
+# Postgres readiness. Compose has a healthcheck but issue-infra.sh's
+# follow-up `docker compose exec postgres psql ...` call needs it
+# gated on the same condition explicitly.
 echo "[before-tests] waiting for postgres healthcheck..."
 deadline=$(( $(date +%s) + 60 ))
 while ! docker compose exec -T postgres pg_isready -U app -d app >/dev/null 2>&1; do
@@ -39,7 +45,18 @@ while ! docker compose exec -T postgres pg_isready -U app -d app >/dev/null 2>&1
     sleep 1
 done
 
-echo "[before-tests] running migrations via compose service (no host uv needed)"
-docker compose run --rm migrate
+# ElasticMQ readiness. The container being "running" doesn't mean its
+# REST endpoint is bound yet; the CreateQueue calls in issue-infra.sh
+# would fail with connection-refused otherwise. ListQueues is the
+# cheapest action — empty result is fine.
+echo "[before-tests] waiting for elasticmq..."
+deadline=$(( $(date +%s) + 30 ))
+while ! curl -fsS -o /dev/null "http://localhost:9324/?Action=ListQueues" 2>/dev/null; do
+    if [[ $(date +%s) -gt $deadline ]]; then
+        echo "[before-tests] elasticmq did not become ready within 30s" >&2
+        exit 1
+    fi
+    sleep 1
+done
 
 echo "[before-tests] services ready"

@@ -255,6 +255,36 @@ function Invoke-HarnessHook {
     }
 }
 
+# Invokes .harness/lib/issue-infra.sh to provision/destroy the per-issue
+# Postgres DB + ElasticMQ queues. Unlike Invoke-HarnessHook (which only
+# warns on failure), `provision` is fatal — without per-issue resources
+# the downstream docker blocks would fail anyway, just less clearly.
+# `destroy` keeps the warn-only behavior since cleanup races are common
+# and rarely actionable.
+function Invoke-IssueInfra {
+    param(
+        [Parameter(Mandatory)][ValidateSet('provision', 'destroy')][string]$Action,
+        [Parameter(Mandatory)][int]$IssueNumber
+    )
+    $scriptPath = "$HarnessRoot/lib/issue-infra.sh"
+    if (-not (Test-Path $scriptPath)) {
+        throw "issue-infra.sh not found at $scriptPath"
+    }
+    # Same wslpath translation as Invoke-HarnessHook — WSL bash on this
+    # machine does not accept Windows drive syntax (`C:\...`).
+    $bashPath = bash -c "wslpath -u '$scriptPath' 2>/dev/null"
+    if (-not $bashPath) {
+        $bashPath = $scriptPath -replace '\\', '/'
+    }
+    bash $bashPath $Action "$IssueNumber"
+    if ($LASTEXITCODE -ne 0) {
+        if ($Action -eq 'provision') {
+            throw "issue-infra.sh provision #$IssueNumber failed (exit $LASTEXITCODE)"
+        }
+        Write-Warning "  issue-infra.sh destroy #$IssueNumber exited $LASTEXITCODE — continuing."
+    }
+}
+
 # Warns whenever any two phases share the same model — self-review safety is
 # weakened when the same model produces both the change and the review of it.
 function Invoke-SameModelWarning {
@@ -381,6 +411,15 @@ if ($Cleanup) {
     } else {
         Write-Host "  No lock to release." -ForegroundColor DarkGray
     }
+    # Per-issue DB + queues. Idempotent — silently no-ops if nothing
+    # was ever provisioned for this issue (manual -Cleanup on a never-
+    # run slice).
+    try {
+        Invoke-IssueInfra -Action destroy -IssueNumber $Cleanup
+        Write-Host "  Per-issue DB + queues destroyed." -ForegroundColor Green
+    } catch {
+        Write-Warning "  Per-issue cleanup failed: $_"
+    }
     exit 0
 }
 
@@ -440,6 +479,16 @@ if (Test-ImageRebuildNeeded -DockerfilePath "$HarnessRoot/Dockerfile" -MarkerPat
 } else {
     Write-Host '  Image up-to-date — no rebuild needed.' -ForegroundColor Green
 }
+
+# ── Per-issue env URLs ────────────────────────────────────────────────────────
+# Default to the shared `app` DB + `task-queue` pair (used by plan,
+# smoke-test, and any non-Issue path). The Issue branch below overrides
+# them with `app_issue_<N>` / `task-queue-<N>` / `task-dlq-<N>` so
+# parallel slices don't collide on shared DB rows / queue messages.
+$envDbAsync   = 'DATABASE_URL=postgresql+asyncpg://app:app@host.docker.internal:5432/app'
+$envDbSync    = 'ALEMBIC_DATABASE_URL=postgresql+psycopg://app:app@host.docker.internal:5432/app'
+$envQueueMain = 'QUEUE_URL=http://host.docker.internal:9324/queue/task-queue'
+$envQueueDlq  = 'QUEUE_DLQ_URL=http://host.docker.internal:9324/queue/task-dlq'
 
 # ── Select prompt, claim branch, build substitutions ──────────────────────────
 
@@ -539,6 +588,24 @@ if ($SmokeTest) {
     # worktree instead of $RepoRoot, isolating this slice's writes.
     $mountPath = $worktreePath
 
+    # Per-issue env URLs override the shared defaults set above. Every
+    # parallel slice gets its own DB + queue pair so pytest fixtures,
+    # outbox rows, and DLQ messages can't trample each other.
+    $envDbAsync   = "DATABASE_URL=postgresql+asyncpg://app:app@host.docker.internal:5432/app_issue_${Issue}"
+    $envDbSync    = "ALEMBIC_DATABASE_URL=postgresql+psycopg://app:app@host.docker.internal:5432/app_issue_${Issue}"
+    $envQueueMain = "QUEUE_URL=http://host.docker.internal:9324/queue/task-queue-${Issue}"
+    $envQueueDlq  = "QUEUE_DLQ_URL=http://host.docker.internal:9324/queue/task-dlq-${Issue}"
+
+    # Bring up shared services + provision per-issue resources NOW so
+    # every StartPhase (implement, review, merge) sees a ready stack.
+    # Previously before-tests fired only inside the implement branch,
+    # which broke -StartPhase review/merge after a full-success cleanup.
+    Step 'Provisioning per-issue infrastructure'
+    Invoke-HarnessHook -HookName 'before-tests.sh' -HooksDir "$HarnessRoot/hooks" `
+        -Issue $Issue -Branch $branchName -Phase $StartPhase
+    Invoke-IssueInfra -Action provision -IssueNumber $Issue
+    Write-Host "  Per-issue resources ready: db=app_issue_${Issue}  queue=task-queue-${Issue}" -ForegroundColor Green
+
     $implementModel = $cfg.agents.implement.model
     $maxTurns       = $cfg.agents.implement.max_turns
 
@@ -570,6 +637,14 @@ if ($SmokeTest) {
     $planMaxTurns = $cfg.agents.plan.max_turns
 
     $excluded = Get-DeconflictExclusions -BranchPrefix $cfg.branch_prefix
+    # Local in-flight slices: the implement and review phases commit
+    # but do NOT push — the branch only lands on origin during merge.
+    # Without unioning local locks + worktrees, a second harness invoked
+    # while slice A is mid-implement would re-recommend the same issue.
+    # Both signals are kept: locks are removed eagerly on clean exit;
+    # worktrees survive across crashes/resumes.
+    foreach ($n in (Get-IssueLockList -RepoRoot $RepoRoot))     { [void]$excluded.Add($n) }
+    foreach ($n in (Get-IssueWorktreeList -RepoRoot $RepoRoot)) { [void]$excluded.Add($n) }
     Write-Host "  In-progress: $(Format-Exclusions $excluded)" -ForegroundColor DarkGray
 
     $adrDirRel = if ($cfg.ContainsKey('docs') -and $cfg.docs -is [hashtable] -and $cfg.docs.ContainsKey('adr_dir')) {
@@ -628,10 +703,10 @@ if ($SmokeTest) {
         # Desktop (Win/Mac) host.docker.internal resolves automatically;
         # --add-host makes the same name work on Linux Docker too.
         '--add-host', 'host.docker.internal:host-gateway',
-        '--env',    'DATABASE_URL=postgresql+asyncpg://app:app@host.docker.internal:5432/app',
-        '--env',    'ALEMBIC_DATABASE_URL=postgresql+psycopg://app:app@host.docker.internal:5432/app',
-        '--env',    'QUEUE_URL=http://host.docker.internal:9324/queue/task-queue',
-        '--env',    'QUEUE_DLQ_URL=http://host.docker.internal:9324/queue/task-dlq',
+        '--env',    $envDbAsync,
+        '--env',    $envDbSync,
+        '--env',    $envQueueMain,
+        '--env',    $envQueueDlq,
         '--workdir', '/workspace',
         $imageName,
         'bash', '-lc', $claudeCmd
@@ -717,22 +792,49 @@ if ($SmokeTest) {
 
     if ($Plan) { exit 0 }
 
-    $confirmed = $false
-    if ($Yes) {
-        Write-Host "  Auto-confirming #$($top.id) ($($top.title))..." -ForegroundColor Green
-        $confirmed = $true
-    } else {
-        $ans = Read-Host "Run #$($top.id) — $($top.title)? [Y/n]"
-        $confirmed = ($ans -eq '' -or $ans -match '^[Yy]')
+    # Candidate ranking: top first, then each alternative in the order
+    # the agent ranked them. The user steps through with Y/n; 'q' aborts
+    # the whole plan. Previously 'n' on the top candidate exited and
+    # threw the alternatives away — annoying when the top was already
+    # being worked on by another harness.
+    $candidates = @($top)
+    foreach ($alt in $alts) {
+        if ($alt -is [hashtable] -and $alt.ContainsKey('id') -and [int]$alt['id'] -gt 0) {
+            $candidates += $alt
+        }
     }
 
-    if (-not $confirmed) {
-        Write-Host '  Exiting — no branch created.' -ForegroundColor DarkGray
+    $selected = $null
+    if ($Yes) {
+        Write-Host "  Auto-confirming #$($top.id) ($($top.title))..." -ForegroundColor Green
+        $selected = $top
+    } else {
+        for ($i = 0; $i -lt $candidates.Count; $i++) {
+            $cand = $candidates[$i]
+            $cid    = [int]$cand['id']
+            $ctitle = [string]$cand['title']
+            $pos    = "[$($i + 1)/$($candidates.Count)]"
+            $ans    = Read-Host "$pos Run #$cid — $ctitle? [Y/n/q]"
+            if ($ans -match '^[Qq]') {
+                Write-Host '  Quit — no branch created.' -ForegroundColor DarkGray
+                exit 0
+            }
+            if ($ans -eq '' -or $ans -match '^[Yy]') {
+                $selected = $cand
+                break
+            }
+            # else: 'n' (or anything else) — move on to next candidate
+        }
+    }
+
+    if (-not $selected) {
+        Write-Host '  No candidate accepted — exiting.' -ForegroundColor DarkGray
         exit 0
     }
 
-    Write-Host "  Selected #$($top.id) — chaining into implement phase..." -ForegroundColor Green
-    & $PSCommandPath -Issue ([int]$top.id)
+    $selId = [int]$selected['id']
+    Write-Host "  Selected #$selId — chaining into implement phase..." -ForegroundColor Green
+    & $PSCommandPath -Issue $selId
     exit $LASTEXITCODE
 }
 
@@ -760,12 +862,9 @@ $promptMount = Get-PromptHostPath -MountPath $mountPath
 Set-Content -Path $promptMount -Value $renderedPrompt -Encoding UTF8
 
 # ── Run container ──────────────────────────────────────────────────────────────
-
-# before-tests hook: runs on host before implement container starts
-if ($Issue -and -not $SmokeTest) {
-    Invoke-HarnessHook -HookName 'before-tests.sh' -HooksDir "$HarnessRoot/hooks" `
-        -Issue $Issue -Branch $branchName -Phase 'implement'
-}
+# (before-tests hook + per-issue provisioning happen earlier, in the
+# Issue branch above — so review-only and merge-only StartPhase runs
+# get the same setup.)
 
 Step "Running $runLabel"
 Write-Host "  Log → $logFile"
@@ -800,10 +899,10 @@ $dockerArgs = @(
     # Desktop (Win/Mac) host.docker.internal resolves automatically;
     # --add-host makes the same name work on Linux Docker too.
     '--add-host', 'host.docker.internal:host-gateway',
-    '--env',    'DATABASE_URL=postgresql+asyncpg://app:app@host.docker.internal:5432/app',
-    '--env',    'ALEMBIC_DATABASE_URL=postgresql+psycopg://app:app@host.docker.internal:5432/app',
-    '--env',    'QUEUE_URL=http://host.docker.internal:9324/queue/task-queue',
-    '--env',    'QUEUE_DLQ_URL=http://host.docker.internal:9324/queue/task-dlq',
+    '--env',    $envDbAsync,
+    '--env',    $envDbSync,
+    '--env',    $envQueueMain,
+    '--env',    $envQueueDlq,
     '--workdir', '/workspace',
     $imageName,
     'bash', '-lc', $claudeInvocation
@@ -914,10 +1013,10 @@ if ($Issue -and -not $SmokeTest -and $StartPhase -eq 'merge') {
         # Desktop (Win/Mac) host.docker.internal resolves automatically;
         # --add-host makes the same name work on Linux Docker too.
         '--add-host', 'host.docker.internal:host-gateway',
-        '--env',    'DATABASE_URL=postgresql+asyncpg://app:app@host.docker.internal:5432/app',
-        '--env',    'ALEMBIC_DATABASE_URL=postgresql+psycopg://app:app@host.docker.internal:5432/app',
-        '--env',    'QUEUE_URL=http://host.docker.internal:9324/queue/task-queue',
-        '--env',    'QUEUE_DLQ_URL=http://host.docker.internal:9324/queue/task-dlq',
+        '--env',    $envDbAsync,
+        '--env',    $envDbSync,
+        '--env',    $envQueueMain,
+        '--env',    $envQueueDlq,
         '--workdir', '/workspace',
         $imageName,
         'bash', '-lc', $reviewCmd
@@ -1001,10 +1100,10 @@ if ($reviewOk -and $Issue -and -not $SmokeTest -and -not $SkipMerge) {
         # Desktop (Win/Mac) host.docker.internal resolves automatically;
         # --add-host makes the same name work on Linux Docker too.
         '--add-host', 'host.docker.internal:host-gateway',
-        '--env',    'DATABASE_URL=postgresql+asyncpg://app:app@host.docker.internal:5432/app',
-        '--env',    'ALEMBIC_DATABASE_URL=postgresql+psycopg://app:app@host.docker.internal:5432/app',
-        '--env',    'QUEUE_URL=http://host.docker.internal:9324/queue/task-queue',
-        '--env',    'QUEUE_DLQ_URL=http://host.docker.internal:9324/queue/task-dlq',
+        '--env',    $envDbAsync,
+        '--env',    $envDbSync,
+        '--env',    $envQueueMain,
+        '--env',    $envQueueDlq,
         '--workdir', '/workspace',
         $imageName,
         'bash', '-lc', $mergeCmd
@@ -1100,8 +1199,21 @@ if ($Issue -and -not $SmokeTest) {
             Write-Warning "  Worktree cleanup failed: $_"
             Write-Warning "  Manual cleanup: pwsh ./.harness/run.ps1 -Cleanup $Issue -Force"
         }
+        # Per-issue DB + queues are only meaningful while the slice is
+        # in flight. On full success the branch is merged and the DB
+        # rows / queue messages are stale — drop them to keep the dev
+        # box tidy. Retained on failure so the agent can re-run and
+        # inspect any persisted state.
+        try {
+            Invoke-IssueInfra -Action destroy -IssueNumber $Issue
+            Write-Host "  Per-issue DB + queues destroyed." -ForegroundColor DarkGray
+        } catch {
+            Write-Warning "  Per-issue cleanup failed: $_"
+            Write-Warning "  Manual cleanup: pwsh ./.harness/run.ps1 -Cleanup $Issue -Force"
+        }
     } else {
         Write-Host "  Worktree retained at: $worktreePath" -ForegroundColor DarkGray
+        Write-Host "  Per-issue DB + queues retained: app_issue_${Issue} / task-queue-${Issue}" -ForegroundColor DarkGray
         Write-Host "  Resume with: pwsh ./.harness/run.ps1 -Issue $Issue -Resume" -ForegroundColor DarkGray
     }
 }
