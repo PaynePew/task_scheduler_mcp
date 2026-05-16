@@ -49,11 +49,11 @@ class InvalidStateError(Exception):
 
 
 class UnsupportedScheduleTypeError(Exception):
-    """Raised when schedule_type is not yet implemented (maps to USER_INPUT).
+    """Raised when schedule_type is not in the supported set (maps to USER_INPUT).
 
-    W1 implements 'immediate' and 'one-shot'. Recurring/chain schedules land
-    in later slices (S13). Passing anything else is rejected explicitly rather
-    than silently degraded, which would mask scheduling bugs far from their cause.
+    Supported: 'immediate', 'one-shot', 'recurring'. Chain scheduling lands in a
+    later slice. Passing anything else is rejected explicitly rather than silently
+    degraded, which would mask scheduling bugs far from their cause.
     """
 
 
