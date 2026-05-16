@@ -7,7 +7,9 @@ import logging
 from typing import Any
 
 import mcp.types as types
+from mcp import McpError
 from mcp.server.lowlevel import Server
+from mcp.types import INVALID_PARAMS, ErrorData
 from pydantic import AnyUrl
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -198,16 +200,13 @@ def create_server(
 
     @server.read_resource()
     async def read_resource(uri: AnyUrl):
-        uri_str = str(uri)
-        if uri_str == "tasks://list":
-            return await read_tasks_list(user_id, session_factory=factory)
-        if uri_str == "tasks://actions":
-            return read_tasks_actions()
-        if uri.scheme == "tasks" and uri.host == "job":
-            return await read_tasks_job(uri, user_id, session_factory=factory)
-        from mcp import McpError
-        from mcp.types import INVALID_PARAMS, ErrorData
-
+        if uri.scheme == "tasks":
+            if uri.host == "list":
+                return await read_tasks_list(user_id, session_factory=factory)
+            if uri.host == "actions":
+                return read_tasks_actions()
+            if uri.host == "job":
+                return await read_tasks_job(uri, user_id, session_factory=factory)
         raise McpError(ErrorData(code=INVALID_PARAMS, message=f"Unknown resource URI: {uri}"))
 
     @server.call_tool()
