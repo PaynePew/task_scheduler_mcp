@@ -10,11 +10,15 @@ from zoneinfo import ZoneInfo
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.db.engine import create_async_engine
 from app.db.models import Job, JobRun, RunEvent
+from app.domain.chain_validation import (
+    ChainJobNotFoundError,
+    ChainJobTerminatedError,
+)
 from app.domain.jobs import (
     InvalidScheduledAtError,
     InvalidTimezoneError,
@@ -280,3 +284,119 @@ async def test_one_shot_timezone_normalises_to_utc(session_factory):
     expected_utc = naive_future.replace(tzinfo=ZoneInfo("Asia/Taipei")).astimezone(UTC)
     delta = abs((stored - expected_utc).total_seconds())
     assert delta < 2, f"UTC normalisation off by {delta}s"
+
+
+# ---------------------------------------------------------------------------
+# Chain creation: V2 cross-user → NOT_FOUND (not 403)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+async def test_chain_v2_cross_user_is_not_found(session_factory):
+    """V2: trigger job owned by a different user → ChainJobNotFoundError (404 not 403)."""
+    future = (datetime.now(tz=UTC) + timedelta(hours=1)).isoformat()
+
+    # Create trigger job as user-A
+    async with session_factory() as session:
+        trigger_job = await create_job(
+            session,
+            user_id="user-a",
+            action="echo",
+            action_params={"message": "upstream"},
+            schedule_type="one-shot",
+            scheduled_at=future,
+        )
+
+    # user-B tries to chain on user-A's job → ChainJobNotFoundError
+    future2 = (datetime.now(tz=UTC) + timedelta(hours=2)).isoformat()
+    async with session_factory() as session:
+        with pytest.raises(ChainJobNotFoundError):
+            await create_job(
+                session,
+                user_id="user-b",
+                action="echo",
+                action_params={"message": "chained"},
+                schedule_type="one-shot",
+                scheduled_at=future2,
+                trigger_on_job_id=trigger_job.job_id,
+            )
+
+
+@pytest.mark.integration
+async def test_chain_v3_terminated_trigger_job_is_rejected(session_factory):
+    """V3: chaining on a fully-terminated trigger job raises ChainJobTerminatedError."""
+    # Create trigger job for user-A and manually mark its run SUCCEEDED
+    async with session_factory() as session:
+        trigger_job = await create_job(
+            session,
+            user_id="user-a",
+            action="echo",
+            action_params={"message": "upstream"},
+            schedule_type="immediate",
+        )
+
+    # Force the run to SUCCEEDED status
+    async with session_factory() as session:
+        async with session.begin():
+            await session.execute(
+                update(JobRun).where(JobRun.job_id == trigger_job.job_id).values(status="SUCCEEDED")
+            )
+
+    # Attempt to chain on the now-terminated job
+    future2 = (datetime.now(tz=UTC) + timedelta(hours=2)).isoformat()
+    async with session_factory() as session:
+        with pytest.raises(ChainJobTerminatedError):
+            await create_job(
+                session,
+                user_id="user-a",
+                action="echo",
+                action_params={"message": "chained"},
+                schedule_type="one-shot",
+                scheduled_at=future2,
+                trigger_on_job_id=trigger_job.job_id,
+            )
+
+
+@pytest.mark.integration
+async def test_chain_creates_waiting_run_with_wait_for_run_id(session_factory):
+    """Chained job gets a WAITING run pointing at the upstream's active run."""
+    future2 = (datetime.now(tz=UTC) + timedelta(hours=2)).isoformat()
+
+    # Create upstream job (immediate, so run starts as PENDING)
+    async with session_factory() as session:
+        upstream = await create_job(
+            session,
+            user_id="chain-create-test",
+            action="echo",
+            action_params={"message": "upstream"},
+            schedule_type="immediate",
+        )
+
+    # Get upstream run_id
+    async with session_factory() as session:
+        async with session.begin():
+            upstream_run = (
+                await session.execute(select(JobRun).where(JobRun.job_id == upstream.job_id))
+            ).scalar_one()
+
+    # Create downstream chained job
+    async with session_factory() as session:
+        downstream = await create_job(
+            session,
+            user_id="chain-create-test",
+            action="echo",
+            action_params={"message": "downstream"},
+            schedule_type="one-shot",
+            scheduled_at=future2,
+            trigger_on_job_id=upstream.job_id,
+            trigger_on_status="SUCCEEDED",
+        )
+
+    async with session_factory() as session:
+        async with session.begin():
+            downstream_run = (
+                await session.execute(select(JobRun).where(JobRun.job_id == downstream.job_id))
+            ).scalar_one()
+
+    assert downstream_run.status == "WAITING"
+    assert downstream_run.wait_for_run_id == upstream_run.run_id

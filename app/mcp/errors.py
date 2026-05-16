@@ -4,6 +4,12 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.domain.chain_validation import (
+    ChainCycleError,
+    ChainDepthError,
+    ChainJobNotFoundError,
+    ChainJobTerminatedError,
+)
 from app.domain.jobs import (
     InvalidCronExprError,
     InvalidScheduledAtError,
@@ -63,6 +69,33 @@ def map_domain_error(exc: Exception) -> dict[str, Any]:
         return error("NOT_FOUND", f"Job not found: {exc}")
     if isinstance(exc, InvalidStateError):
         return error("INVALID_STATE", str(exc))
+    # Chain validation errors (V1-V5, ADR-020)
+    if isinstance(exc, ChainJobNotFoundError):
+        return error(
+            "NOT_FOUND",
+            f"Trigger job not found: {exc}",
+            field="trigger_on_job_id",
+        )
+    if isinstance(exc, ChainJobTerminatedError):
+        return error(
+            "INVALID_STATE",
+            f"Trigger job {exc} is already fully terminated; chaining on it would wait forever.",
+            field="trigger_on_job_id",
+        )
+    if isinstance(exc, ChainCycleError):
+        return error(
+            "USER_INPUT",
+            f"Trigger job {exc} forms a cycle in the chain ancestry.",
+            field="trigger_on_job_id",
+            expected="non-circular chain",
+        )
+    if isinstance(exc, ChainDepthError):
+        return error(
+            "USER_INPUT",
+            f"Chain depth would exceed the maximum of 10 (trigger_on_job_id={exc}).",
+            field="trigger_on_job_id",
+            expected="chain depth ≤ 10",
+        )
     if isinstance(exc, ValueError):
         return error("USER_INPUT", str(exc))
     return error("INTERNAL", "An unexpected error occurred.")

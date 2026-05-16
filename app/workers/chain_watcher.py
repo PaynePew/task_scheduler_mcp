@@ -1,14 +1,14 @@
 """ChainWatcher — outbox consumer for chained jobs.
 
-Scans ``run_events`` for terminal events (SUCCEEDED / FAILED / CANCELLED) of
-jobs that are referenced as ``trigger_on_job_id`` by another job, stamps the
-``processed_by`` JSONB cursor, and *logs* that it would flip matching WAITING
-runs.
+Scans ``run_events`` for terminal events (SUCCEEDED / FAILED / CANCELLED),
+finds WAITING ``job_runs`` whose ``wait_for_run_id`` matches the event's
+``run_id``, and flips them to PENDING or CANCELLED based on the chained
+Job's ``trigger_on_status`` field.
 
-Full WAITING → PENDING/CANCELLED flip is deferred to W2:
-    # TODO(W2): WAITING → PENDING/CANCELLED flip — query job_runs WHERE
-    #           wait_for_run_id = :run_id AND status = 'WAITING' and flip based
-    #           on trigger_on_status vs actual terminal event_type.
+Match logic (ADR-020):
+  trigger_on_status == event_type   → PENDING   (literal match)
+  trigger_on_status == "ANY"        → PENDING   (any terminal, including CANCELLED)
+  otherwise                         → CANCELLED (mismatch)
 """
 
 from __future__ import annotations
@@ -17,10 +17,10 @@ import asyncio
 import logging
 from datetime import UTC, datetime
 
-from sqlalchemy import exists, select, update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.db.models import Job, RunEvent
+from app.db.models import Job, JobRun, RunEvent
 
 logger = logging.getLogger(__name__)
 
@@ -30,28 +30,70 @@ DEFAULT_BATCH_SIZE = 50
 DEFAULT_SLEEP_SECONDS = 5.0
 
 
+def _is_match(trigger_on_status: str | None, event_type: str) -> bool:
+    """Return True if the event type satisfies the job's trigger condition."""
+    effective = trigger_on_status or "SUCCEEDED"
+    return effective in ("ANY", event_type)
+
+
+async def _flip_waiting_run(
+    session: AsyncSession,
+    *,
+    waiting_run: JobRun,
+    trigger_job: Job,
+    event_type: str,
+    now: datetime,
+) -> None:
+    """Flip one WAITING run to PENDING or CANCELLED and emit a RunEvent."""
+    match = _is_match(trigger_job.trigger_on_status, event_type)
+    new_status = "PENDING" if match else "CANCELLED"
+    event_name = "QUEUED_BY_CHAIN" if match else "CANCELLED_BY_CHAIN_MISS"
+
+    await session.execute(
+        update(JobRun)
+        .where(
+            JobRun.run_id == waiting_run.run_id,
+            JobRun.time_bucket == waiting_run.time_bucket,
+            JobRun.status == "WAITING",
+        )
+        .values(status=new_status, updated_at=now)
+    )
+    session.add(
+        RunEvent(
+            run_id=waiting_run.run_id,
+            job_id=waiting_run.job_id,
+            event_type=event_name,
+            status_from="WAITING",
+            status_to=new_status,
+        )
+    )
+    logger.info(
+        "chain_watcher: flipped run_id=%s WAITING→%s (trigger_on_status=%s, event=%s)",
+        waiting_run.run_id,
+        new_status,
+        trigger_job.trigger_on_status,
+        event_type,
+    )
+
+
 async def poll_once(
     session_factory: async_sessionmaker[AsyncSession],
     *,
     batch_size: int = DEFAULT_BATCH_SIZE,
 ) -> int:
-    """One watcher tick: find unprocessed terminal events that unblock chained jobs.
+    """One watcher tick: find unprocessed terminal events and flip matching WAITING runs.
 
     Returns the number of events processed (0 if nothing to do).
     """
     async with session_factory() as session:
         async with session.begin():
-            # Fetch terminal run_events whose job_id is a trigger for at least
-            # one other job (i.e. there is a Job with trigger_on_job_id = event.job_id).
-            triggered_alias = Job.__table__.alias("triggered")
-            has_downstream = exists().where(triggered_alias.c.trigger_on_job_id == RunEvent.job_id)
+            # Fetch terminal run_events not yet stamped with our cursor.
             stmt = (
                 select(RunEvent)
                 .where(
                     RunEvent.event_type.in_(TERMINAL_EVENTS),
                     # type: ignore: SQLAlchemy's JSONB.has_key is dynamically attached.
                     ~RunEvent.processed_by.has_key(PROCESSED_BY_KEY),  # type: ignore[attr-defined]
-                    has_downstream,
                 )
                 .limit(batch_size)
             )
@@ -60,16 +102,47 @@ async def poll_once(
             if not events:
                 return 0
 
-            now_iso = datetime.now(tz=UTC).isoformat()
+            now = datetime.now(tz=UTC)
+            now_iso = now.isoformat()
+
             for event in events:
-                logger.info(
-                    "chain_watcher: would have flipped WAITING runs triggered by"
-                    " job_id=%s run_id=%s event_type=%s",
-                    event.job_id,
-                    event.run_id,
-                    event.event_type,
+                # Find all WAITING runs blocked on this run_id.
+                waiting_runs = (
+                    (
+                        await session.execute(
+                            select(JobRun).where(
+                                JobRun.wait_for_run_id == event.run_id,
+                                JobRun.status == "WAITING",
+                            )
+                        )
+                    )
+                    .scalars()
+                    .all()
                 )
-                # Stamp the cursor so this event is never reprocessed on restart.
+
+                for waiting_run in waiting_runs:
+                    # Load the chained job to read trigger_on_status.
+                    trigger_job = (
+                        await session.execute(select(Job).where(Job.job_id == waiting_run.job_id))
+                    ).scalar_one_or_none()
+
+                    if trigger_job is None:
+                        logger.warning(
+                            "chain_watcher: job_id=%s for waiting run_id=%s not found, skipping",
+                            waiting_run.job_id,
+                            waiting_run.run_id,
+                        )
+                        continue
+
+                    await _flip_waiting_run(
+                        session,
+                        waiting_run=waiting_run,
+                        trigger_job=trigger_job,
+                        event_type=event.event_type,
+                        now=now,
+                    )
+
+                # Stamp the cursor — atomic with the flips above (same transaction).
                 new_pb = dict(event.processed_by)
                 new_pb[PROCESSED_BY_KEY] = now_iso
                 await session.execute(
@@ -77,9 +150,6 @@ async def poll_once(
                     .where(RunEvent.event_id == event.event_id)
                     .values(processed_by=new_pb)
                 )
-                # TODO(W2): WAITING → PENDING/CANCELLED flip — query job_runs WHERE
-                #           wait_for_run_id = :run_id AND status = 'WAITING' and flip
-                #           based on trigger_on_status vs actual terminal event_type.
 
     return len(events)
 
