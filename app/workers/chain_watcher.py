@@ -33,7 +33,7 @@ DEFAULT_SLEEP_SECONDS = 5.0
 def _is_match(trigger_on_status: str | None, event_type: str) -> bool:
     """Return True if the event type satisfies the job's trigger condition."""
     effective = trigger_on_status or "SUCCEEDED"
-    return effective == "ANY" or effective == event_type
+    return effective in ("ANY", event_type)
 
 
 async def _flip_waiting_run(
