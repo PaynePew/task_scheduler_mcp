@@ -297,7 +297,8 @@ async def cancel_job(
 
         # INVALID_STATE only when every run completed naturally (no in-flight or pending work).
         if all_runs and all(r.status in _NATURALLY_TERMINAL for r in all_runs):
-            # Use the most recent run's status to guide the external error message.
+            # Either SUCCEEDED or FAILED — both naturally-terminal, so any run's status
+            # is a valid hint for the external error message.
             current_status = all_runs[0].status
             raise InvalidStateError(current_status)
 
