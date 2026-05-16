@@ -26,7 +26,10 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    op.add_column("jobs", sa.Column("cancelled_at", sa.DateTime(timezone=True), nullable=True))
+    op.add_column(
+        "jobs",
+        sa.Column("cancelled_at", postgresql.TIMESTAMP(timezone=True), nullable=True),
+    )
     op.drop_column("jobs", "raw_user_input")
     op.drop_column("jobs", "parsing_metadata")
 
