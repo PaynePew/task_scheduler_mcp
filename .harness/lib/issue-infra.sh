@@ -54,22 +54,37 @@ provision() {
 
     # 1. Postgres database. Use a SELECT/CREATE pattern instead of
     # CREATE IF NOT EXISTS (CREATE DATABASE has no IF NOT EXISTS).
+    db_created=0
     if pg_exec psql -U app -d postgres -tAc \
             "SELECT 1 FROM pg_database WHERE datname='${db_name}'" 2>/dev/null | grep -q '^1$'; then
         echo "[issue-infra]   db ${db_name} already exists"
     else
         echo "[issue-infra]   creating db ${db_name}"
         pg_exec psql -U app -d postgres -c "CREATE DATABASE ${db_name} OWNER app;" >/dev/null
+        db_created=1
     fi
 
-    # 2. Run alembic against the per-issue DB via the migrate service.
-    # `-e` overrides env_file values; the migrate entrypoint just shells
-    # out to `alembic upgrade head`, and migrations/env.py reads
-    # ALEMBIC_DATABASE_URL.
-    echo "[issue-infra]   running alembic upgrade head against ${db_name}"
-    docker compose run --rm \
-        -e "ALEMBIC_DATABASE_URL=postgresql+psycopg://app:app@postgres:5432/${db_name}" \
-        migrate >/dev/null
+    # 2. Run alembic against the per-issue DB via the migrate service —
+    # but only on a fresh DB. The migrate service is built from the
+    # host repo's main-branch state, so its `migrations/` dir holds
+    # only revisions that have landed on main. If a previous slice's
+    # implementer added a new revision (say 0003) and stamped the DB
+    # with it, a resume call would crash with:
+    #   "Can't locate revision identified by '0003'"
+    # since the DB head outranks what host-side migrate knows about.
+    # On resume the DB already carries whatever revision the agent
+    # left it at, and the agent's own container reads migrations from
+    # the bind-mounted worktree (which has every branch-local
+    # revision), so re-running migrate from the host adds no value
+    # and only introduces this failure mode.
+    if [[ "$db_created" -eq 1 ]]; then
+        echo "[issue-infra]   running alembic upgrade head against ${db_name}"
+        docker compose run --rm \
+            -e "ALEMBIC_DATABASE_URL=postgresql+psycopg://app:app@postgres:5432/${db_name}" \
+            migrate >/dev/null
+    else
+        echo "[issue-infra]   skipping migrate (db pre-exists; agent owns its schema)"
+    fi
 
     # 3. DLQ first — main queue's redrive policy references it by ARN.
     echo "[issue-infra]   creating queue ${queue_dlq}"
