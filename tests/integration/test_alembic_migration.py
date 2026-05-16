@@ -13,10 +13,18 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 import sqlalchemy as sa
 from sqlalchemy import text
+
+# Repo root resolved from this test file's location so alembic finds
+# alembic.ini regardless of where the test runs (harness container at
+# /workspace, GHA runner at /home/runner/work/..., a developer's
+# local checkout, etc.). The `/workspace` default that was previously
+# hardcoded only worked inside the harness container.
+_REPO_ROOT = str(Path(__file__).resolve().parents[2])
 
 
 def _run_alembic(*args: str) -> subprocess.CompletedProcess:
@@ -25,7 +33,7 @@ def _run_alembic(*args: str) -> subprocess.CompletedProcess:
         [sys.executable, "-m", "alembic", *args],
         capture_output=True,
         text=True,
-        cwd=os.environ.get("ALEMBIC_CWD", "/workspace"),
+        cwd=os.environ.get("ALEMBIC_CWD", _REPO_ROOT),
     )
     if result.returncode != 0:
         raise RuntimeError(
