@@ -636,7 +636,14 @@ if ($SmokeTest) {
     $planModel    = $cfg.agents.plan.model
     $planMaxTurns = $cfg.agents.plan.max_turns
 
-    $excluded = Get-DeconflictExclusions -BranchPrefix $cfg.branch_prefix
+    # Get-DeconflictExclusions returns a HashSet[int], but PowerShell
+    # unrolls IEnumerable on pipeline output — a single-element HashSet
+    # arrives at the caller as a bare Int32, a multi-element one as an
+    # Object[]. Rebuild as a HashSet so the .Add() calls below work
+    # regardless of how many issues were in the source set.
+    $rawExcl  = @(Get-DeconflictExclusions -BranchPrefix $cfg.branch_prefix)
+    $excluded = [System.Collections.Generic.HashSet[int]]::new()
+    foreach ($n in $rawExcl) { [void]$excluded.Add([int]$n) }
     # Local in-flight slices: the implement and review phases commit
     # but do NOT push — the branch only lands on origin during merge.
     # Without unioning local locks + worktrees, a second harness invoked
