@@ -21,6 +21,8 @@ from app.mcp.errors import map_domain_error
 from app.mcp.handlers.cancel import TASK_CANCEL_SCHEMA, handle_task_cancel
 from app.mcp.handlers.list import TASK_LIST_SCHEMA, handle_task_list
 from app.mcp.handlers.status import TASK_STATUS_SCHEMA, handle_task_status
+from app.mcp.prompts import daily_review as _daily_review
+from app.mcp.prompts import setup_summary as _setup_summary
 from app.mcp.resources.actions_resource import read_tasks_actions
 from app.mcp.resources.job_resource import read_tasks_job
 from app.mcp.resources.list_resource import read_tasks_list
@@ -143,6 +145,25 @@ def create_server(
     """
     factory = session_factory or default_session_factory
     server = Server("task-scheduler", instructions=SYSTEM_INSTRUCTION)
+
+    @server.list_prompts()
+    async def list_prompts() -> list[types.Prompt]:
+        return [
+            _daily_review.build_prompt(),
+            _setup_summary.build_prompt(),
+        ]
+
+    @server.get_prompt()
+    async def get_prompt(name: str, arguments: dict[str, str] | None) -> types.GetPromptResult:
+        if name == _daily_review.NAME:
+            return _daily_review.build_result()
+        if name == _setup_summary.NAME:
+            topic, schedule = _setup_summary.validate_args(arguments)
+            return _setup_summary.build_result(topic, schedule)
+        from mcp.shared.exceptions import McpError
+        from mcp.types import INVALID_PARAMS, ErrorData
+
+        raise McpError(ErrorData(code=INVALID_PARAMS, message=f"Unknown prompt: {name}"))
 
     @server.list_tools()
     async def list_tools() -> list[types.Tool]:
