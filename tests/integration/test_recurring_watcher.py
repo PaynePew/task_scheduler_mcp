@@ -44,6 +44,8 @@ async def _insert_recurring_job_with_terminal_event(
     *,
     cron_expr: str = "0 * * * *",
     event_type: str = "SUCCEEDED",
+    timezone: str = "UTC",
+    cancelled_at: datetime | None = None,
 ) -> tuple[Job, JobRun, RunEvent]:
     """Insert a recurring Job + JobRun + terminal RunEvent, committed."""
     scheduled = datetime.now(tz=UTC) - timedelta(hours=1)
@@ -57,6 +59,8 @@ async def _insert_recurring_job_with_terminal_event(
                 job_type="recurring",
                 scheduled_at=None,
                 cron_expr=cron_expr,
+                timezone=timezone,
+                cancelled_at=cancelled_at,
             )
             session.add(job)
             await session.flush()
@@ -78,59 +82,184 @@ async def _insert_recurring_job_with_terminal_event(
                 event_type=event_type,
                 status_from="RUNNING",
                 status_to=event_type,
+                occurred_at=scheduled + timedelta(minutes=30),
             )
             session.add(event)
     return job, run, event
 
 
 # ---------------------------------------------------------------------------
-# Tests
+# Core spawn behaviour
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.integration
-async def test_recurring_watcher_stamps_processed_by_and_does_not_insert_run(
-    session_factory, caplog
-):
-    """Terminal event for recurring job → stamped; no new JobRun inserted (W2 TODO)."""
-    job, run, event = await _insert_recurring_job_with_terminal_event(session_factory)
+async def test_tick_spawns_exactly_one_next_run(session_factory):
+    """Terminal event for active recurring job → exactly one PENDING JobRun spawned."""
+    job, run, event = await _insert_recurring_job_with_terminal_event(
+        session_factory,
+        cron_expr="0 * * * *",  # every hour
+        timezone="UTC",
+    )
 
-    with caplog.at_level(logging.INFO, logger="app.workers.recurring_watcher"):
-        count = await poll_once(session_factory)
-
+    count = await poll_once(session_factory)
     assert count == 1
 
-    # processed_by must be stamped
     async with session_factory() as session:
         async with session.begin():
-            refreshed = (
+            all_runs = (
+                (await session.execute(select(JobRun).where(JobRun.job_id == job.job_id)))
+                .scalars()
+                .all()
+            )
+            refreshed_event = (
                 await session.execute(select(RunEvent).where(RunEvent.event_id == event.event_id))
             ).scalar_one()
-            # No new JobRun should have been inserted (W2 deferred)
+
+    # Exactly one NEW run was inserted (plus the original one = 2 total)
+    assert len(all_runs) == 2, f"Expected 2 runs, got {len(all_runs)}"
+    new_run = next(r for r in all_runs if r.run_id != run.run_id)
+    assert new_run.status == "PENDING"
+
+    # scheduled_at must be strictly after the terminal event's occurred_at
+    assert new_run.scheduled_at > event.occurred_at
+
+    # processed_by must be stamped
+    assert PROCESSED_BY_KEY in refreshed_event.processed_by
+
+
+@pytest.mark.integration
+async def test_tick_scheduled_at_matches_cron_next(session_factory):
+    """Spawned JobRun.scheduled_at equals next_after(cron_expr, tz, occurred_at)."""
+    from zoneinfo import ZoneInfo
+
+    from app.config.cron import next_after
+
+    occurred_at = datetime(2026, 1, 15, 8, 30, 0, tzinfo=UTC)  # fixed time for determinism
+    async with session_factory() as session:
+        async with session.begin():
+            job = Job(
+                user_id="recurring-watcher-test",
+                description="recurring echo",
+                action="echo",
+                action_params={"message": "hi"},
+                job_type="recurring",
+                scheduled_at=None,
+                cron_expr="0 9 * * *",  # daily at 9 AM UTC
+                timezone="UTC",
+            )
+            session.add(job)
+            await session.flush()
+            bucket = occurred_at.replace(minute=0, second=0, microsecond=0).isoformat()
+            run = JobRun(
+                time_bucket=bucket, job_id=job.job_id, scheduled_at=occurred_at, status="SUCCEEDED"
+            )
+            session.add(run)
+            await session.flush()
+            session.add(
+                RunEvent(
+                    run_id=run.run_id,
+                    job_id=job.job_id,
+                    event_type="SUCCEEDED",
+                    status_from="RUNNING",
+                    status_to="SUCCEEDED",
+                    occurred_at=occurred_at,
+                )
+            )
+
+    await poll_once(session_factory)
+
+    async with session_factory() as session:
+        async with session.begin():
             all_runs = (
                 (await session.execute(select(JobRun).where(JobRun.job_id == job.job_id)))
                 .scalars()
                 .all()
             )
 
-    assert PROCESSED_BY_KEY in refreshed.processed_by
-    assert len(all_runs) == 1, "W1 skeleton must NOT insert a second JobRun"
+    new_run = next(r for r in all_runs if r.run_id != run.run_id)
+    expected_at = next_after("0 9 * * *", ZoneInfo("UTC"), occurred_at)
+    assert new_run.scheduled_at == expected_at, (
+        f"scheduled_at {new_run.scheduled_at} != expected {expected_at}"
+    )
 
-    # Log line confirming intent
-    assert any("would have spawned next run" in r.message for r in caplog.records)
-    assert any(str(job.job_id) in r.message for r in caplog.records)
+
+# ---------------------------------------------------------------------------
+# Cancelled job: no spawn
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+async def test_cancelled_job_does_not_spawn_next_run(session_factory):
+    """Job with cancelled_at set → terminal event → tick → NO new JobRun spawned."""
+    job, run, event = await _insert_recurring_job_with_terminal_event(
+        session_factory,
+        cron_expr="0 * * * *",
+        cancelled_at=datetime.now(tz=UTC),
+    )
+
+    count = await poll_once(session_factory)
+    assert count == 1  # event was processed (stamped)
+
+    async with session_factory() as session:
+        async with session.begin():
+            all_runs = (
+                (await session.execute(select(JobRun).where(JobRun.job_id == job.job_id)))
+                .scalars()
+                .all()
+            )
+            refreshed_event = (
+                await session.execute(select(RunEvent).where(RunEvent.event_id == event.event_id))
+            ).scalar_one()
+
+    # No new run was inserted
+    assert len(all_runs) == 1, "Cancelled job must not spawn a next run"
+    # Event was still stamped
+    assert PROCESSED_BY_KEY in refreshed_event.processed_by
+
+
+# ---------------------------------------------------------------------------
+# Idempotency: calling tick twice processes each event exactly once
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+async def test_idempotent_tick_processes_each_event_once(session_factory):
+    """Event already stamped with processed_by key → skipped on second poll."""
+    job, run, event = await _insert_recurring_job_with_terminal_event(session_factory)
+
+    # First tick → processes 1 event, inserts 1 run
+    count1 = await poll_once(session_factory)
+    assert count1 == 1
+
+    # Second tick → same event is stamped, must return 0 and not insert another run
+    count2 = await poll_once(session_factory)
+    assert count2 == 0
+
+    async with session_factory() as session:
+        async with session.begin():
+            all_runs = (
+                (await session.execute(select(JobRun).where(JobRun.job_id == job.job_id)))
+                .scalars()
+                .all()
+            )
+
+    assert len(all_runs) == 2, "Two ticks must not produce more than 2 runs (1 original + 1 next)"
+
+
+# ---------------------------------------------------------------------------
+# Legacy filter tests (still valid)
+# ---------------------------------------------------------------------------
 
 
 @pytest.mark.integration
 async def test_recurring_watcher_does_not_reprocess_stamped_event(session_factory):
     """Event already stamped with recurring_watcher key → skipped on second poll."""
-    job, run, event = await _insert_recurring_job_with_terminal_event(session_factory)
+    _, run, event = await _insert_recurring_job_with_terminal_event(session_factory)
 
-    # First pass — should process 1 event
     count1 = await poll_once(session_factory)
     assert count1 == 1
 
-    # Second pass — same event is now stamped, must return 0
     count2 = await poll_once(session_factory)
     assert count2 == 0
 
@@ -179,7 +308,7 @@ async def test_recurring_watcher_ignores_one_shot_jobs(session_factory):
 
 @pytest.mark.integration
 async def test_recurring_watcher_processes_failed_and_cancelled_events(session_factory, caplog):
-    """FAILED and CANCELLED terminal events for recurring jobs are also processed."""
+    """FAILED and CANCELLED terminal events for non-cancelled recurring jobs are processed."""
     _, _, failed_event = await _insert_recurring_job_with_terminal_event(
         session_factory, cron_expr="*/5 * * * *", event_type="FAILED"
     )

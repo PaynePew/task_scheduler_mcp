@@ -16,6 +16,7 @@ dependencies = [
     "mcp",
     "boto3",
     "httpx",
+    "croniter>=6.2.2",
 ]
 
 [dependency-groups]

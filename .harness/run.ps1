@@ -714,6 +714,7 @@ if ($SmokeTest) {
         '--env',    $envDbSync,
         '--env',    $envQueueMain,
         '--env',    $envQueueDlq,
+        '--env',    'MCP_USER_TZ',
         '--workdir', '/workspace',
         $imageName,
         'bash', '-lc', $claudeCmd
@@ -913,6 +914,7 @@ $dockerArgs = @(
     '--env',    $envDbSync,
     '--env',    $envQueueMain,
     '--env',    $envQueueDlq,
+    '--env',    'MCP_USER_TZ',
     '--workdir', '/workspace',
     $imageName,
     'bash', '-lc', $claudeInvocation
@@ -1027,6 +1029,7 @@ if ($Issue -and -not $SmokeTest -and $StartPhase -eq 'merge') {
         '--env',    $envDbSync,
         '--env',    $envQueueMain,
         '--env',    $envQueueDlq,
+        '--env',    'MCP_USER_TZ',
         '--workdir', '/workspace',
         $imageName,
         'bash', '-lc', $reviewCmd
@@ -1114,6 +1117,7 @@ if ($reviewOk -and $Issue -and -not $SmokeTest -and -not $SkipMerge) {
         '--env',    $envDbSync,
         '--env',    $envQueueMain,
         '--env',    $envQueueDlq,
+        '--env',    'MCP_USER_TZ',
         '--workdir', '/workspace',
         $imageName,
         'bash', '-lc', $mergeCmd

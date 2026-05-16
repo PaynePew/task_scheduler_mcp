@@ -2,10 +2,10 @@
 
 Scans ``run_events`` for terminal events (SUCCEEDED / FAILED / CANCELLED) of
 jobs whose ``cron_expr IS NOT NULL``, stamps the ``processed_by`` JSONB cursor
-so the event is never reprocessed, and *logs* that it would spawn the next run.
+so the event is never reprocessed, and inserts the next PENDING ``JobRun``.
 
-Full cron expansion is deferred to W2:
-    # TODO(W2): cron expansion — parse cron_expr, compute next fire time, insert JobRun
+Forbid-concurrency is intrinsic: terminal events drive spawning, so there is
+never more than one pending/running run for a recurring job at any time.
 """
 
 from __future__ import annotations
@@ -13,11 +13,13 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import UTC, datetime
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.db.models import Job, RunEvent
+from app.config.cron import next_after
+from app.db.models import Job, JobRun, RunEvent
 
 logger = logging.getLogger(__name__)
 
@@ -32,16 +34,22 @@ async def poll_once(
     *,
     batch_size: int = DEFAULT_BATCH_SIZE,
 ) -> int:
-    """One watcher tick: find unprocessed terminal events for recurring jobs, stamp them.
+    """One watcher tick: process unprocessed terminal events for recurring jobs.
+
+    For each event:
+    - If the Job has been cancelled (cancelled_at IS NOT NULL), stamp processed
+      but do NOT insert a next run.
+    - Otherwise compute next_after(cron_expr, tz, event.occurred_at), insert
+      one PENDING JobRun, then stamp the event processed.
+
+    All work per event is atomic (within the enclosing session.begin()).
 
     Returns the number of events processed (0 if nothing to do).
     """
     async with session_factory() as session:
         async with session.begin():
-            # Fetch terminal run_events for jobs with cron_expr, not yet stamped.
-            # The JSONB `has_key` operator maps to Postgres `?` (key-exists).
             stmt = (
-                select(RunEvent, Job.cron_expr)
+                select(RunEvent, Job)
                 .join(Job, Job.job_id == RunEvent.job_id)
                 .where(
                     RunEvent.event_type.in_(TERMINAL_EVENTS),
@@ -57,15 +65,46 @@ async def poll_once(
                 return 0
 
             now_iso = datetime.now(tz=UTC).isoformat()
-            for event, cron_expr in rows:
-                logger.info(
-                    "recurring_watcher: would have spawned next run for job_id=%s"
-                    " run_id=%s event_type=%s cron_expr=%r",
-                    event.job_id,
-                    event.run_id,
-                    event.event_type,
-                    cron_expr,
-                )
+            for event, job in rows:
+                if job.cancelled_at is not None:
+                    logger.info(
+                        "recurring_watcher: job_id=%s is cancelled, skipping spawn"
+                        " (run_id=%s event_type=%s)",
+                        job.job_id,
+                        event.run_id,
+                        event.event_type,
+                    )
+                else:
+                    tz = ZoneInfo(job.timezone or "UTC")
+                    run_at = next_after(job.cron_expr, tz, event.occurred_at)
+                    time_bucket = run_at.replace(minute=0, second=0, microsecond=0).isoformat()
+
+                    new_run = JobRun(
+                        time_bucket=time_bucket,
+                        job_id=job.job_id,
+                        scheduled_at=run_at,
+                        status="PENDING",
+                    )
+                    session.add(new_run)
+                    await session.flush()
+
+                    new_event = RunEvent(
+                        run_id=new_run.run_id,
+                        job_id=job.job_id,
+                        event_type="CREATED",
+                    )
+                    session.add(new_event)
+
+                    logger.info(
+                        "recurring_watcher: spawned run_id=%s for job_id=%s"
+                        " scheduled_at=%s (cron=%r tz=%s)",
+                        new_run.run_id,
+                        job.job_id,
+                        run_at.isoformat(),
+                        job.cron_expr,
+                        job.timezone,
+                    )
+
                 # Stamp the cursor so this event is never reprocessed on restart.
                 new_pb = dict(event.processed_by)
                 new_pb[PROCESSED_BY_KEY] = now_iso
@@ -74,7 +113,6 @@ async def poll_once(
                     .where(RunEvent.event_id == event.event_id)
                     .values(processed_by=new_pb)
                 )
-                # TODO(W2): cron expansion — parse cron_expr, compute next fire time, insert JobRun
 
     return len(rows)
 
@@ -84,7 +122,7 @@ async def run_recurring_watcher(
     *,
     interval: float = DEFAULT_SLEEP_SECONDS,
 ) -> None:
-    """Watcher loop: poll → stamp → sleep. Runs until cancelled."""
+    """Watcher loop: poll → spawn → sleep. Runs until cancelled."""
     logger.info("recurring_watcher: starting (interval=%.1fs)", interval)
     while True:
         try:
