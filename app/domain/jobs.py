@@ -199,6 +199,9 @@ class JobView:
     action: str
     internal_status: str
     runs: list[RunView] | None
+    description: str | None = None
+    job_type: str | None = None
+    created_at: datetime | None = None
 
 
 async def get_job_with_runs(
@@ -207,12 +210,13 @@ async def get_job_with_runs(
     user_id: str,
     job_id: int,
     include_runs: bool,
+    run_limit: int = 10,
 ) -> JobView:
-    """Return the job's current status and optionally its 10 most recent runs.
+    """Return the job's current status and optionally its most recent runs.
 
     Raises JobNotFoundError if job_id does not exist or belongs to another user.
-    The most recent 10 runs are ordered newest-first by start_at, falling back
-    to scheduled_at when start_at is NULL.
+    Runs are ordered newest-first by start_at, falling back to scheduled_at when
+    start_at is NULL. run_limit controls how many runs to return (default 10).
     """
     job_result = await session.execute(
         select(Job).where(Job.job_id == job_id, Job.user_id == user_id)
@@ -222,7 +226,7 @@ async def get_job_with_runs(
         raise JobNotFoundError(job_id)
 
     sort_key = func.coalesce(JobRun.start_at, JobRun.scheduled_at).desc()
-    limit = 10 if include_runs else 1
+    limit = run_limit if include_runs else 1
     runs_result = await session.execute(
         select(JobRun).where(JobRun.job_id == job_id).order_by(sort_key).limit(limit)
     )
@@ -245,6 +249,9 @@ async def get_job_with_runs(
         action=job.action,
         internal_status=internal_status,
         runs=run_views if include_runs else None,
+        description=job.description,
+        job_type=job.job_type,
+        created_at=job.created_at,
     )
 
 
@@ -392,3 +399,76 @@ async def list_jobs(
     ]
 
     return PagedJobs(items=items, total=total, page=page, page_size=page_size)
+
+
+@dataclass
+class JobResourceItem:
+    job_id: int
+    description: str
+    job_type: str
+    created_at: datetime
+    internal_status: str
+    cancelled_at: datetime | None
+
+
+async def list_jobs_resource(
+    session: AsyncSession,
+    *,
+    user_id: str,
+    limit: int = 20,
+) -> tuple[list[JobResourceItem], int]:
+    """Return the top *limit* jobs newest-first for the MCP R1 resource.
+
+    Returns (items, total_count). Includes description, job_type, and
+    cancelled_at derived from the most recent CANCELLED RunEvent per job.
+    """
+    # Subquery: latest run status per job (DISTINCT ON, Postgres-specific)
+    latest_run_sq = (
+        select(JobRun.job_id.label("job_id"), JobRun.status.label("status"))
+        .distinct(JobRun.job_id)
+        .order_by(JobRun.job_id, func.coalesce(JobRun.start_at, JobRun.scheduled_at).desc())
+        .subquery("latest_run_r")
+    )
+
+    # Subquery: most recent CANCELLED event per job
+    cancelled_sq = (
+        select(
+            RunEvent.job_id.label("job_id"),
+            func.max(RunEvent.occurred_at).label("cancelled_at"),
+        )
+        .where(RunEvent.event_type == "CANCELLED")
+        .group_by(RunEvent.job_id)
+        .subquery("cancelled_r")
+    )
+
+    count_q = select(func.count()).select_from(Job).where(Job.user_id == user_id)
+    total: int = (await session.execute(count_q)).scalar_one()
+
+    data_q = (
+        select(
+            Job,
+            latest_run_sq.c.status.label("run_status"),
+            cancelled_sq.c.cancelled_at.label("cancelled_at"),
+        )
+        .where(Job.user_id == user_id)
+        .outerjoin(latest_run_sq, Job.job_id == latest_run_sq.c.job_id)
+        .outerjoin(cancelled_sq, Job.job_id == cancelled_sq.c.job_id)
+        .order_by(Job.created_at.desc())
+        .limit(limit)
+    )
+
+    rows = (await session.execute(data_q)).all()
+
+    items = [
+        JobResourceItem(
+            job_id=row.Job.job_id,
+            description=row.Job.description,
+            job_type=row.Job.job_type,
+            created_at=row.Job.created_at,
+            internal_status=row.run_status if row.run_status is not None else "PENDING",
+            cancelled_at=row.cancelled_at,
+        )
+        for row in rows
+    ]
+
+    return items, total
