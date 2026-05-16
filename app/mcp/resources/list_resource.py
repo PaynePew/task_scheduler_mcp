@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import logging
 from datetime import UTC, datetime
 from typing import Any
 
@@ -13,8 +12,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.db.engine import async_session_factory as default_session_factory
 from app.domain.jobs import list_jobs_resource
 from app.mcp.status_mapping import to_external
-
-logger = logging.getLogger(__name__)
 
 _MIME = "application/json"
 
