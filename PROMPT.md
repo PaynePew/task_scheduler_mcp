@@ -110,7 +110,7 @@ This opens a browser GUI (usually `http://localhost:5173`).
 
 Steps in the GUI:
 
-1. Click **Connect** -> should show 4 tools: `task.create`, `task.list`, `task.status`, `task.cancel`
+1. Click **Connect** -> should show 5 tools: `task.create`, `task.list`, `task.status`, `task.cancel`, `task.list_actions`
 2. **task.create** -> fill `description="Summarize tech news"`, `scheduled_at="2025-01-01T00:00:00"` (past time so watcher picks it up immediately) -> **Run Tool** -> response should include `{"job_id": 1, "status": "pending", ...}`
 3. Wait ~10 seconds, then **task.status** -> `job_id: 1` -> status should now be `"completed"`
 4. **task.create** with future time `"2099-12-31T00:00:00"` -> get `job_id: 2`
@@ -121,23 +121,26 @@ Steps in the GUI:
 
 Once the inspector tests pass, the server is ready. To talk to it through Claude:
 
-**Claude Desktop**: edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) and add (use absolute paths):
+**Claude Desktop**: edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) and add (use absolute paths to the repo root):
 
 ```json
 {
   "mcpServers": {
     "task-scheduler": {
-      "command": "/absolute/path/to/scaffold/.venv/bin/python",
-      "args": ["-m", "app.mcp_server"],
-      "cwd": "/absolute/path/to/scaffold"
+      "command": "/absolute/path/to/repo/.venv/bin/python",
+      "args": ["-m", "app.entrypoints.mcp_stdio"],
+      "cwd": "/absolute/path/to/repo",
+      "env": {
+        "MCP_USER_ID": "local-dev"
+      }
     }
   }
 }
 ```
 
-Restart Claude Desktop fully. The 🔨 icon in the chat input should show 4 tools.
+Restart Claude Desktop fully. The 🔨 icon in the chat input should show 5 tools.
 
-**Claude Code**: edit `~/.claude.json` (top-level `mcpServers` for user scope) with the same block, or run `claude mcp add` from inside `scaffold/`.
+**Claude Code**: edit `~/.claude.json` (top-level `mcpServers` for user scope) with the same block, or run `claude mcp add` from inside the repo root.
 
 Then chat:
 
