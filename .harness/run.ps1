@@ -814,7 +814,10 @@ if ($SmokeTest) {
             $cid    = [int]$cand['id']
             $ctitle = [string]$cand['title']
             $pos    = "[$($i + 1)/$($candidates.Count)]"
-            $ans    = Read-Host "$pos Run #$cid — $ctitle? [Y/n/q]"
+            # `$ctitle?` would be parsed greedily as a variable name
+            # under StrictMode Latest — wrap in $() for an explicit
+            # boundary so the trailing `?` stays literal.
+            $ans    = Read-Host "$pos Run #$cid — $($ctitle)? [Y/n/q]"
             if ($ans -match '^[Qq]') {
                 Write-Host '  Quit — no branch created.' -ForegroundColor DarkGray
                 exit 0
