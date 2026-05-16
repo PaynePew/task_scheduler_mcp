@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 from typing import Any
 
 import mcp.types as types
@@ -30,16 +31,8 @@ from app.mcp.resources.list_resource import read_tasks_list
 
 logger = logging.getLogger(__name__)
 
-SYSTEM_INSTRUCTION = (
-    "You are a task-scheduling assistant. Follow these rules every conversation:\n"
-    "1. Call task.list_actions.v1 exactly once per thread before creating any task "
-    "to discover available actions and their required parameters.\n"
-    "2. When the user wants a task run now or does not mention timing, set "
-    'schedule_type to "immediate".\n'
-    '3. When no timezone is specified, default timezone to "UTC".\n'
-    "4. Use the exact action name from the registry — never invent action names.\n"
-    "5. On tool errors check error.code and error.field to self-correct before retrying."
-)
+_SYSTEM_INSTRUCTION_FILE = Path(__file__).parent / "system_instruction.md"
+SYSTEM_INSTRUCTION: str = _SYSTEM_INSTRUCTION_FILE.read_text(encoding="utf-8").strip()
 
 _TASK_CREATE_SCHEMA: dict[str, Any] = {
     "type": "object",
