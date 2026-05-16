@@ -248,7 +248,6 @@ async def get_job_with_runs(
     )
 
 
-_TERMINAL_STATUSES: frozenset[str] = frozenset({"SUCCEEDED", "FAILED", "CANCELLED"})
 # Statuses that represent natural job completion — not caused by a cancel request.
 _NATURALLY_TERMINAL: frozenset[str] = frozenset({"SUCCEEDED", "FAILED"})
 # Statuses that are safe to flip to CANCELLED; RUNNING runs are left to complete.
