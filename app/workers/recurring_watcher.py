@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import UTC, datetime
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -74,8 +75,6 @@ async def poll_once(
                         event.event_type,
                     )
                 else:
-                    from zoneinfo import ZoneInfo
-
                     tz = ZoneInfo(job.timezone or "UTC")
                     run_at = next_after(job.cron_expr, tz, event.occurred_at)
                     time_bucket = run_at.replace(minute=0, second=0, microsecond=0).isoformat()
