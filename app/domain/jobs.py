@@ -21,6 +21,8 @@ from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.actions.registry import ACTION_REGISTRY
+from app.config.cron import next_after, validate_cron_expr
+from app.config.timezone_resolver import resolve_timezone
 from app.db.models import Job, JobRun, RunEvent
 
 
@@ -67,7 +69,15 @@ class InvalidTimezoneError(Exception):
     """
 
 
-_SUPPORTED_SCHEDULE_TYPES = frozenset({"immediate", "one-shot"})
+class InvalidCronExprError(Exception):
+    """Raised when cron_expr is missing or malformed for a recurring job (USER_INPUT).
+
+    The single arg is the human-readable hint returned by validate_cron_expr so
+    the MCP handler can forward it as the ``expected`` field for LLM self-correction.
+    """
+
+
+_SUPPORTED_SCHEDULE_TYPES = frozenset({"immediate", "one-shot", "recurring"})
 
 
 def _validate_iana_timezone(tz_str: str) -> ZoneInfo:
@@ -113,7 +123,10 @@ async def create_job(
     schedule_type: str,
     idempotency_key: str | None = None,
     scheduled_at: str | None = None,
-    timezone: str = "UTC",
+    timezone: str | None = None,
+    cron_expr: str | None = None,
+    tz_header: str | None = None,
+    tz_env: str | None = None,
 ) -> Job:
     """Insert Job + JobRun(PENDING) + RunEvent(CREATED) in one transaction.
 
@@ -122,17 +135,35 @@ async def create_job(
     Raises UnsupportedScheduleTypeError for unimplemented schedule_type values.
     Raises InvalidTimezoneError if timezone is not a valid IANA key.
     Raises InvalidScheduledAtError if scheduled_at is missing, unparseable, or past.
+    Raises InvalidCronExprError if cron_expr is missing or invalid for recurring.
     """
     if schedule_type not in _SUPPORTED_SCHEDULE_TYPES:
         raise UnsupportedScheduleTypeError(schedule_type)
     if action not in ACTION_REGISTRY:
         raise UnknownActionError(action)
 
-    if schedule_type == "one-shot":
-        tz = _validate_iana_timezone(timezone)
+    if schedule_type == "recurring":
+        if not cron_expr:
+            raise InvalidCronExprError(
+                "cron_expr is required for recurring jobs; "
+                "use a 5-field POSIX expression like '0 8 * * *'"
+            )
+        ok, hint = validate_cron_expr(cron_expr)
+        if not ok:
+            raise InvalidCronExprError(hint)
+        resolved_tz = resolve_timezone(timezone, tz_header, tz_env)
+        tz = _validate_iana_timezone(resolved_tz)
+        now = datetime.now(tz=UTC)
+        run_at = next_after(cron_expr, tz, now)
+    elif schedule_type == "one-shot":
+        tz = _validate_iana_timezone(timezone or "UTC")
         run_at = _parse_and_normalise_scheduled_at(scheduled_at, tz)
+        resolved_tz = timezone or "UTC"
+        cron_expr = None
     else:
         run_at = datetime.now(tz=UTC)
+        resolved_tz = timezone or "UTC"
+        cron_expr = None
 
     async with session.begin():
         if idempotency_key is not None:
@@ -156,14 +187,16 @@ async def create_job(
         # bucket instead of the whole table.
         time_bucket = run_at.replace(minute=0, second=0, microsecond=0).isoformat()
 
+        is_recurring = schedule_type == "recurring"
         job = Job(
             user_id=user_id,
             description=action,
             action=action,
             action_params=action_params,
-            job_type="one_shot",
-            scheduled_at=run_at,
-            timezone=timezone,
+            job_type="recurring" if is_recurring else "one_shot",
+            scheduled_at=None if is_recurring else run_at,
+            cron_expr=cron_expr,
+            timezone=resolved_tz,
             idempotency_key=idempotency_key,
         )
         session.add(job)

@@ -33,7 +33,7 @@ async def test_unknown_action_raises_before_db():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("bad_schedule_type", ["one_shot", "recurring", "scheduled", ""])
+@pytest.mark.parametrize("bad_schedule_type", ["one_shot", "scheduled", ""])
 async def test_unsupported_schedule_type_raises_before_db(bad_schedule_type):
     """create_job must reject unimplemented schedule_type values before touching the DB.
     'one_shot' (underscore) is distinct from the supported 'one-shot' (hyphen)."""
