@@ -29,17 +29,20 @@ def test_job_has_idempotency_key_user_scoped_unique():
     assert "uq_jobs_user_idempotency" in constraints
 
 
-def test_job_has_w2_bonus_columns():
+def test_job_has_w2_columns():
     cols = _col_names(Job)
-    bonus_cols = (
+    w2_cols = (
         "cron_expr",
         "trigger_on_job_id",
         "trigger_on_status",
-        "raw_user_input",
-        "parsing_metadata",
+        "cancelled_at",
     )
-    for col in bonus_cols:
-        assert col in cols, f"Missing W2 bonus column: {col}"
+    for col in w2_cols:
+        assert col in cols, f"Missing W2 column: {col}"
+
+    # NL-parser columns dropped in migration 0003 (ADR-023).
+    assert "raw_user_input" not in cols
+    assert "parsing_metadata" not in cols
 
 
 def test_job_run_has_time_bucket_and_composite_pk():

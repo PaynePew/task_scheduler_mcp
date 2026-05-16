@@ -206,6 +206,7 @@ async def test_cancel_job_raises_invalid_state_when_all_runs_terminal():
 
     mock_job = MagicMock(spec=Job)
     mock_job.job_id = 42
+    mock_job.cancelled_at = None  # not yet cancelled — should reach INVALID_STATE check
 
     mock_run = MagicMock(spec=JobRun)
     mock_run.status = "SUCCEEDED"
