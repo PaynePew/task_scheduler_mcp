@@ -160,9 +160,6 @@ def create_server(
         if name == _setup_summary.NAME:
             topic, schedule = _setup_summary.validate_args(arguments)
             return _setup_summary.build_result(topic, schedule)
-        from mcp.shared.exceptions import McpError
-        from mcp.types import INVALID_PARAMS, ErrorData
-
         raise McpError(ErrorData(code=INVALID_PARAMS, message=f"Unknown prompt: {name}"))
 
     @server.list_tools()
