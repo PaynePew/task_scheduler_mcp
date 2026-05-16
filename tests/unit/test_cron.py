@@ -6,14 +6,14 @@ accepted/rejected cron expressions.
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
 
 from app.config.cron import next_after, validate_cron_expr
 
-UTC = timezone.utc
+UTC = UTC
 LA = ZoneInfo("America/Los_Angeles")
 
 
@@ -137,14 +137,14 @@ def test_validate_cron_expr_accepted(expr):
 @pytest.mark.parametrize(
     "expr",
     [
-        "0 0 8 * * *",   # 6-field (seconds)
-        "* * * * * *",   # 6-field
+        "0 0 8 * * *",  # 6-field (seconds)
+        "* * * * * *",  # 6-field
         "@reboot",
         "@REBOOT",
         "@every 5m",
         "@every 1h",
         "not_a_cron",
-        "61 25 * * *",   # out-of-range fields
+        "61 25 * * *",  # out-of-range fields
     ],
 )
 def test_validate_cron_expr_rejected(expr):
