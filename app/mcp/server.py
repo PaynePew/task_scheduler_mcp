@@ -134,8 +134,12 @@ def create_server(
             types.Tool(
                 name="task.cancel.v1",
                 description=(
-                    "Cancel a job by transitioning all non-terminal runs to CANCELLED. "
-                    "Returns INVALID_STATE if all runs are already terminal."
+                    "Cancel a job. Pending, queued, and waiting runs are immediately "
+                    "transitioned to CANCELLED. Runs that are currently in-flight (RUNNING) "
+                    "are left to complete naturally — cancellation is best-effort for "
+                    "currently-running executions. Re-cancelling an already-cancelled job "
+                    "is idempotent and returns success. Returns INVALID_STATE if the job "
+                    "already fully terminated (all runs SUCCEEDED or FAILED)."
                 ),
                 inputSchema=TASK_CANCEL_SCHEMA,
             ),

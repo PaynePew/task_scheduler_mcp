@@ -249,6 +249,10 @@ async def get_job_with_runs(
 
 
 _TERMINAL_STATUSES: frozenset[str] = frozenset({"SUCCEEDED", "FAILED", "CANCELLED"})
+# Statuses that represent natural job completion — not caused by a cancel request.
+_NATURALLY_TERMINAL: frozenset[str] = frozenset({"SUCCEEDED", "FAILED"})
+# Statuses that are safe to flip to CANCELLED; RUNNING runs are left to complete.
+_CANCELLABLE_STATUSES: frozenset[str] = frozenset({"PENDING", "QUEUED", "WAITING", "RETRYING"})
 
 
 async def cancel_job(
@@ -257,12 +261,16 @@ async def cancel_job(
     user_id: str,
     job_id: int,
 ) -> JobView:
-    """Cancel all non-terminal JobRuns for a job, writing outbox events atomically.
+    """Job-level cancel: set cancelled_at, flip non-RUNNING pending runs to CANCELLED.
+
+    Best-effort semantics (ADR-022):
+    - RUNNING runs are left untouched so they complete naturally.
+    - Re-cancel on an already-cancelled job is idempotent (returns success).
+    - INVALID_STATE only when all runs finished naturally (SUCCEEDED/FAILED).
 
     Raises JobNotFoundError if job_id does not exist or belongs to another user.
-    Raises InvalidStateError(internal_status) if all runs are already terminal —
-    the transport layer maps the internal status to its external counterpart.
-    Returns a JobView reflecting the post-cancel state (internal_status='CANCELLED').
+    Raises InvalidStateError(internal_status) if job fully terminated naturally.
+    Returns a JobView reflecting post-cancel state (internal_status='CANCELLED').
     """
     async with session.begin():
         job_result = await session.execute(
@@ -272,19 +280,31 @@ async def cancel_job(
         if job is None:
             raise JobNotFoundError(job_id)
 
+        # Idempotent: cancelled_at is the single source of truth for "was this job cancelled".
+        if job.cancelled_at is not None:
+            return JobView(
+                job_id=job.job_id,
+                action=job.action,
+                internal_status="CANCELLED",
+                runs=None,
+            )
+
         runs_result = await session.execute(select(JobRun).where(JobRun.job_id == job_id))
         all_runs = runs_result.scalars().all()
 
-        non_terminal = [r for r in all_runs if r.status not in _TERMINAL_STATUSES]
-
-        if not non_terminal:
-            current_status = all_runs[0].status if all_runs else "PENDING"
+        # INVALID_STATE only when every run completed naturally (no in-flight or pending work).
+        if all_runs and all(r.status in _NATURALLY_TERMINAL for r in all_runs):
+            # Use the most recent run's status to guide the external error message.
+            current_status = all_runs[0].status
             raise InvalidStateError(current_status)
 
-        for run in non_terminal:
-            # Capture the pre-update status: SQLAlchemy's bulk update() with the
-            # default synchronize_session="auto" mutates the in-memory ORM
-            # instance, so reading run.status after execute() yields 'CANCELLED'.
+        # Mark job as cancelled.
+        job.cancelled_at = datetime.now(tz=UTC)
+
+        # Flip only the pending/queued/waiting/retrying runs; leave RUNNING alone.
+        to_cancel = [r for r in all_runs if r.status in _CANCELLABLE_STATUSES]
+        for run in to_cancel:
+            # Capture pre-update status before SQLAlchemy's synchronize_session mutates it.
             original_status = run.status
             await session.execute(
                 update(JobRun)
