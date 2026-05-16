@@ -1,4 +1,4 @@
-"""task.cancel@v1 MCP handler."""
+"""task.cancel.v1 MCP handler."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ TASK_CANCEL_SCHEMA: dict[str, Any] = {
     "properties": {
         "job_id": {
             "type": "integer",
-            "description": "The job ID returned by task.create@v1.",
+            "description": "The job ID returned by task.create.v1.",
         },
     },
     "required": ["job_id"],
@@ -33,7 +33,7 @@ async def handle_task_cancel(
     *,
     session_factory: async_sessionmaker[AsyncSession] | None = None,
 ) -> dict[str, Any]:
-    """Handle task.cancel@v1 — cancel all non-terminal runs for a job.
+    """Handle task.cancel.v1 — cancel all non-terminal runs for a job.
 
     Returns NOT_FOUND for unknown or cross-user job_id.
     Returns INVALID_STATE when all runs are already terminal.
@@ -66,7 +66,7 @@ async def handle_task_cancel(
             f"Job {job_id} cannot be cancelled; current status is {external!r}",
         )
     except Exception:
-        logger.exception("task.cancel@v1 failed for user %s job %s", user_id, job_id)
+        logger.exception("task.cancel.v1 failed for user %s job %s", user_id, job_id)
         return error("INTERNAL", "An unexpected error occurred.")
 
     return success({"job_id": view.job_id, "status": to_external(view.internal_status)})

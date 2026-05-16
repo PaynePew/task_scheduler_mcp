@@ -2,11 +2,11 @@
 
 Mirrors the manual steps from PROMPT.md § Verification step 2:
   1. Connect → 5 tools visible
-  2. task.create@v1 (immediate echo) → job_id + status "scheduled"
-  3. Watcher + Worker run → task.status@v1 → status "completed"
-  4. task.create@v1 (2099-12-31, one-shot) → job_id + status "scheduled"
-  5. task.cancel@v1 → status "cancelled"
-  6. task.list@v1 → both jobs visible
+  2. task.create.v1 (immediate echo) → job_id + status "scheduled"
+  3. Watcher + Worker run → task.status.v1 → status "completed"
+  4. task.create.v1 (2099-12-31, one-shot) → job_id + status "scheduled"
+  5. task.cancel.v1 → status "cancelled"
+  6. task.list.v1 → both jobs visible
 
 The test is the "CI equivalent" of docker compose --profile full up: it runs
 all six process roles in-process (ASGITransport for the MCP HTTP server,
@@ -143,19 +143,19 @@ async def test_e2e_inspector_flow(mcp_client, session_factory, sqs):
         tools = await _list_tools(client)
         tool_names = {t["name"] for t in tools}
         assert tool_names == {
-            "task.create@v1",
-            "task.list@v1",
-            "task.status@v1",
-            "task.cancel@v1",
-            "task.list_actions@v1",
+            "task.create.v1",
+            "task.list.v1",
+            "task.status.v1",
+            "task.cancel.v1",
+            "task.list_actions.v1",
         }, f"expected 5 tools, got: {tool_names}"
 
         # ------------------------------------------------------------------
-        # Step 2: task.create@v1 (immediate echo) → job_id + status "scheduled"
+        # Step 2: task.create.v1 (immediate echo) → job_id + status "scheduled"
         # ------------------------------------------------------------------
         create_imm = await _mcp_call(
             client,
-            "task.create@v1",
+            "task.create.v1",
             {
                 "action": "echo",
                 "action_params": {"message": "e2e inspector test"},
@@ -180,18 +180,18 @@ async def test_e2e_inspector_flow(mcp_client, session_factory, sqs):
 
         await process_one(session_factory, sqs, msgs[0])
 
-        status_1 = await _mcp_call(client, "task.status@v1", {"job_id": job_id_1})
+        status_1 = await _mcp_call(client, "task.status.v1", {"job_id": job_id_1})
         assert status_1["ok"] is True, f"step 3 status failed: {status_1}"
         assert status_1["data"]["status"] == "completed", (
             f"step 3: expected 'completed', got {status_1['data']['status']!r}"
         )
 
         # ------------------------------------------------------------------
-        # Step 4: task.create@v1 (far-future one-shot) → job_id + "scheduled"
+        # Step 4: task.create.v1 (far-future one-shot) → job_id + "scheduled"
         # ------------------------------------------------------------------
         create_future = await _mcp_call(
             client,
-            "task.create@v1",
+            "task.create.v1",
             {
                 "action": "echo",
                 "action_params": {"message": "far future"},
@@ -207,18 +207,18 @@ async def test_e2e_inspector_flow(mcp_client, session_factory, sqs):
         )
 
         # ------------------------------------------------------------------
-        # Step 5: task.cancel@v1 → status "cancelled"
+        # Step 5: task.cancel.v1 → status "cancelled"
         # ------------------------------------------------------------------
-        cancel = await _mcp_call(client, "task.cancel@v1", {"job_id": job_id_2})
+        cancel = await _mcp_call(client, "task.cancel.v1", {"job_id": job_id_2})
         assert cancel["ok"] is True, f"step 5 cancel failed: {cancel}"
         assert cancel["data"]["status"] == "cancelled", (
             f"step 5: expected 'cancelled', got {cancel['data']['status']!r}"
         )
 
         # ------------------------------------------------------------------
-        # Step 6: task.list@v1 → both jobs visible
+        # Step 6: task.list.v1 → both jobs visible
         # ------------------------------------------------------------------
-        list_result = await _mcp_call(client, "task.list@v1", {})
+        list_result = await _mcp_call(client, "task.list.v1", {})
         assert list_result["ok"] is True, f"step 6 list failed: {list_result}"
         visible_ids = {j["job_id"] for j in list_result["data"]["jobs"]}
         assert job_id_1 in visible_ids, f"step 6: job_id_1={job_id_1} not in {visible_ids}"

@@ -30,7 +30,7 @@ WAITING ──▶ PENDING    (when blocking-job terminates favourably)
 WAITING ──▶ CANCELLED  (when blocking-job terminates unfavourably)
 ```
 
-### External (returned by `task.status@v1` / `task.list@v1`)
+### External (returned by `task.status.v1` / `task.list.v1`)
 
 | Internal | External |
 |---|---|
@@ -91,11 +91,11 @@ Mapping happens at the MCP handler boundary. DB keeps the precise truth; LLM get
 | | **Tool** | **Action** |
 |---|---|---|
 | Whose vocabulary | MCP client (LLM) | Internal worker dispatch |
-| Examples | `task.create@v1`, `task.list@v1` | `echo`, `http_call`, `llm_summarize` (W2) |
+| Examples | `task.create.v1`, `task.list.v1` | `echo`, `http_call`, `llm_summarize` (W2) |
 | How many | 5 in W1 | 2 in W1, grows in W2 |
 | Where defined | `app/mcp/tools/` | `app/actions/` |
 
-A `Tool` is *what an LLM client can invoke*. An `Action` is *what the worker can execute*. `task.create@v1` is the Tool; it accepts an `action` field whose value is one of the registered Action names.
+A `Tool` is *what an LLM client can invoke*. An `Action` is *what the worker can execute*. `task.create.v1` is the Tool; it accepts an `action` field whose value is one of the registered Action names.
 
 ### Envelope
 
@@ -117,9 +117,9 @@ Failure: {"ok": false, "error": {"code", "message", "field", "expected"}}
 | `DUPLICATE` | `idempotency_key` collision |
 | `INTERNAL` | Server-side failure not caused by the caller |
 
-### Versioning (`@v1`)
+### Versioning (`.v1`)
 
-Every tool name carries `@v1`. MCP clients cache `tools/list` per thread; changing a tool's schema mid-thread breaks long conversations. To evolve, ship `task.foo@v2` alongside `@v1`.
+Every tool name carries `.v1`. MCP clients cache `tools/list` per thread; changing a tool's schema mid-thread breaks long conversations. To evolve, ship `task.foo.v2` alongside `.v1`.
 
 ### Transport
 

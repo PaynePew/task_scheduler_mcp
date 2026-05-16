@@ -16,6 +16,20 @@ jobs:
       - run: uv sync
       - run: uv run ruff check .
       - run: uv run ruff format --check .
+      # ADR-014 amendment / SEP-986: MCP tool names must use `.vN`, never `@vN`.
+      - name: Forbid '@vN' MCP tool-name suffix
+        run: |
+          hits=$(grep -rn 'task\.[a-z_]\+@v[0-9]' \
+            --include='*.py' --include='*.md' \
+            --include='*.yml' --include='*.yaml' \
+            --include='*.json' --include='*.toml' \
+            --exclude-dir=.venv --exclude-dir=node_modules \
+            --exclude-dir=__pycache__ --exclude-dir=.git . || true)
+          if [ -n "$hits" ]; then
+            echo "::error::Forbidden '@vN' MCP tool-name suffix found. Use '.vN' per ADR-014 / SEP-986."
+            echo "$hits"
+            exit 1
+          fi
 
   unit:
     runs-on: ubuntu-latest

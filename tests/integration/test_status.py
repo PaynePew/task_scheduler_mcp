@@ -1,4 +1,4 @@
-"""Integration tests for task.status@v1 — requires running Postgres + ElasticMQ.
+"""Integration tests for task.status.v1 — requires running Postgres + ElasticMQ.
 
 Run with:
     docker compose up -d postgres elasticmq && alembic upgrade head

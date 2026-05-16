@@ -16,11 +16,11 @@ from mcp.client.streamable_http import streamablehttp_client
 SERVER_URL = "http://localhost:8000/mcp"
 USER_ID = "w1-verify"
 EXPECTED_TOOL_NAMES = {
-    "task.create@v1",
-    "task.list@v1",
-    "task.status@v1",
-    "task.cancel@v1",
-    "task.list_actions@v1",
+    "task.create.v1",
+    "task.list.v1",
+    "task.status.v1",
+    "task.cancel.v1",
+    "task.list_actions.v1",
 }
 
 
@@ -69,9 +69,9 @@ async def main() -> int:
             )
 
             # Step 2: task.create — immediate echo (semantically "past time" → runs ASAP)
-            print("\nStep 2: task.create@v1 (immediate echo)")
+            print("\nStep 2: task.create.v1 (immediate echo)")
             create_now = await session.call_tool(
-                "task.create@v1",
+                "task.create.v1",
                 {
                     "action": "echo",
                     "action_params": {"message": "Summarize tech news"},
@@ -82,16 +82,16 @@ async def main() -> int:
             ok = payload.get("ok") is True and "job_id" in payload.get("data", {})
             job_id_immediate = payload["data"]["job_id"] if ok else None
             report.record(
-                "task.create@v1 immediate returns job_id + status=scheduled",
+                "task.create.v1 immediate returns job_id + status=scheduled",
                 ok and payload["data"].get("status") == "scheduled",
                 f"job_id={job_id_immediate}",
             )
 
             # Step 3: wait ~12s then task.status — expect completed
-            print("\nStep 3: wait 12s then task.status@v1")
+            print("\nStep 3: wait 12s then task.status.v1")
             await asyncio.sleep(12)
             status_result = await session.call_tool(
-                "task.status@v1",
+                "task.status.v1",
                 {"job_id": job_id_immediate},
             )
             status_payload = _unwrap(status_result)
@@ -103,10 +103,10 @@ async def main() -> int:
             )
 
             # Step 4: task.create — future-dated (one-shot 2099-12-31)
-            print("\nStep 4: task.create@v1 (future one-shot)")
+            print("\nStep 4: task.create.v1 (future one-shot)")
             future_iso = "2099-12-31T00:00:00+00:00"
             create_future = await session.call_tool(
-                "task.create@v1",
+                "task.create.v1",
                 {
                     "action": "echo",
                     "action_params": {"message": "future"},
@@ -119,26 +119,26 @@ async def main() -> int:
             ok = future_payload.get("ok") is True and "job_id" in future_payload.get("data", {})
             job_id_future = future_payload["data"]["job_id"] if ok else None
             report.record(
-                "task.create@v1 future one-shot returns job_id",
+                "task.create.v1 future one-shot returns job_id",
                 ok,
                 f"job_id={job_id_future}",
             )
 
             # Step 5: task.cancel future job → status 'cancelled'
-            print("\nStep 5: task.cancel@v1")
+            print("\nStep 5: task.cancel.v1")
             cancel_result = await session.call_tool(
-                "task.cancel@v1",
+                "task.cancel.v1",
                 {"job_id": job_id_future},
             )
             cancel_payload = _unwrap(cancel_result)
             report.record(
-                "task.cancel@v1 returns ok=true",
+                "task.cancel.v1 returns ok=true",
                 cancel_payload.get("ok") is True,
                 f"data={cancel_payload.get('data')}",
             )
 
             status_after_cancel = await session.call_tool(
-                "task.status@v1",
+                "task.status.v1",
                 {"job_id": job_id_future},
             )
             cancel_status_payload = _unwrap(status_after_cancel)
@@ -150,13 +150,13 @@ async def main() -> int:
             )
 
             # Step 6: task.list — both jobs visible
-            print("\nStep 6: task.list@v1")
-            list_result = await session.call_tool("task.list@v1", {})
+            print("\nStep 6: task.list.v1")
+            list_result = await session.call_tool("task.list.v1", {})
             list_payload = _unwrap(list_result)
             jobs = list_payload.get("data", {}).get("jobs", [])
             ids = {item.get("job_id") for item in jobs}
             report.record(
-                "task.list@v1 returns both created jobs",
+                "task.list.v1 returns both created jobs",
                 {job_id_immediate, job_id_future}.issubset(ids),
                 f"jobs={len(jobs)} ids={sorted(ids)}",
             )

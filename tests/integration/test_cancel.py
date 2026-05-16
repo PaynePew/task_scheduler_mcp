@@ -1,4 +1,4 @@
-"""Integration tests for task.cancel@v1 — requires running Postgres.
+"""Integration tests for task.cancel.v1 — requires running Postgres.
 
 Run with:
     docker compose up -d postgres && alembic upgrade head

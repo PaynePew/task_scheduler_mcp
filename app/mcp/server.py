@@ -1,4 +1,4 @@
-"""Transport-agnostic MCP server: task.create@v1 + task.list_actions@v1 per ADR-006/014."""
+"""Transport-agnostic MCP server: task.create.v1 + task.list_actions.v1 per ADR-006/014."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 SYSTEM_INSTRUCTION = (
     "You are a task-scheduling assistant. Follow these rules every conversation:\n"
-    "1. Call task.list_actions@v1 exactly once per thread before creating any task "
+    "1. Call task.list_actions.v1 exactly once per thread before creating any task "
     "to discover available actions and their required parameters.\n"
     "2. When the user wants a task run now or does not mention timing, set "
     'schedule_type to "immediate".\n'
@@ -42,7 +42,7 @@ _TASK_CREATE_SCHEMA: dict[str, Any] = {
         },
         "action_params": {
             "type": "object",
-            "description": "Action-specific parameters (see task.list_actions@v1).",
+            "description": "Action-specific parameters (see task.list_actions.v1).",
         },
         "schedule_type": {
             "type": "string",
@@ -115,7 +115,7 @@ def create_server(
     async def list_tools() -> list[types.Tool]:
         return [
             types.Tool(
-                name="task.create@v1",
+                name="task.create.v1",
                 description=(
                     "Create a new scheduled task. Returns {ok, data: {job_id, status}} "
                     "on success or {ok: false, error: {code, message, field, expected}} on failure."
@@ -123,7 +123,7 @@ def create_server(
                 inputSchema=_TASK_CREATE_SCHEMA,
             ),
             types.Tool(
-                name="task.status@v1",
+                name="task.status.v1",
                 description=(
                     "Return the status of a single job. With include_runs=true, also "
                     "returns the most recent 10 execution runs. Returns NOT_FOUND for "
@@ -132,7 +132,7 @@ def create_server(
                 inputSchema=TASK_STATUS_SCHEMA,
             ),
             types.Tool(
-                name="task.cancel@v1",
+                name="task.cancel.v1",
                 description=(
                     "Cancel a job by transitioning all non-terminal runs to CANCELLED. "
                     "Returns INVALID_STATE if all runs are already terminal."
@@ -140,7 +140,7 @@ def create_server(
                 inputSchema=TASK_CANCEL_SCHEMA,
             ),
             types.Tool(
-                name="task.list@v1",
+                name="task.list.v1",
                 description=(
                     "List the caller's jobs newest-first. Supports status filter, "
                     "created_at range, and offset pagination (page + pageSize)."
@@ -148,10 +148,10 @@ def create_server(
                 inputSchema=TASK_LIST_SCHEMA,
             ),
             types.Tool(
-                name="task.list_actions@v1",
+                name="task.list_actions.v1",
                 description=(
                     "List all registered actions with their descriptions, timeouts, "
-                    "and parameter schemas. Call once per thread before task.create@v1."
+                    "and parameter schemas. Call once per thread before task.create.v1."
                 ),
                 inputSchema=_TASK_LIST_ACTIONS_SCHEMA,
             ),
@@ -159,15 +159,15 @@ def create_server(
 
     @server.call_tool()
     async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextContent]:
-        if name == "task.list_actions@v1":
+        if name == "task.list_actions.v1":
             result = success({"actions": _build_action_list()})
-        elif name == "task.create@v1":
+        elif name == "task.create.v1":
             result = await _handle_task_create(arguments, user_id, session_factory=factory)
-        elif name == "task.status@v1":
+        elif name == "task.status.v1":
             result = await handle_task_status(arguments, user_id, session_factory=factory)
-        elif name == "task.cancel@v1":
+        elif name == "task.cancel.v1":
             result = await handle_task_cancel(arguments, user_id, session_factory=factory)
-        elif name == "task.list@v1":
+        elif name == "task.list.v1":
             result = await handle_task_list(arguments, user_id, session_factory=factory)
         else:
             result = error("INTERNAL", f"Unknown tool: {name}")
@@ -203,5 +203,5 @@ async def _handle_task_create(
             )
         return success({"job_id": job.job_id, "status": "scheduled"})
     except Exception as exc:
-        logger.exception("task.create@v1 failed for user %s", user_id)
+        logger.exception("task.create.v1 failed for user %s", user_id)
         return map_domain_error(exc)

@@ -1,4 +1,4 @@
-"""task.list@v1 MCP handler."""
+"""task.list.v1 MCP handler."""
 
 from __future__ import annotations
 
@@ -86,7 +86,7 @@ async def handle_task_list(
     *,
     session_factory: async_sessionmaker[AsyncSession] | None = None,
 ) -> dict[str, Any]:
-    """Handle task.list@v1 — returns paged jobs for the caller, newest-first.
+    """Handle task.list.v1 — returns paged jobs for the caller, newest-first.
 
     `session_factory` is injectable for testing (same rationale as status/cancel handlers).
     """
@@ -156,7 +156,7 @@ async def handle_task_list(
                 page_size=page_size,
             )
     except Exception:
-        logger.exception("task.list@v1 failed for user %s", user_id)
+        logger.exception("task.list.v1 failed for user %s", user_id)
         return error("INTERNAL", "An unexpected error occurred.")
 
     return success(

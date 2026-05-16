@@ -1,4 +1,4 @@
-"""task.status@v1 MCP handler."""
+"""task.status.v1 MCP handler."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ TASK_STATUS_SCHEMA: dict[str, Any] = {
     "properties": {
         "job_id": {
             "type": "integer",
-            "description": "The job ID returned by task.create@v1.",
+            "description": "The job ID returned by task.create.v1.",
         },
         "include_runs": {
             "type": "boolean",
@@ -38,7 +38,7 @@ async def handle_task_status(
     *,
     session_factory: async_sessionmaker[AsyncSession] | None = None,
 ) -> dict[str, Any]:
-    """Handle task.status@v1 — returns job status and optionally recent runs.
+    """Handle task.status.v1 — returns job status and optionally recent runs.
 
     Returns NOT_FOUND for unknown or cross-user job_id per ADR-014.
 
@@ -76,7 +76,7 @@ async def handle_task_status(
     except JobNotFoundError:
         return error("NOT_FOUND", f"Job {job_id} not found")
     except Exception:
-        logger.exception("task.status@v1 failed for user %s job %s", user_id, job_id)
+        logger.exception("task.status.v1 failed for user %s job %s", user_id, job_id)
         return error("INTERNAL", "An unexpected error occurred.")
 
     data: dict[str, Any] = {

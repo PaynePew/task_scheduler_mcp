@@ -80,7 +80,7 @@ class Job(Base):
         # Idempotency is scoped *per user* — two different users using the same key
         # don't collide. NULL keys never collide (Postgres NULL semantics).
         UniqueConstraint("user_id", "idempotency_key", name="uq_jobs_user_idempotency"),
-        # Hot index for task.list@v1 ("show me my recent jobs"). Newest-first.
+        # Hot index for task.list.v1 ("show me my recent jobs"). Newest-first.
         # In DynamoDB this would be the GSI with PK=user_id, SK=created_at.
         Index("idx_jobs_user_created", "user_id", text("created_at DESC")),
         # Partial index: only indexes rows the RecurringJobWatcher cares about,

@@ -28,7 +28,7 @@ class ActionHandler(Protocol):
     async def execute(self, run: JobRun, params: BaseModel) -> ActionResult: ...
 ```
 
-A module-level `ACTION_REGISTRY: dict[str, ActionHandler]` is the dispatch table. The MCP `task.create@v1` schema reads its `action` enum from `ACTION_REGISTRY.keys()`. `task.list_actions@v1` exposes the registry to clients (name, description, timeout, params JSON Schema).
+A module-level `ACTION_REGISTRY: dict[str, ActionHandler]` is the dispatch table. The MCP `task.create.v1` schema reads its `action` enum from `ACTION_REGISTRY.keys()`. `task.list_actions.v1` exposes the registry to clients (name, description, timeout, params JSON Schema).
 
 W1 ships two handlers:
 
@@ -46,4 +46,4 @@ W1 ships two handlers:
 - Adding a W2 action = 1 Pydantic params model + 1 handler class + 1 registry entry. Zero dispatcher changes.
 - Action authors choose their own `retryable` policy per error — retry behaviour is data-driven, not hardcoded.
 - Per-action `timeout_seconds` is enforced via `asyncio.wait_for`; hung actions become retryable failures, not blocked workers.
-- The `task.create@v1` tool schema is generated from the registry; clients always see the current action list via `task.list_actions@v1`.
+- The `task.create.v1` tool schema is generated from the registry; clients always see the current action list via `task.list_actions.v1`.

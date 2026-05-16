@@ -21,7 +21,7 @@ At-least-once execution + recurring jobs + linear chaining must coexist without 
 
 Two access-pattern indexes:
 
-- `idx_jobs_user_created (user_id, created_at DESC)` — serves `task.list@v1`. (Equivalent to a DDB GSI with PK=user_id, SK=created_at.)
+- `idx_jobs_user_created (user_id, created_at DESC)` — serves `task.list.v1`. (Equivalent to a DDB GSI with PK=user_id, SK=created_at.)
 - `idx_job_runs_due (time_bucket, scheduled_at) WHERE status IN ('PENDING','WAITING')` — the watcher's hot query.
 
 We deliberately **do not** physically partition `jobs` by `user_id`. At prototype scale, an index achieves per-user locality without the migration cost of partitioning.

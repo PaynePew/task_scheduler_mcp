@@ -1,4 +1,4 @@
-"""Integration tests for task.list@v1 — requires running Postgres.
+"""Integration tests for task.list.v1 — requires running Postgres.
 
 Run with:
     uv run pytest -m integration tests/integration/test_list.py

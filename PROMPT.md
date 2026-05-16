@@ -110,12 +110,12 @@ This opens a browser GUI (usually `http://localhost:5173`).
 
 Steps in the GUI:
 
-1. Click **Connect** -> should show 5 tools: `task.create`, `task.list`, `task.status`, `task.cancel`, `task.list_actions`
-2. **task.create** -> fill `description="Summarize tech news"`, `scheduled_at="2025-01-01T00:00:00"` (past time so watcher picks it up immediately) -> **Run Tool** -> response should include `{"job_id": 1, "status": "pending", ...}`
-3. Wait ~10 seconds, then **task.status** -> `job_id: 1` -> status should now be `"completed"`
-4. **task.create** with future time `"2099-12-31T00:00:00"` -> get `job_id: 2`
-5. **task.cancel** -> `job_id: 2` -> status `"cancelled"`
-6. **task.list** -> see all your jobs
+1. Click **Connect** -> should show 5 tools: `task.create.v1`, `task.list.v1`, `task.status.v1`, `task.cancel.v1`, `task.list_actions.v1`
+2. **task.create.v1** -> fill `description="Summarize tech news"`, `scheduled_at="2025-01-01T00:00:00"` (past time so watcher picks it up immediately) -> **Run Tool** -> response should include `{"job_id": 1, "status": "pending", ...}`
+3. Wait ~10 seconds, then **task.status.v1** -> `job_id: 1` -> status should now be `"completed"`
+4. **task.create.v1** with future time `"2099-12-31T00:00:00"` -> get `job_id: 2`
+5. **task.cancel.v1** -> `job_id: 2` -> status `"cancelled"`
+6. **task.list.v1** -> see all your jobs
 
 ### 3. (Optional) Connect to Claude Desktop / Claude Code
 

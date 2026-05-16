@@ -1,4 +1,4 @@
-"""Unit tests for task.list@v1 handler — validation logic (no DB)."""
+"""Unit tests for task.list.v1 handler — validation logic (no DB)."""
 
 from __future__ import annotations
 

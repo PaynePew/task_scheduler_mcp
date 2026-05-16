@@ -1,6 +1,6 @@
 """Canonical internal→external status mapping (CONTEXT.md §2).
 
-Kept in one place so both the task.status@v1 handler and S10b's status_filter
+Kept in one place so both the task.status.v1 handler and S10b's status_filter
 share a single source of truth.
 """
 

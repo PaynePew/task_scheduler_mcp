@@ -111,7 +111,7 @@ async def test_create_job_via_http(mcp_client, session_factory):
     async with mcp_client as client:
         result = await _mcp_call(
             client,
-            "task.create@v1",
+            "task.create.v1",
             {"action": "echo", "action_params": {"message": "hi"}},
             x_user_id="alice",
         )
@@ -121,26 +121,26 @@ async def test_create_job_via_http(mcp_client, session_factory):
 
 @pytest.mark.integration
 async def test_cross_tenant_isolation_not_found(mcp_client, session_factory):
-    """alice creates a job; bob's task.status@v1 call returns NOT_FOUND (hard isolation).
+    """alice creates a job; bob's task.status.v1 call returns NOT_FOUND (hard isolation).
 
     This test is the primary AC: same HTTP server, two different X-User-Id values,
-    bob cannot read alice's job_id via task.status@v1.
+    bob cannot read alice's job_id via task.status.v1.
     """
     async with mcp_client as client:
         # Step 1: alice creates a job
         create_result = await _mcp_call(
             client,
-            "task.create@v1",
+            "task.create.v1",
             {"action": "echo", "action_params": {"message": "alice's job"}},
             x_user_id="alice",
         )
         assert create_result["ok"] is True, f"create failed: {create_result}"
         job_id = create_result["data"]["job_id"]
 
-        # Step 2: bob tries to read alice's job via task.status@v1 → NOT_FOUND
+        # Step 2: bob tries to read alice's job via task.status.v1 → NOT_FOUND
         status_result = await _mcp_call(
             client,
-            "task.status@v1",
+            "task.status.v1",
             {"job_id": job_id},
             x_user_id="bob",
         )
@@ -150,7 +150,7 @@ async def test_cross_tenant_isolation_not_found(mcp_client, session_factory):
         # Step 3: alice can read her own job → ok
         own_status = await _mcp_call(
             client,
-            "task.status@v1",
+            "task.status.v1",
             {"job_id": job_id},
             x_user_id="alice",
         )
@@ -168,7 +168,7 @@ async def test_no_header_falls_back_to_default_user(mcp_client, session_factory)
         # alice creates a job
         create_result = await _mcp_call(
             client,
-            "task.create@v1",
+            "task.create.v1",
             {"action": "echo", "action_params": {"message": "alice only"}},
             x_user_id="alice",
         )
@@ -178,7 +178,7 @@ async def test_no_header_falls_back_to_default_user(mcp_client, session_factory)
         # default-user (no header) cannot read alice's job
         status_result = await _mcp_call(
             client,
-            "task.status@v1",
+            "task.status.v1",
             {"job_id": job_id},
             x_user_id=None,  # no header → "default-user"
         )

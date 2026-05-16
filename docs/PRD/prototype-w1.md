@@ -28,7 +28,7 @@ The W1 prototype is the smallest end-to-end slice that proves this primitive wor
 
 ## Solution
 
-A Python MCP server that exposes 5 tools (`task.create@v1`, `task.list@v1`, `task.status@v1`, `task.cancel@v1`, `task.list_actions@v1`) backed by:
+A Python MCP server that exposes 5 tools (`task.create.v1`, `task.list.v1`, `task.status.v1`, `task.cancel.v1`, `task.list_actions.v1`) backed by:
 
 1. **A Job Scheduling layer** that persists `Job` definitions and `JobRun` instances into Postgres with a `RunEvent` append-only outbox.
 2. **A Watcher process** that scans for due `JobRun`s within a 5-minute lookahead window and publishes them to a queue (SQS in production, ElasticMQ locally).
@@ -134,7 +134,7 @@ Three tables — full schema in `.doc/learn/system-design.md` § 7.4. Concept su
 - **`run_events`** — append-only outbox. Stores transition events (`CREATED` / `QUEUED` / `STARTED` / `SUCCEEDED` / `FAILED` / `RETRY` / `CANCELLED`) with `processed_by` JSONB tracking which downstream watcher consumed each event.
 
 Two access-pattern indexes deserve special note:
-- `idx_jobs_user_created (user_id, created_at DESC)` — serves `task.list@v1` (per the course's "user lists own jobs" pattern; in DDB this would be the GSI with PK=user_id SK=created_at).
+- `idx_jobs_user_created (user_id, created_at DESC)` — serves `task.list.v1` (per the course's "user lists own jobs" pattern; in DDB this would be the GSI with PK=user_id SK=created_at).
 - `idx_job_runs_due (time_bucket, scheduled_at)` partial — serves the watcher.
 
 We deliberately do **not** physically partition `jobs` by `user_id`. At prototype scale, an index achieves the per-user query locality without paying partition migration costs. (Interview answer for "why not?" in `interview-questions.md` B8.)
@@ -147,7 +147,7 @@ Externally (what MCP tools return) **5 statuses**: `scheduled` (covers PENDING/Q
 
 ### D4. MCP tool surface (Q14)
 
-Five `@v1`-versioned tools. **Versioning suffix is mandatory** because MCP clients cache `tools/list` per thread; changing a tool's schema mid-thread breaks long conversations. To evolve a tool, ship `task.foo@v2` alongside `@v1`.
+Five `.v1`-versioned tools. **Versioning suffix is mandatory** because MCP clients cache `tools/list` per thread; changing a tool's schema mid-thread breaks long conversations. To evolve a tool, ship `task.foo.v2` alongside `.v1`.
 
 Every tool input schema specifies `required`, `enum`, `default`, and `additionalProperties: false` per the course's reliability principles (`course-spec.md` § 7).
 
@@ -162,13 +162,13 @@ with `code` drawn from a fixed vocabulary: `USER_INPUT`, `NOT_FOUND`, `INVALID_S
 
 The complete inputSchema for each tool is locked in `.doc/learn/system-design.md` § 7.4 and re-stated in `course-spec.md`. The five tools are:
 
-- **`task.create@v1`** — creates a `Job` (and an initial `JobRun` for one-shot/immediate).
-- **`task.list@v1`** — returns the user's jobs newest-first with optional status filter, time range, and offset pagination.
-- **`task.status@v1`** — returns one job; with `include_runs=true` includes recent execution history.
-- **`task.cancel@v1`** — flips eligible jobs to `CANCELLED`, errors with `INVALID_STATE` for terminal jobs.
-- **`task.list_actions@v1`** — returns the action registry: name, description, timeout, JSON Schema for params. The LLM is instructed to call this once per thread to learn parameter shapes.
+- **`task.create.v1`** — creates a `Job` (and an initial `JobRun` for one-shot/immediate).
+- **`task.list.v1`** — returns the user's jobs newest-first with optional status filter, time range, and offset pagination.
+- **`task.status.v1`** — returns one job; with `include_runs=true` includes recent execution history.
+- **`task.cancel.v1`** — flips eligible jobs to `CANCELLED`, errors with `INVALID_STATE` for terminal jobs.
+- **`task.list_actions.v1`** — returns the action registry: name, description, timeout, JSON Schema for params. The LLM is instructed to call this once per thread to learn parameter shapes.
 
-A `~125`-token system instruction guides the LLM to call `task.list_actions@v1` once at the start of a thread and to default timezone to UTC + schedule_type to `immediate` when the user is silent — full text in `.doc/learn/course-spec.md` § 7.4.
+A `~125`-token system instruction guides the LLM to call `task.list_actions.v1` once at the start of a thread and to default timezone to UTC + schedule_type to `immediate` when the user is silent — full text in `.doc/learn/course-spec.md` § 7.4.
 
 ### D5. Action handler protocol (Q13)
 
@@ -193,7 +193,7 @@ W1 ships **two** handlers:
 - `echo` — returns `{"echoed": <message>}`. Smoke-test of the entire pipeline.
 - `http_call` — `httpx.AsyncClient` request with method/headers/body params. Result body truncated to 2KB to avoid bloating `job_runs.result`. `retryable` set to `(status_code >= 500)` so we retry server errors but not user errors.
 
-W2 will add `llm_summarize`, `llm_chat`, `send_email` (registry pattern means no dispatcher changes). Action enum is referenced directly from `ACTION_REGISTRY.keys()` in the `task.create@v1` schema and exposed via `task.list_actions@v1`.
+W2 will add `llm_summarize`, `llm_chat`, `send_email` (registry pattern means no dispatcher changes). Action enum is referenced directly from `ACTION_REGISTRY.keys()` in the `task.create.v1` schema and exposed via `task.list_actions.v1`.
 
 ### D6. Transport (Q6)
 
@@ -277,7 +277,7 @@ Two intentional deviations from the course material, both defended in `course-sp
 
 ### What makes a good test (here)
 
-- **Test external behavior, not implementation**: `task.create@v1` should return `{ok: true, data: {job_id, status: "scheduled"}}` for valid input — don't assert which SQL the handler emitted.
+- **Test external behavior, not implementation**: `task.create.v1` should return `{ok: true, data: {job_id, status: "scheduled"}}` for valid input — don't assert which SQL the handler emitted.
 - **Test the seams that matter**: the boundary between MCP envelope and domain logic, the action registry dispatch, the claim-and-mark race, the outbox transactional atomicity.
 - **Don't mock the database**. Integration tests run against the real Postgres in Docker Compose. Mocking SQLAlchemy is high-effort low-value because our bugs will be in the SQL semantics (e.g., SKIP LOCKED behavior, transaction isolation).
 - **Mock the network** (HTTP calls in `http_call` action, future LLM calls in `llm_*` actions) — these are slow, flaky, and outside the scope of correctness testing.
@@ -365,11 +365,11 @@ These belong to later weeks (W2/W3/W4) or the future-upgrade list in `system-des
 
 W1 is "done" when the **MCP Inspector flow in `PROMPT.md` § Verification step 2** passes end-to-end:
 1. Connect via inspector → 5 tools (we ship 5 vs course's 4) appear.
-2. `task.create@v1` with past `scheduled_at` → returns `job_id`, status `scheduled`.
-3. After ~10s, `task.status@v1` → status `completed`.
-4. `task.create@v1` with `2099-12-31T00:00:00Z` → returns `job_id`.
-5. `task.cancel@v1` → status `cancelled`.
-6. `task.list@v1` → both jobs visible.
+2. `task.create.v1` with past `scheduled_at` → returns `job_id`, status `scheduled`.
+3. After ~10s, `task.status.v1` → status `completed`.
+4. `task.create.v1` with `2099-12-31T00:00:00Z` → returns `job_id`.
+5. `task.cancel.v1` → status `cancelled`.
+6. `task.list.v1` → both jobs visible.
 
 The inspector flow is not a substitute for unit/integration tests but is the single externally-observable acceptance criterion for W1 prototype completion.
 
