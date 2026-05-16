@@ -6,11 +6,11 @@ Run with:
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import text, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db.engine import create_async_engine
@@ -235,13 +235,23 @@ async def test_status_filter_cancelled(session_factory) -> None:
 # ---------------------------------------------------------------------------
 
 
+async def _db_now(factory: async_sessionmaker[AsyncSession]) -> datetime:
+    """Read `now()` from Postgres itself.
+
+    Why: `Job.created_at` is set by the DB via `server_default=func.now()`, so the
+    cutoff must come from the same clock — host vs container clock skew (common on
+    Docker Desktop / WSL2) is otherwise large enough to invert the comparison.
+    """
+    async with factory() as session:
+        return (await session.execute(select(func.now()))).scalar_one()
+
+
 @pytest.mark.integration
 async def test_created_at_from_excludes_older_jobs(session_factory) -> None:
     """created_at_from excludes jobs created before the threshold."""
     job_old = await _make_job(session_factory, user_id="range-user")
 
-    # Use a cutoff just after the first job's creation
-    cutoff = datetime.now(tz=UTC)
+    cutoff = await _db_now(session_factory)
 
     job_new = await _make_job(session_factory, user_id="range-user")
 
@@ -261,7 +271,7 @@ async def test_created_at_to_excludes_newer_jobs(session_factory) -> None:
     """created_at_to excludes jobs created after the threshold."""
     job_old = await _make_job(session_factory, user_id="range-user2")
 
-    cutoff = datetime.now(tz=UTC)
+    cutoff = await _db_now(session_factory)
 
     job_new = await _make_job(session_factory, user_id="range-user2")
 
