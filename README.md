@@ -101,49 +101,17 @@ tests/
 └── integration/   # require running Compose services
 ```
 
-## How to Use
+## Verify with the MCP Inspector
 
-1. Read `PROMPT.md`
-2. Answer the Design Questions (write your answers directly in `PROMPT.md`)
-3. Build the prototype:
-   - **Challenge Track:** Build from scratch using `PROMPT.md` as your spec
-   - **Guided Track:** Go to `scaffold/`, fill in the TODOs
-4. Verify with the MCP inspector tests at the bottom of `PROMPT.md`
-5. Bring your Design Questions answers to live session for discussion
-
-## Choose Your Track
-
-**Challenge Track** — You decide the architecture, file structure, and implementation. Any language with an MCP SDK works (Python + the official `mcp` SDK recommended). Read `PROMPT.md` to get started.
-
-**Guided Track** — File structure and boilerplate are provided. Fill in the core logic marked with `TODO`. Go to `scaffold/` and follow the instructions below.
-
-## Guided Track Setup
+The MCP stdio server can be driven from the official inspector — no Claude client needed. Requires Node.js for `npx`.
 
 ```bash
-cd scaffold
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+MCP_USER_ID=local-dev npx @modelcontextprotocol/inspector uv run python -m app.entrypoints.mcp_stdio
 ```
 
-You also need **Node.js** for `npx` (used by the MCP inspector for verification).
+This opens a browser GUI (usually `http://localhost:5173`). See `PROMPT.md` § Verification for the 6-step flow (create immediate → status completed → create future → cancel → list).
 
-### Files to Fill In
-
-| File | TODO | Design Decision |
-|------|------|-----------------|
-| `app/scheduler.py` | `get_time_bucket()` + `find_due_jobs()` | Time bucket partitioning for efficient job scanning |
-| `app/mcp_server.py` | `TOOL_REGISTRY` + `route_tool_call()` | Registry pattern for MCP tool routing |
-
-### Run and Verify
-
-The prototype is a real MCP stdio server. Verify with the MCP inspector (no Claude needed):
-
-```bash
-npx @modelcontextprotocol/inspector python -m app.mcp_server
-```
-
-This opens a browser GUI — see `PROMPT.md` Verification section for the full test flow. Once the inspector tests pass, you can optionally connect to Claude Desktop / Claude Code (instructions also in `PROMPT.md`).
+`MCP_USER_ID` is the tenant identifier the server scopes all jobs by (per ADR-006 / ADR-015).
 
 ## Bonus Challenges
 

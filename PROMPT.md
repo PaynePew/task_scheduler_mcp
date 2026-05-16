@@ -93,17 +93,17 @@ Your prototype is a real MCP server. Test it with the MCP inspector — no Claud
 ### 1. Start the server (sanity check)
 
 ```bash
-python -m app.mcp_server
+MCP_USER_ID=local-dev uv run python -m app.entrypoints.mcp_stdio
 ```
 
-The process should hang waiting on stdin (it's a stdio MCP server — that's correct). Ctrl+C to stop. If you see an `ImportError` or other crash, fix that first.
+The process should hang waiting on stdin (it's a stdio MCP server — that's correct). Ctrl+C to stop. If you see an `ImportError` or other crash, fix that first. `MCP_USER_ID` is the tenant identifier the server uses to scope all jobs.
 
 ### 2. Run the MCP inspector
 
 Requires Node.js (uses `npx`).
 
 ```bash
-npx @modelcontextprotocol/inspector python -m app.mcp_server
+MCP_USER_ID=local-dev npx @modelcontextprotocol/inspector uv run python -m app.entrypoints.mcp_stdio
 ```
 
 This opens a browser GUI (usually `http://localhost:5173`).
