@@ -149,6 +149,18 @@ Then chat:
 > "What's the status of that task?"
 > -> Claude calls `task.status`
 
+### W2 Verification
+
+W2 adds 5 new capability checks on top of the 6 W1 steps. See [`docs/W2-VERIFICATION.md`](docs/W2-VERIFICATION.md) for the full 11-step click-through flow covering:
+
+- **Step 7:** Recurring job (cron schedule, `@hourly` shortcut)
+- **Step 8:** Cancel recurring (stops future occurrence spawning)
+- **Step 9:** Job chaining A→B (`trigger_on_job_id` + `trigger_on_status`)
+- **Step 10:** MCP Resources — 3 entries in inspector; `tasks://list` filters by user
+- **Step 11:** MCP Prompts — 2 prompts; `setup_summary` substitutes topic + schedule
+
+The CI equivalent is `uv run pytest -m integration tests/integration/test_e2e_inspector_flow.py::test_w2_bonuses`.
+
 ## Suggested Tech Stack
 
 Python + the official `mcp` SDK is recommended (already in `requirements.txt` for the Guided Track). Challenge Track may use any language with an MCP SDK.
