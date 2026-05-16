@@ -8,6 +8,7 @@ from typing import Any
 
 import mcp.types as types
 from mcp.server.lowlevel import Server
+from pydantic import AnyUrl
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.actions.registry import ACTION_REGISTRY
@@ -18,6 +19,9 @@ from app.mcp.errors import map_domain_error
 from app.mcp.handlers.cancel import TASK_CANCEL_SCHEMA, handle_task_cancel
 from app.mcp.handlers.list import TASK_LIST_SCHEMA, handle_task_list
 from app.mcp.handlers.status import TASK_STATUS_SCHEMA, handle_task_status
+from app.mcp.resources.actions_resource import read_tasks_actions
+from app.mcp.resources.job_resource import read_tasks_job
+from app.mcp.resources.list_resource import read_tasks_list
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +88,33 @@ _TASK_LIST_ACTIONS_SCHEMA: dict[str, Any] = {
     "properties": {},
     "additionalProperties": False,
 }
+
+
+_RESOURCE_LIST = types.Resource(
+    uri=types.AnyUrl("tasks://list"),
+    name="Task List",
+    description=(
+        "Snapshot of the caller's most recent 20 jobs, newest-first. "
+        "Snapshot taken at session start; call task.list.v1 for fresh data."
+    ),
+    mimeType="application/json",
+)
+
+_RESOURCE_ACTIONS = types.Resource(
+    uri=types.AnyUrl("tasks://actions"),
+    name="Action Registry",
+    description=(
+        "Available actions with their names, descriptions, timeouts, and parameter schemas."
+    ),
+    mimeType="application/json",
+)
+
+_RESOURCE_TEMPLATE_JOB = types.ResourceTemplate(
+    uriTemplate="tasks://job/{job_id}",
+    name="Job Detail",
+    description="Full job definition plus the 5 most recent execution runs for a given job_id.",
+    mimeType="application/json",
+)
 
 
 def _build_action_list() -> list[dict[str, Any]]:
@@ -156,6 +187,28 @@ def create_server(
                 inputSchema=_TASK_LIST_ACTIONS_SCHEMA,
             ),
         ]
+
+    @server.list_resource_templates()
+    async def list_resource_templates() -> list[types.ResourceTemplate]:
+        return [_RESOURCE_TEMPLATE_JOB]
+
+    @server.list_resources()
+    async def list_resources() -> list[types.Resource]:
+        return [_RESOURCE_LIST, _RESOURCE_ACTIONS]
+
+    @server.read_resource()
+    async def read_resource(uri: AnyUrl):
+        uri_str = str(uri)
+        if uri_str == "tasks://list":
+            return await read_tasks_list(user_id, session_factory=factory)
+        if uri_str == "tasks://actions":
+            return read_tasks_actions()
+        if uri.scheme == "tasks" and uri.host == "job":
+            return await read_tasks_job(uri, user_id, session_factory=factory)
+        from mcp import McpError
+        from mcp.types import INVALID_PARAMS, ErrorData
+
+        raise McpError(ErrorData(code=INVALID_PARAMS, message=f"Unknown resource URI: {uri}"))
 
     @server.call_tool()
     async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextContent]:
