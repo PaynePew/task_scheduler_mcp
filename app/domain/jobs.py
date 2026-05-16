@@ -33,7 +33,11 @@ class JobNotFoundError(Exception):
 
 
 class InvalidStateError(Exception):
-    """Raised when all runs are already terminal (maps to INVALID_STATE).
+    """Raised when a job cannot transition into the requested state (INVALID_STATE).
+
+    For cancel_job, this means every run has completed naturally
+    (SUCCEEDED/FAILED) and there is no pending or in-flight work to cancel —
+    see ADR-022 for the best-effort semantics.
 
     Carries the current internal status as its single arg so the transport
     layer can map it to a user-facing external status (ADR-014). The domain
