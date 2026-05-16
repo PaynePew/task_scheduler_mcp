@@ -35,7 +35,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db.engine import create_async_engine
-from app.db.models import JobRun
+from app.db.models import JobRun, RunEvent
 from app.entrypoints.mcp_http import build_app
 from app.queue.sqs import SQSClient
 from app.workers.chain_watcher import poll_once as chain_watcher_tick
@@ -343,8 +343,6 @@ async def test_w2_bonuses(mcp_client, session_factory, sqs):
 
         # Fetch the first (only) run and stamp it SUCCEEDED so the recurring
         # watcher can process the terminal event — bypassing real SQS delays.
-        from app.db.models import RunEvent as _RunEvent  # noqa: PLC0415
-
         async with session_factory() as session:
             async with session.begin():
                 run_row = (
@@ -355,7 +353,7 @@ async def test_w2_bonuses(mcp_client, session_factory, sqs):
                 assert run_row is not None, "step 7: first run should exist"
                 run_row.status = "SUCCEEDED"
                 session.add(
-                    _RunEvent(
+                    RunEvent(
                         run_id=run_row.run_id,
                         job_id=rec_job_id,
                         event_type="SUCCEEDED",
