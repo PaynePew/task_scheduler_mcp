@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.actions.registry import ACTION_REGISTRY
 from app.db.models import Job, JobRun, RunEvent
+from app.domain.chain_validation import validate_chain
 
 
 class UnknownActionError(Exception):
@@ -68,6 +69,7 @@ class InvalidTimezoneError(Exception):
 
 
 _SUPPORTED_SCHEDULE_TYPES = frozenset({"immediate", "one-shot"})
+_VALID_TRIGGER_ON_STATUS = frozenset({"SUCCEEDED", "FAILED", "ANY"})
 
 
 def _validate_iana_timezone(tz_str: str) -> ZoneInfo:
@@ -114,19 +116,33 @@ async def create_job(
     idempotency_key: str | None = None,
     scheduled_at: str | None = None,
     timezone: str = "UTC",
+    trigger_on_job_id: int | None = None,
+    trigger_on_status: str | None = None,
 ) -> Job:
-    """Insert Job + JobRun(PENDING) + RunEvent(CREATED) in one transaction.
+    """Insert Job + JobRun + RunEvent(CREATED) in one transaction.
+
+    When trigger_on_job_id is set, runs chain validation (V1-V5) and creates
+    the first JobRun in WAITING status with wait_for_run_id pointing at the
+    upstream's most-recent non-terminal run.
 
     Returns the existing Job on (user_id, idempotency_key) collision.
     Raises UnknownActionError if action is not in ACTION_REGISTRY.
     Raises UnsupportedScheduleTypeError for unimplemented schedule_type values.
     Raises InvalidTimezoneError if timezone is not a valid IANA key.
     Raises InvalidScheduledAtError if scheduled_at is missing, unparseable, or past.
+    Raises ChainJobNotFoundError / ChainJobTerminatedError / ChainCycleError /
+        ChainDepthError when trigger_on_job_id fails V1-V5 validation.
     """
     if schedule_type not in _SUPPORTED_SCHEDULE_TYPES:
         raise UnsupportedScheduleTypeError(schedule_type)
     if action not in ACTION_REGISTRY:
         raise UnknownActionError(action)
+
+    if trigger_on_status is not None and trigger_on_status not in _VALID_TRIGGER_ON_STATUS:
+        raise ValueError(
+            f"trigger_on_status must be one of {sorted(_VALID_TRIGGER_ON_STATUS)}, "
+            f"got {trigger_on_status!r}"
+        )
 
     if schedule_type == "one-shot":
         tz = _validate_iana_timezone(timezone)
@@ -151,10 +167,22 @@ async def create_job(
             if existing is not None:
                 return existing
 
+        # Chain validation (V1-V5) runs inside the same transaction so the
+        # ancestor walk and the insert are atomic — no TOCTOU window.
+        wait_run: JobRun | None = None
+        if trigger_on_job_id is not None:
+            wait_run = await validate_chain(
+                session,
+                user_id=user_id,
+                trigger_on_job_id=trigger_on_job_id,
+            )
+
         # Hour-truncated partition key. See JobRun.time_bucket in db/models.py
         # for the full rationale — it lets the watcher's hot query scan one
         # bucket instead of the whole table.
         time_bucket = run_at.replace(minute=0, second=0, microsecond=0).isoformat()
+
+        effective_trigger_status = trigger_on_status or "SUCCEEDED"
 
         job = Job(
             user_id=user_id,
@@ -165,15 +193,19 @@ async def create_job(
             scheduled_at=run_at,
             timezone=timezone,
             idempotency_key=idempotency_key,
+            trigger_on_job_id=trigger_on_job_id,
+            trigger_on_status=effective_trigger_status if trigger_on_job_id is not None else None,
         )
         session.add(job)
         await session.flush()
 
+        initial_status = "WAITING" if wait_run is not None else "PENDING"
         run = JobRun(
             time_bucket=time_bucket,
             job_id=job.job_id,
             scheduled_at=run_at,
-            status="PENDING",
+            status=initial_status,
+            wait_for_run_id=wait_run.run_id if wait_run is not None else None,
         )
         session.add(run)
         await session.flush()
@@ -182,6 +214,8 @@ async def create_job(
             run_id=run.run_id,
             job_id=job.job_id,
             event_type="CREATED",
+            status_from=None,
+            status_to=initial_status,
         )
         session.add(event)
 

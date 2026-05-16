@@ -82,6 +82,25 @@ _TASK_CREATE_SCHEMA: dict[str, Any] = {
                 "Used to interpret naive scheduled_at datetimes. Defaults to UTC."
             ),
         },
+        "trigger_on_job_id": {
+            "type": ["integer", "null"],
+            "default": None,
+            "description": (
+                "Job ID to chain on. When set, this job's first run starts in WAITING "
+                "status and flips to PENDING (or CANCELLED) when the referenced job "
+                "produces a terminal event matching trigger_on_status."
+            ),
+        },
+        "trigger_on_status": {
+            "type": ["string", "null"],
+            "enum": ["SUCCEEDED", "FAILED", "ANY", None],
+            "default": None,
+            "description": (
+                "Terminal status that unblocks this job. 'SUCCEEDED' (default), 'FAILED', "
+                "or 'ANY' (matches every terminal event including CANCELLED). "
+                "Only meaningful when trigger_on_job_id is set."
+            ),
+        },
     },
     "required": ["action", "action_params"],
     "additionalProperties": False,
@@ -262,6 +281,20 @@ async def _handle_task_create(
     scheduled_at = arguments.get("scheduled_at")
     idempotency_key = arguments.get("idempotency_key")
     timezone = arguments.get("timezone", "UTC")
+    trigger_on_job_id_raw = arguments.get("trigger_on_job_id")
+    trigger_on_status = arguments.get("trigger_on_status")
+
+    trigger_on_job_id: int | None = None
+    if trigger_on_job_id_raw is not None:
+        try:
+            trigger_on_job_id = int(trigger_on_job_id_raw)
+        except (TypeError, ValueError):
+            return error(
+                "USER_INPUT",
+                "trigger_on_job_id must be an integer",
+                field="trigger_on_job_id",
+                expected="integer",
+            )
 
     try:
         async with session_factory() as session:
@@ -274,6 +307,8 @@ async def _handle_task_create(
                 scheduled_at=scheduled_at,
                 idempotency_key=idempotency_key,
                 timezone=timezone,
+                trigger_on_job_id=trigger_on_job_id,
+                trigger_on_status=trigger_on_status,
             )
         return success({"job_id": job.job_id, "status": "scheduled"})
     except Exception as exc:
