@@ -70,10 +70,11 @@ The cost of these rules is a slightly longer commit history per slice. The cost 
 
 ## Execution discipline (CRITICAL — read carefully)
 
-You may NOT mark the slice COMPLETE based on inspection alone. **Static reading misses runtime bugs that surface only when code is actually executed.** Two real bugs from this project both came from skipping execution:
+You may NOT mark the slice COMPLETE based on inspection alone. **Static reading misses runtime bugs that surface only when code is actually executed**, and **tests passing inside the harness container don't guarantee they pass on the GHA runner.** Three real bugs from this project all came from over-trusting one of those two checks:
 
 - **Migration `0001` used `postgresql.TIMESTAMPTZ()`** — a non-existent SQLAlchemy attribute. The DDL *looked* right when read (the PostgreSQL native type *is* called `TIMESTAMPTZ`), but `alembic upgrade head` had never actually been run in the container. CI caught it on merge with `AttributeError`.
 - **Integration fixture reused a module-level engine across event loops.** A single `pytest` invocation passed because only one test ran in one loop; the full suite would have surfaced the cross-loop `RuntimeError: Event loop is closed` immediately. CI caught it after the fix-up PR.
+- **Integration test hardcoded `cwd="/workspace"`** as the alembic subprocess working directory. `/workspace` is the harness container's bind-mount path, so the test passed inside the implement run — but the GHA runner has the repo at `/home/runner/work/...`, so CI failed with `FileNotFoundError: [Errno 2] No such file or directory: '/workspace'`. Caught only after merge.
 
 Apply these rules before posting the COMPLETE report:
 
@@ -91,6 +92,8 @@ Apply these rules before posting the COMPLETE report:
 3. **Cite actual commands + exit codes in your closing report.** Never write "tests pass" without quoting the command. Never write "migration works" without quoting the alembic output. Concrete evidence > a confident summary.
 
 4. **If the venv is broken or a dependency is missing, the slice is BLOCKED — fix the environment or report BLOCKED.** Do NOT mark COMPLETE based on a static read of files you couldn't actually exercise. A static-only review reliably misses: typo'd API names, async runtime bugs (event-loop / pool / cancellation), import-time crashes, and migration syntax errors.
+
+5. **Tests must work outside the harness container.** Never hardcode `/workspace` or any other path that only exists inside this container — CI runs on the GHA runner where the repo lives at `/home/runner/work/<repo>/<repo>`, and developers may run tests from any local checkout. For subprocess `cwd`, fixture paths, file-loading helpers, etc., resolve from `Path(__file__).resolve().parents[N]` (or another anchor inside the repo) so the test self-locates regardless of runtime. The same applies to URLs and ports: `host.docker.internal` resolves inside this container but not on the CI runner — use the env vars (`DATABASE_URL`, `QUEUE_URL`, ...) that the harness already injects, never embed the host name in test code.
 
 The cost of running the full suite once is ~30 seconds. The cost of skipping it is a red CI run that ships back to the human reviewer with embarrassment intact.
 
