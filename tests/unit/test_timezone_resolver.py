@@ -9,7 +9,6 @@ import pytest
 
 from app.config.timezone_resolver import resolve_timezone
 
-
 # ---------------------------------------------------------------------------
 # Step 1: call_value wins when valid
 # ---------------------------------------------------------------------------
