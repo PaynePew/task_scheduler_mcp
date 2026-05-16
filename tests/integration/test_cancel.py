@@ -265,9 +265,9 @@ async def test_cancel_with_running_and_pending_runs(session_factory):
             )
             cancel_events = cancel_events_result.scalars().all()
 
-    by_status = {r.status: r for r in runs}
-    assert "RUNNING" in by_status, "RUNNING run must remain untouched"
-    assert "CANCELLED" in by_status, "PENDING run must be flipped to CANCELLED"
+    statuses = {r.status for r in runs}
+    assert "RUNNING" in statuses, "RUNNING run must remain untouched"
+    assert "CANCELLED" in statuses, "PENDING run must be flipped to CANCELLED"
     assert db_job.cancelled_at is not None
     # Only the PENDING run should have a CANCELLED event, not the RUNNING one.
     assert len(cancel_events) == 1
