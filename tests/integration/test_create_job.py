@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.db.engine import create_async_engine
@@ -325,8 +325,6 @@ async def test_chain_v2_cross_user_is_not_found(session_factory):
 @pytest.mark.integration
 async def test_chain_v3_terminated_trigger_job_is_rejected(session_factory):
     """V3: chaining on a fully-terminated trigger job raises ChainJobTerminatedError."""
-    from sqlalchemy import update as sa_update
-
     # Create trigger job for user-A and manually mark its run SUCCEEDED
     async with session_factory() as session:
         trigger_job = await create_job(
@@ -341,9 +339,7 @@ async def test_chain_v3_terminated_trigger_job_is_rejected(session_factory):
     async with session_factory() as session:
         async with session.begin():
             await session.execute(
-                sa_update(JobRun)
-                .where(JobRun.job_id == trigger_job.job_id)
-                .values(status="SUCCEEDED")
+                update(JobRun).where(JobRun.job_id == trigger_job.job_id).values(status="SUCCEEDED")
             )
 
     # Attempt to chain on the now-terminated job
