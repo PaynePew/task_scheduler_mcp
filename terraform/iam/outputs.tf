@@ -27,3 +27,18 @@ output "budget_cap_name" {
   description = "Name of the monthly cap budget alert."
   value       = aws_budgets_budget.monthly_cap.name
 }
+
+output "github_actions_role_arn" {
+  description = "ARN of the IAM role assumed by validate-fargate.yml via OIDC."
+  value       = aws_iam_role.github_actions_fargate_validation.arn
+}
+
+output "github_actions_role_name" {
+  description = "Name of the IAM role assumed by validate-fargate.yml via OIDC."
+  value       = aws_iam_role.github_actions_fargate_validation.name
+}
+
+output "github_oidc_provider_arn" {
+  description = "ARN of the GitHub Actions OIDC identity provider."
+  value       = aws_iam_openid_connect_provider.github_actions.arn
+}
