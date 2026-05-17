@@ -19,6 +19,8 @@ jobs:
           - iam
           - ecr
           - cw_logs
+          - rds
+          - sqs
 
     steps:
       - name: Checkout
