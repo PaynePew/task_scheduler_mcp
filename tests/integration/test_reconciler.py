@@ -80,15 +80,22 @@ async def _insert_run(
     *,
     status: str,
     updated_at: datetime,
+    scheduled_at: datetime | None = None,
 ) -> JobRun:
-    """Insert a JobRun with explicit status and updated_at (committed)."""
+    """Insert a JobRun with explicit status and updated_at (committed).
+
+    ``scheduled_at`` defaults to ``job.scheduled_at``.  Pass a distinct value
+    when inserting multiple non-terminal runs for the same job to avoid hitting
+    the ``uq_job_runs_job_scheduled_nonterminal`` partial unique index.
+    """
     now_bucket = datetime.now(tz=UTC).replace(minute=0, second=0, microsecond=0)
+    effective_scheduled_at = scheduled_at if scheduled_at is not None else job.scheduled_at
     async with factory() as session:
         async with session.begin():
             run = JobRun(
                 time_bucket=now_bucket.isoformat(),
                 job_id=job.job_id,
-                scheduled_at=job.scheduled_at,
+                scheduled_at=effective_scheduled_at,
                 status=status,
             )
             session.add(run)
@@ -220,10 +227,18 @@ async def test_reconcile_c_no_false_positives(session_factory, sqs):
     """Rows inside the grace window are not touched by either sweep."""
     job = await _insert_job(session_factory)
 
-    # Both rows have updated_at = now → inside any grace window > 0
+    # Both rows have updated_at = now → inside any grace window > 0.
+    # Use distinct scheduled_at values: the unique index prevents two non-terminal
+    # runs sharing the same (job_id, scheduled_at).
     recent_ts = datetime.now(tz=UTC)
     retrying_run = await _insert_run(session_factory, job, status="RETRYING", updated_at=recent_ts)
-    queued_run = await _insert_run(session_factory, job, status="QUEUED", updated_at=recent_ts)
+    queued_run = await _insert_run(
+        session_factory,
+        job,
+        status="QUEUED",
+        updated_at=recent_ts,
+        scheduled_at=job.scheduled_at + timedelta(seconds=60),
+    )
 
     # Use a large grace window so "recent_ts" is definitely inside it
     big_grace = timedelta(hours=1)
