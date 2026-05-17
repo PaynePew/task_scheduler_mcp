@@ -21,6 +21,8 @@ jobs:
           - cw_logs
           - rds
           - sqs
+          - alb
+          - ecs
 
     steps:
       - name: Checkout
