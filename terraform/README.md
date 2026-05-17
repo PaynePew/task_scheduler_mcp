@@ -38,8 +38,7 @@ terraform init
 
 # Review the plan
 terraform plan \
-  -var="state_bucket_name=chatgpt-task-terraform-state-<ACCOUNT_ID>" \
-  -var="budget_alert_email=<your@email.com>"   # not required for bootstrap
+  -var="state_bucket_name=chatgpt-task-terraform-state-<ACCOUNT_ID>"
 
 # Apply — creates S3 bucket + DynamoDB lock table
 terraform apply \
