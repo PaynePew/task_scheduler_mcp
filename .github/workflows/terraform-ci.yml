@@ -1,0 +1,58 @@
+name: Terraform CI
+
+on:
+  pull_request:
+    paths:
+      - "terraform/**"
+      - ".github/workflows/terraform-ci.yml"
+
+jobs:
+  terraform-ci:
+    name: Terraform fmt / validate / tflint
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        module:
+          - bootstrap
+          - vpc
+          - iam
+          - ecr
+          - cw_logs
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.9"
+
+      - name: Setup TFLint
+        uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: "v0.55.0"
+
+      - name: Terraform fmt check (recursive)
+        if: matrix.module == 'bootstrap'
+        run: terraform fmt -check -recursive terraform/
+        working-directory: ${{ github.workspace }}
+
+      - name: Terraform init — ${{ matrix.module }}
+        run: terraform init -backend=false
+        working-directory: terraform/${{ matrix.module }}
+
+      - name: Terraform validate — ${{ matrix.module }}
+        run: terraform validate
+        working-directory: terraform/${{ matrix.module }}
+
+      - name: TFLint init — ${{ matrix.module }}
+        run: tflint --init
+        working-directory: terraform/${{ matrix.module }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      - name: TFLint — ${{ matrix.module }}
+        run: tflint
+        working-directory: terraform/${{ matrix.module }}
