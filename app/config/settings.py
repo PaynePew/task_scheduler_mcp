@@ -16,11 +16,16 @@ class Settings(BaseSettings):
     #   - alembic_database_url → sync (psycopg). Alembic + async is rough-edged;
     #                            migrations use the sync driver for stability.
     # Both must point at the same physical database.
-    database_url: str = "postgresql+asyncpg://app:app@postgres:5432/app"
-    alembic_database_url: str = "postgresql+psycopg://app:app@postgres:5432/app"
+    #
+    # Defaults use `localhost` so host-side entrypoints (stdio MCP, `uv run alembic`,
+    # `uv run pytest`) work even without a `.env` file. In-container services
+    # override these via `env_file: .env.docker` in docker-compose.yml, which uses
+    # the compose-internal hostnames (`postgres`, `elasticmq`).
+    database_url: str = "postgresql+asyncpg://app:app@localhost:5432/app"
+    alembic_database_url: str = "postgresql+psycopg://app:app@localhost:5432/app"
     # ElasticMQ locally; in W3 this becomes the real SQS URL via env override.
-    queue_url: str = "http://elasticmq:9324/queue/task-queue"
-    queue_dlq_url: str = "http://elasticmq:9324/queue/task-dlq"
+    queue_url: str = "http://localhost:9324/queue/task-queue"
+    queue_dlq_url: str = "http://localhost:9324/queue/task-dlq"
     # Default identity when stdio transport runs without MCP_USER_ID set (ADR-015).
     mcp_user_id: str = "default-user"
     # Optional user timezone forwarded from the client environment (ADR-017).
