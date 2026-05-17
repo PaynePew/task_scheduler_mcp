@@ -17,12 +17,12 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 def _is_valid_iana(value: str | None) -> bool:
     """Return True if *value* is a non-empty, resolvable IANA timezone key."""
-    if not value:
+    if not value or not value.strip():
         return False
     try:
         ZoneInfo(value)
         return True
-    except (ZoneInfoNotFoundError, KeyError):
+    except (ZoneInfoNotFoundError, KeyError, OSError):
         return False
 
 
