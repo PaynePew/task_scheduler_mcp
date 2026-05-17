@@ -63,10 +63,8 @@ install_docker() {
 }
 
 # ── 3. Caddy ──────────────────────────────────────────────────────────────────
-# Caddy runs as a Docker container in the compose stack, so no host installation
-# is needed. This function installs only the Caddy apt key for future host-side
-# debugging if needed; the running caddy IS the container.
-# (No-op: Caddy is fully containerised per ADR-028/ADR-029.)
+# Caddy is fully containerised (see compose stack + ADR-028/ADR-029); no host
+# installation is performed.
 
 # ── 4. Docker daemon hardening ────────────────────────────────────────────────
 configure_docker_daemon() {
