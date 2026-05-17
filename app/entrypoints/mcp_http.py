@@ -9,7 +9,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
-import os
 
 import anyio
 from anyio.abc import TaskStatus
@@ -87,18 +86,18 @@ def _make_healthz_endpoint(
     """Return a Starlette endpoint function for GET /healthz.
 
     Probes Postgres with a cheap SELECT 1 (500 ms timeout) and returns:
-      - 200  {"ok": true, "version": "<GIT_SHA or 'unknown'>", "db": "connected"}
+      - 200  {"ok": true, "version": "<git sha or 'unknown'>", "db": "connected"}
       - 503  {"ok": false, "db": "<exception class name>"}
     """
-    _factory = session_factory or _default_session_factory
+    factory = session_factory or _default_session_factory
 
-    async def _healthz(request: Request) -> JSONResponse:
-        version = os.environ.get("GIT_SHA", "unknown")
+    async def _healthz(_request: Request) -> JSONResponse:
         try:
-            async with _factory() as session:
+            async with factory() as session:
                 await asyncio.wait_for(session.execute(text("SELECT 1")), timeout=0.5)
-            return JSONResponse({"ok": True, "version": version, "db": "connected"})
+            return JSONResponse({"ok": True, "version": settings.git_sha, "db": "connected"})
         except Exception as exc:
+            logger.warning("healthz db probe failed: %s", type(exc).__name__)
             return JSONResponse({"ok": False, "db": type(exc).__name__}, status_code=503)
 
     return _healthz

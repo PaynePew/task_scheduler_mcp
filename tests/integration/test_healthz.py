@@ -11,6 +11,7 @@ import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.config.settings import settings
 from app.db.engine import create_async_engine
 from app.entrypoints.mcp_http import build_app
 
@@ -33,7 +34,7 @@ def healthz_client(session_factory) -> httpx.AsyncClient:
 
 @pytest.mark.integration
 async def test_healthz_ok_with_real_db(healthz_client, monkeypatch):
-    monkeypatch.setenv("GIT_SHA", "deadbeef")
+    monkeypatch.setattr(settings, "git_sha", "deadbeef")
     async with healthz_client as client:
         resp = await client.get("/healthz")
     assert resp.status_code == 200
