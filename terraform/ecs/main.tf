@@ -1,6 +1,7 @@
 locals {
-  # Use alembic_db_url_secret_arn if provided; otherwise fall back to db_url_secret_arn.
-  alembic_secret_arn = var.alembic_db_url_secret_arn != "" ? var.alembic_db_url_secret_arn : var.db_url_secret_arn
+  # coalesce() returns the first non-null, non-empty argument, so an empty
+  # alembic_db_url_secret_arn falls back to db_url_secret_arn.
+  alembic_secret_arn = coalesce(var.alembic_db_url_secret_arn, var.db_url_secret_arn)
 
   # Long-running service definitions (ADR-026).
   services = {
