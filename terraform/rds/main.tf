@@ -122,9 +122,9 @@ resource "aws_db_instance" "main" {
   publicly_accessible = false
   multi_az            = var.rds_multi_az
 
-  backup_retention_period   = 7
-  backup_window             = "16:00-16:30"
-  maintenance_window        = "Mon:17:00-Mon:17:30"
+  backup_retention_period    = 7
+  backup_window              = "16:00-16:30"
+  maintenance_window         = "Mon:17:00-Mon:17:30"
   auto_minor_version_upgrade = true
 
   # deletion_protection off: this module is applied/destroyed during W4 demo validation.
