@@ -81,9 +81,9 @@ async def poll_once(
 
                     # Forbid-concurrency pre-check (ADR-016 addendum): skip spawn
                     # if a non-terminal run already exists for this job. Within the
-                    # same poll_once batch the flush above makes a just-inserted
-                    # PENDING row visible to subsequent iterations, so two events
-                    # that both compute the same run_at are collapsed to one spawn.
+                    # same poll_once batch a prior iteration's flush (below) makes
+                    # its newly-inserted PENDING row visible to this check, so two
+                    # events that both compute the same run_at collapse to one spawn.
                     already_live = (
                         await session.execute(
                             select(
