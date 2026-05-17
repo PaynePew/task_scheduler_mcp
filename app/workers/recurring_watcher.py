@@ -15,7 +15,7 @@ import logging
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select, update
+from sqlalchemy import exists, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config.cron import next_after
@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 PROCESSED_BY_KEY = "recurring_watcher"
 TERMINAL_EVENTS = ("SUCCEEDED", "FAILED", "CANCELLED")
+NON_TERMINAL_STATUSES = ("PENDING", "QUEUED", "WAITING", "RUNNING", "RETRYING")
 DEFAULT_BATCH_SIZE = 50
 DEFAULT_SLEEP_SECONDS = 5.0
 
@@ -77,33 +78,59 @@ async def poll_once(
                 else:
                     tz = ZoneInfo(job.timezone or "UTC")
                     run_at = next_after(job.cron_expr, tz, event.occurred_at)
-                    time_bucket = run_at.replace(minute=0, second=0, microsecond=0).isoformat()
 
-                    new_run = JobRun(
-                        time_bucket=time_bucket,
-                        job_id=job.job_id,
-                        scheduled_at=run_at,
-                        status="PENDING",
-                    )
-                    session.add(new_run)
-                    await session.flush()
+                    # Forbid-concurrency pre-check (ADR-016 addendum): skip spawn
+                    # if a non-terminal run already exists for this job. Within the
+                    # same poll_once batch a prior iteration's flush (below) makes
+                    # its newly-inserted PENDING row visible to this check, so two
+                    # events that both compute the same run_at collapse to one spawn.
+                    already_live = (
+                        await session.execute(
+                            select(
+                                exists().where(
+                                    JobRun.job_id == job.job_id,
+                                    JobRun.status.in_(NON_TERMINAL_STATUSES),
+                                )
+                            )
+                        )
+                    ).scalar()
 
-                    new_event = RunEvent(
-                        run_id=new_run.run_id,
-                        job_id=job.job_id,
-                        event_type="CREATED",
-                    )
-                    session.add(new_event)
+                    if already_live:
+                        logger.info(
+                            "recurring_watcher: skipping spawn for job_id=%s"
+                            " (non-terminal run already exists; run_id=%s event_type=%s)",
+                            job.job_id,
+                            event.run_id,
+                            event.event_type,
+                        )
+                    else:
+                        time_bucket = run_at.replace(minute=0, second=0, microsecond=0).isoformat()
 
-                    logger.info(
-                        "recurring_watcher: spawned run_id=%s for job_id=%s"
-                        " scheduled_at=%s (cron=%r tz=%s)",
-                        new_run.run_id,
-                        job.job_id,
-                        run_at.isoformat(),
-                        job.cron_expr,
-                        job.timezone,
-                    )
+                        new_run = JobRun(
+                            time_bucket=time_bucket,
+                            job_id=job.job_id,
+                            scheduled_at=run_at,
+                            status="PENDING",
+                        )
+                        session.add(new_run)
+                        await session.flush()
+
+                        new_event = RunEvent(
+                            run_id=new_run.run_id,
+                            job_id=job.job_id,
+                            event_type="CREATED",
+                        )
+                        session.add(new_event)
+
+                        logger.info(
+                            "recurring_watcher: spawned run_id=%s for job_id=%s"
+                            " scheduled_at=%s (cron=%r tz=%s)",
+                            new_run.run_id,
+                            job.job_id,
+                            run_at.isoformat(),
+                            job.cron_expr,
+                            job.timezone,
+                        )
 
                 # Stamp the cursor so this event is never reprocessed on restart.
                 new_pb = dict(event.processed_by)

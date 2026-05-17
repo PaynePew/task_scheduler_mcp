@@ -10,12 +10,14 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 import pytest_asyncio
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from app.config.cron import next_after
 from app.db.engine import create_async_engine
 from app.db.models import Job, JobRun, RunEvent
 from app.workers.recurring_watcher import PROCESSED_BY_KEY, poll_once
@@ -328,3 +330,124 @@ async def test_recurring_watcher_processes_failed_and_cancelled_events(session_f
                     await session.execute(select(RunEvent).where(RunEvent.event_id == ev_id))
                 ).scalar_one()
                 assert PROCESSED_BY_KEY in refreshed.processed_by
+
+
+# ---------------------------------------------------------------------------
+# Forbid-concurrency: no duplicate spawn when two events share a cron tick
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+async def test_no_duplicate_spawn_for_same_cron_tick(session_factory, caplog):
+    """Two terminal events whose occurred_at fall in the same cron tick window
+    must produce exactly ONE new PENDING run, not two.
+
+    Simulates the bug scenario (issue #53): two completed runs (R1 and R2) both
+    have terminal events with occurred_at values in the same minute.  For
+    ``* * * * *``, next_after() maps both to the SAME scheduled_at, so without
+    the pre-check a second duplicate run would be spawned.
+
+    The pre-check in poll_once detects the PENDING run inserted for the first
+    event (visible after flush, within the same transaction) and skips the
+    second spawn.
+    """
+    # Two occurred_at values within the same minute → same next_after result.
+    tick_base = datetime(2026, 1, 1, 12, 58, 0, tzinfo=UTC)
+    occurred_at_1 = tick_base + timedelta(seconds=3)  # 12:58:03 → next = 12:59:00
+    occurred_at_2 = tick_base + timedelta(seconds=59)  # 12:58:59 → next = 12:59:00 (same tick)
+
+    async with session_factory() as session:
+        async with session.begin():
+            job = Job(
+                user_id="recurring-watcher-test",
+                description="every-minute echo",
+                action="echo",
+                action_params={"message": "tick"},
+                job_type="recurring",
+                scheduled_at=None,
+                cron_expr="* * * * *",
+                timezone="UTC",
+            )
+            session.add(job)
+            await session.flush()
+
+            # R1 — completed at occurred_at_1 (represents an "early" run)
+            bucket1 = occurred_at_1.replace(minute=0, second=0, microsecond=0).isoformat()
+            run1 = JobRun(
+                time_bucket=bucket1,
+                job_id=job.job_id,
+                scheduled_at=tick_base - timedelta(minutes=1),  # previous tick
+                status="SUCCEEDED",
+                finish_at=occurred_at_1,
+            )
+            session.add(run1)
+            await session.flush()
+
+            session.add(
+                RunEvent(
+                    run_id=run1.run_id,
+                    job_id=job.job_id,
+                    event_type="SUCCEEDED",
+                    status_from="RUNNING",
+                    status_to="SUCCEEDED",
+                    occurred_at=occurred_at_1,
+                )
+            )
+
+            # R2 — completed at occurred_at_2 (simulates run completing before
+            # its scheduled_at due to the Watcher's 5-minute lookahead window)
+            bucket2 = occurred_at_2.replace(minute=0, second=0, microsecond=0).isoformat()
+            run2 = JobRun(
+                time_bucket=bucket2,
+                job_id=job.job_id,
+                scheduled_at=tick_base,  # current tick, but completed early
+                status="SUCCEEDED",
+                finish_at=occurred_at_2,
+            )
+            session.add(run2)
+            await session.flush()
+
+            session.add(
+                RunEvent(
+                    run_id=run2.run_id,
+                    job_id=job.job_id,
+                    event_type="SUCCEEDED",
+                    status_from="RUNNING",
+                    status_to="SUCCEEDED",
+                    occurred_at=occurred_at_2,
+                )
+            )
+
+    # poll_once should process both events (count == 2) but only create ONE run.
+    with caplog.at_level(logging.INFO, logger="app.workers.recurring_watcher"):
+        count = await poll_once(session_factory, batch_size=10)
+
+    assert count == 2, f"Expected 2 events processed, got {count}"
+
+    async with session_factory() as session:
+        async with session.begin():
+            all_runs = (
+                (await session.execute(select(JobRun).where(JobRun.job_id == job.job_id)))
+                .scalars()
+                .all()
+            )
+
+    # 2 original runs + exactly 1 new PENDING run (not 2).
+    assert len(all_runs) == 3, (
+        f"Expected 3 runs (2 original + 1 new PENDING), got {len(all_runs)}: "
+        f"{[(r.run_id, r.scheduled_at, r.status) for r in all_runs]}"
+    )
+
+    new_runs = [r for r in all_runs if r.status == "PENDING"]
+    assert len(new_runs) == 1, f"Expected exactly 1 new PENDING run, got {len(new_runs)}"
+
+    # The spawned run should be at the next cron tick (12:59:00).
+    expected_at = next_after("* * * * *", ZoneInfo("UTC"), occurred_at_1)
+    assert new_runs[0].scheduled_at == expected_at, (
+        f"Spawned run at {new_runs[0].scheduled_at}, expected {expected_at}"
+    )
+
+    # The skip should be logged.
+    assert any("skipping spawn" in r.message for r in caplog.records), (
+        "Expected 'skipping spawn' log message for the duplicate event"
+    )

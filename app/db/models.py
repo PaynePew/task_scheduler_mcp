@@ -140,6 +140,16 @@ class JobRun(Base):
             postgresql_where="wait_for_run_id IS NOT NULL AND status = 'WAITING'",
         ),
         Index("idx_job_runs_by_job", "job_id"),
+        # Forbid-concurrency invariant (ADR-016 addendum): at most one non-terminal
+        # run per (job_id, scheduled_at). Partial — only covers live rows so the
+        # index stays small as completed runs accumulate.
+        Index(
+            "uq_job_runs_job_scheduled_nonterminal",
+            "job_id",
+            "scheduled_at",
+            unique=True,
+            postgresql_where="status IN ('PENDING','QUEUED','WAITING','RUNNING','RETRYING')",
+        ),
     )
 
 
