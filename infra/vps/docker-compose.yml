@@ -1,0 +1,98 @@
+services:
+  mcp-server:
+    image: ghcr.io/paynepew/chatgpt_task:${IMAGE_TAG:-latest}
+    command: ["python", "-m", "app.entrypoints.mcp_http"]
+    env_file: .env
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:${PORT:-8000}/healthz || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  watcher:
+    image: ghcr.io/paynepew/chatgpt_task:${IMAGE_TAG:-latest}
+    command: ["python", "-m", "app.entrypoints.watcher"]
+    env_file: .env
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  worker:
+    image: ghcr.io/paynepew/chatgpt_task:${IMAGE_TAG:-latest}
+    command: ["python", "-m", "app.entrypoints.worker"]
+    env_file: .env
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  recurring-watcher:
+    image: ghcr.io/paynepew/chatgpt_task:${IMAGE_TAG:-latest}
+    command: ["python", "-m", "app.entrypoints.recurring_watcher"]
+    env_file: .env
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  chain-watcher:
+    image: ghcr.io/paynepew/chatgpt_task:${IMAGE_TAG:-latest}
+    command: ["python", "-m", "app.entrypoints.chain_watcher"]
+    env_file: .env
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  migrate:
+    image: ghcr.io/paynepew/chatgpt_task:${IMAGE_TAG:-latest}
+    command: ["python", "-m", "app.entrypoints.migrate"]
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  postgres:
+    image: postgres:16
+    env_file: .env
+    restart: unless-stopped
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-scheduler}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  elasticmq:
+    image: softwaremill/elasticmq-native:latest
+    restart: unless-stopped
+    volumes:
+      - ./elasticmq.conf:/opt/elasticmq.conf:ro
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 9324 || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+    depends_on:
+      - mcp-server
+
+volumes:
+  pgdata:
+  caddy_data:
