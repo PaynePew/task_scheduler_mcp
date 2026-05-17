@@ -53,16 +53,16 @@ resource "aws_iam_role" "github_actions_fargate_validation" {
 data "aws_iam_policy_document" "fargate_validation_permissions" {
   # S3 + DynamoDB for Terraform remote state
   statement {
-    sid     = "TerraformState"
-    effect  = "Allow"
-    actions = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"]
+    sid       = "TerraformState"
+    effect    = "Allow"
+    actions   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"]
     resources = ["*"]
   }
 
   statement {
-    sid     = "TerraformLock"
-    effect  = "Allow"
-    actions = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:DeleteItem", "dynamodb:DescribeTable"]
+    sid       = "TerraformLock"
+    effect    = "Allow"
+    actions   = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:DeleteItem", "dynamodb:DescribeTable"]
     resources = ["*"]
   }
 
