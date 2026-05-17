@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     mcp_user_tz: str | None = None
     port: int = 8000
     log_level: str = "INFO"
+    # Short git SHA stamped in by the Docker build; surfaced via /healthz so
+    # ALB / Caddy / UptimeRobot can correlate a running container with a build.
+    git_sha: str = "unknown"
 
     # Default pool size is the mcp-server / worker profile (ADR-011).
     # The watcher / recurring / chain entrypoints override these to 2+3 because

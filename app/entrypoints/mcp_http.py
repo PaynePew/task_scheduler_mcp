@@ -13,13 +13,16 @@ import logging
 import anyio
 from anyio.abc import TaskStatus
 from mcp.server.streamable_http import StreamableHTTPServerTransport
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.applications import Starlette
 from starlette.requests import Request
+from starlette.responses import JSONResponse
 from starlette.routing import Route
 from starlette.types import Receive, Scope, Send
 
 from app.config.settings import settings
+from app.db.engine import async_session_factory as _default_session_factory
 from app.db.identity import resolve_user_id
 from app.mcp.server import create_server
 
@@ -77,6 +80,29 @@ class _McpHttpEndpoint:
             tg.cancel_scope.cancel()
 
 
+def _make_healthz_endpoint(
+    session_factory: async_sessionmaker[AsyncSession] | None = None,
+):
+    """Return a Starlette endpoint function for GET /healthz.
+
+    Probes Postgres with a cheap SELECT 1 (500 ms timeout) and returns:
+      - 200  {"ok": true, "version": "<git sha or 'unknown'>", "db": "connected"}
+      - 503  {"ok": false, "db": "<exception class name>"}
+    """
+    factory = session_factory or _default_session_factory
+
+    async def _healthz(_request: Request) -> JSONResponse:
+        try:
+            async with factory() as session:
+                await asyncio.wait_for(session.execute(text("SELECT 1")), timeout=0.5)
+            return JSONResponse({"ok": True, "version": settings.git_sha, "db": "connected"})
+        except Exception as exc:
+            logger.warning("healthz db probe failed: %s", type(exc).__name__)
+            return JSONResponse({"ok": False, "db": type(exc).__name__}, status_code=503)
+
+    return _healthz
+
+
 def build_app(
     json_response: bool = False,
     session_factory: async_sessionmaker[AsyncSession] | None = None,
@@ -91,8 +117,12 @@ def build_app(
             production (falls back to the module-level factory).
     """
     handler = _McpHttpEndpoint(json_response=json_response, session_factory=session_factory)
+    healthz = _make_healthz_endpoint(session_factory=session_factory)
     return Starlette(
-        routes=[Route("/mcp", endpoint=handler, methods=["GET", "POST", "DELETE"])],
+        routes=[
+            Route("/mcp", endpoint=handler, methods=["GET", "POST", "DELETE"]),
+            Route("/healthz", endpoint=healthz, methods=["GET"]),
+        ],
     )
 
 
