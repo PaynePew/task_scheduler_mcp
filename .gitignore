@@ -95,9 +95,9 @@ yarn-debug.log*
 yarn-error.log*
 
 # ─────────────────────────────────────────────
-# Claude Code local settings (per-machine, per-user)
+# Claude Code local settings + agents + hooks (per-machine, per-user)
 # ─────────────────────────────────────────────
-.claude/settings.local.json
+.claude/
 
 # ─────────────────────────────────────────────
 # Local issue drafts — reviewed locally then published to GitHub
