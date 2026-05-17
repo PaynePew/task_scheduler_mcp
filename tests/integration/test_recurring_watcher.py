@@ -10,12 +10,14 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 import pytest_asyncio
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from app.config.cron import next_after
 from app.db.engine import create_async_engine
 from app.db.models import Job, JobRun, RunEvent
 from app.workers.recurring_watcher import PROCESSED_BY_KEY, poll_once
@@ -440,10 +442,6 @@ async def test_no_duplicate_spawn_for_same_cron_tick(session_factory, caplog):
     assert len(new_runs) == 1, f"Expected exactly 1 new PENDING run, got {len(new_runs)}"
 
     # The spawned run should be at the next cron tick (12:59:00).
-    from zoneinfo import ZoneInfo
-
-    from app.config.cron import next_after
-
     expected_at = next_after("* * * * *", ZoneInfo("UTC"), occurred_at_1)
     assert new_runs[0].scheduled_at == expected_at, (
         f"Spawned run at {new_runs[0].scheduled_at}, expected {expected_at}"
