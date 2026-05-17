@@ -74,3 +74,41 @@ The `RecurringJobWatcher` is the sole spawner. It only inserts a new `JobRun` wh
 - Fall-back day triggers two firings for `*:30 1:* * *`-style expressions; operators must be aware
 - Sub-minute scheduling is not supported (and not planned until W4+)
 - `@reboot` semantics cannot be expressed; one-time "run on start" use-cases need a one-shot job instead
+
+---
+
+## Addendum: Spawn-time uniqueness (2026-05-17, issue #53)
+
+**Bug discovered:** Under tight cron cadences (e.g. `* * * * *`), the Watcher's
+5-minute lookahead window causes runs to be claimed and executed *before* their
+`scheduled_at`. When such a run terminates early, its terminal event computes
+the same `next_after()` as the event that spawned it (both `occurred_at` values
+fall in the same 60-second cron tick window). If both events appear in the same
+`poll_once` batch, two identical `scheduled_at` values are inserted — violating
+Forbid concurrency.
+
+**Fix (two layers):**
+
+1. **DB invariant — partial unique index:**
+   ```sql
+   CREATE UNIQUE INDEX uq_job_runs_job_scheduled_nonterminal
+     ON job_runs (job_id, scheduled_at)
+     WHERE status IN ('PENDING','QUEUED','WAITING','RUNNING','RETRYING');
+   ```
+   Prevents two non-terminal `JobRun`s from sharing `(job_id, scheduled_at)`.
+   Migration `0004` adds this index.
+
+2. **Application pre-check in `poll_once`:**
+   Before inserting a new `JobRun`, `poll_once` checks whether any non-terminal
+   run already exists for the same `job_id`.  If one does, the spawn is skipped
+   and the event is still stamped as processed.  Within a single batch, the
+   `session.flush()` after the first insert makes the new PENDING row visible to
+   the check for subsequent events in the same batch, collapsing duplicate spawns
+   to exactly one.
+
+**Scope of protection:**
+- The pre-check guards the same-batch case (two events with the same cron-tick
+  window both unprocessed when `poll_once` runs).
+- The unique index provides defence-in-depth against any future code path that
+  bypasses the application-level check (e.g. a second watcher instance racing
+  under a future scale-out).
