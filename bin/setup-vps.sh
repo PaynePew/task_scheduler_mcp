@@ -321,10 +321,6 @@ configure_ufw() {
 
 # ── 13. unattended-upgrades ───────────────────────────────────────────────────
 configure_unattended_upgrades() {
-    if dpkg -s unattended-upgrades &>/dev/null; then
-        log "unattended-upgrades already installed."
-    fi
-    # Enable automatic security updates
     cat > /etc/apt/apt.conf.d/20auto-upgrades <<'EOF'
 APT::Periodic::Update-Package-Lists "1";
 APT::Periodic::Unattended-Upgrade "1";
