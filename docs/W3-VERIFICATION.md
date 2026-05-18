@@ -46,9 +46,12 @@ export BASE="https://scheduler.paynepew.dev"
 export UID_HEADER="X-User-Id: manual-l4-smoke-$$"
 ```
 
-All curl snippets below POST JSON-RPC to `$BASE/mcp` with
-`Accept: application/json` so the response is plain JSON rather than an SSE
-stream. The tool result lives at `.result.content[0].text` (a JSON string).
+All curl snippets below POST JSON-RPC to `$BASE/mcp`. The MCP Streamable HTTP
+transport requires `Accept: application/json, text/event-stream`; the server
+responds with a single SSE event of the form `event: message\ndata: {…}\n\n`,
+so the snippets pipe through `sed -n 's/^data: //p'` to extract the JSON
+payload before `jq`. The tool result lives at `.result.content[0].text`
+(a JSON string).
 
 ---
 
@@ -75,7 +78,7 @@ stream. The tool result lives at `.result.content[0].text` (a JSON string).
 ```bash
 curl -s -X POST "$BASE/mcp" \
   -H "Content-Type: application/json" \
-  -H "Accept: application/json" \
+  -H "Accept: application/json, text/event-stream" \
   -H "$UID_HEADER" \
   -d '{
     "jsonrpc": "2.0",
@@ -91,7 +94,7 @@ curl -s -X POST "$BASE/mcp" \
         "timezone": "UTC"
       }
     }
-  }' | jq '.result.content[0].text | fromjson'
+  }' | sed -n 's/^data: //p' | jq '.result.content[0].text | fromjson'
 ```
 
 **Expected response shape:**
@@ -140,7 +143,7 @@ echo "Waiting 5 minutes for ≥2 runs to complete…"; sleep 300
 JOB_RECURRING=<paste-job_id-from-A1>
 curl -s -X POST "$BASE/mcp" \
   -H "Content-Type: application/json" \
-  -H "Accept: application/json" \
+  -H "Accept: application/json, text/event-stream" \
   -H "$UID_HEADER" \
   -d "{
     \"jsonrpc\": \"2.0\",
@@ -150,7 +153,7 @@ curl -s -X POST "$BASE/mcp" \
       \"name\": \"task.status.v1\",
       \"arguments\": {\"job_id\": $JOB_RECURRING, \"include_runs\": true}
     }
-  }" | jq '.result.content[0].text | fromjson'
+  }" | sed -n 's/^data: //p' | jq '.result.content[0].text | fromjson'
 ```
 
 **Expected response shape:**
@@ -203,7 +206,7 @@ still active and pending future ticks. Run-level statuses are the evidence.
 ```bash
 curl -s -X POST "$BASE/mcp" \
   -H "Content-Type: application/json" \
-  -H "Accept: application/json" \
+  -H "Accept: application/json, text/event-stream" \
   -H "$UID_HEADER" \
   -d "{
     \"jsonrpc\": \"2.0\",
@@ -213,7 +216,7 @@ curl -s -X POST "$BASE/mcp" \
       \"name\": \"task.cancel.v1\",
       \"arguments\": {\"job_id\": $JOB_RECURRING}
     }
-  }" | jq '.result.content[0].text | fromjson'
+  }" | sed -n 's/^data: //p' | jq '.result.content[0].text | fromjson'
 ```
 
 **Expected:**
@@ -252,7 +255,7 @@ their upstream dependency completes.
 ```bash
 curl -s -X POST "$BASE/mcp" \
   -H "Content-Type: application/json" \
-  -H "Accept: application/json" \
+  -H "Accept: application/json, text/event-stream" \
   -H "$UID_HEADER" \
   -d '{
     "jsonrpc": "2.0",
@@ -266,7 +269,7 @@ curl -s -X POST "$BASE/mcp" \
         "schedule_type": "immediate"
       }
     }
-  }' | jq '.result.content[0].text | fromjson'
+  }' | sed -n 's/^data: //p' | jq '.result.content[0].text | fromjson'
 ```
 
 **Expected:**
@@ -305,7 +308,7 @@ Note the `job_id` — referred to as `<JOB_A>`.
 JOB_A=<paste-job_id-from-B1>
 curl -s -X POST "$BASE/mcp" \
   -H "Content-Type: application/json" \
-  -H "Accept: application/json" \
+  -H "Accept: application/json, text/event-stream" \
   -H "$UID_HEADER" \
   -d "{
     \"jsonrpc\": \"2.0\",
@@ -321,7 +324,7 @@ curl -s -X POST "$BASE/mcp" \
         \"trigger_on_status\": \"SUCCEEDED\"
       }
     }
-  }" | jq '.result.content[0].text | fromjson'
+  }" | sed -n 's/^data: //p' | jq '.result.content[0].text | fromjson'
 ```
 
 **Expected:**
@@ -394,14 +397,14 @@ Arguments: `{"job_id": <JOB_B>}`
 JOB_A=<paste>
 curl -s -X POST "$BASE/mcp" \
   -H "Content-Type: application/json" \
-  -H "Accept: application/json" \
+  -H "Accept: application/json, text/event-stream" \
   -H "$UID_HEADER" \
   -d "{
     \"jsonrpc\": \"2.0\",
     \"id\": 12,
     \"method\": \"tools/call\",
     \"params\": {\"name\": \"task.status.v1\", \"arguments\": {\"job_id\": $JOB_A}}
-  }" | jq '.result.content[0].text | fromjson'
+  }" | sed -n 's/^data: //p' | jq '.result.content[0].text | fromjson'
 ```
 
 **curl — check B:**
@@ -410,14 +413,14 @@ curl -s -X POST "$BASE/mcp" \
 JOB_B=<paste>
 curl -s -X POST "$BASE/mcp" \
   -H "Content-Type: application/json" \
-  -H "Accept: application/json" \
+  -H "Accept: application/json, text/event-stream" \
   -H "$UID_HEADER" \
   -d "{
     \"jsonrpc\": \"2.0\",
     \"id\": 13,
     \"method\": \"tools/call\",
     \"params\": {\"name\": \"task.status.v1\", \"arguments\": {\"job_id\": $JOB_B}}
-  }" | jq '.result.content[0].text | fromjson'
+  }" | sed -n 's/^data: //p' | jq '.result.content[0].text | fromjson'
 ```
 
 **Pass criterion:** both `<JOB_A>` and `<JOB_B>` return `"status": "completed"`.

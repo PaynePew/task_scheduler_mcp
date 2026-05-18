@@ -45,7 +45,19 @@ def _call(
     }
     resp = client.post("/mcp", json=body)
     resp.raise_for_status()
-    data = resp.json()
+    ctype = resp.headers.get("content-type", "")
+    if ctype.startswith("text/event-stream"):
+        # MCP Streamable HTTP: parse single SSE event (event: message\ndata: {...}\n\n)
+        payload: str | None = None
+        for line in resp.text.splitlines():
+            if line.startswith("data:"):
+                payload = line[5:].strip()
+                break
+        if payload is None:
+            raise RuntimeError(f"SSE response had no data line: {resp.text!r}")
+        data = json.loads(payload)
+    else:
+        data = resp.json()
     if "error" in data:
         raise RuntimeError(f"JSON-RPC error: {data['error']}")
     return json.loads(data["result"]["content"][0]["text"])
@@ -123,7 +135,28 @@ def run_l4a(client: httpx.Client, rpc_offset: int) -> tuple[bool, str]:
 
     print(f"  A3 ✓  {len(completed_runs)} completed runs confirmed")
 
-    # Step A4 — cancel
+    # Step A4 — cancel. The doc-expected post-condition ("job-level status remains
+    # 'scheduled' because future ticks are pending") only holds once recurring_watcher
+    # has spawned the next pending run; between ticks the derived job-level status
+    # briefly reads as 'completed' and cancel would return INVALID_STATE. Wait up to
+    # 90s for a pending future run before cancelling.
+    pending_deadline = time.monotonic() + 90
+    while time.monotonic() < pending_deadline:
+        s = _call(
+            client,
+            rpc_offset + 3,
+            "task.status.v1",
+            {"job_id": job_id, "include_runs": True},
+        )
+        if s.get("ok") and any(r.get("status") == "scheduled" for r in s["data"].get("runs", [])):
+            break
+        time.sleep(5)
+    else:
+        return False, (
+            "L4a A4 FAILED — no pending future run appeared within 90s after 2 completed runs; "
+            "recurring_watcher may not be spawning subsequent ticks."
+        )
+
     cancel = _call(client, rpc_offset + 4, "task.cancel.v1", {"job_id": job_id})
     if not cancel.get("ok"):
         return False, f"L4a A4 FAILED — cancel returned error:\n{_fmt(cancel)}"
@@ -269,7 +302,7 @@ def main() -> int:
 
     headers = {
         "Content-Type": "application/json",
-        "Accept": "application/json",
+        "Accept": "application/json, text/event-stream",
         "X-User-Id": user_id,
     }
 
