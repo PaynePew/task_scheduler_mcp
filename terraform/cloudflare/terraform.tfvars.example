@@ -1,0 +1,9 @@
+# Copy to terraform.tfvars (gitignored) and fill in real values.
+#
+# zone_id:  Cloudflare dashboard → paynepew.dev → Overview → API section
+#           (right-hand sidebar, 32-char hex string)
+# vps_ip:   Lightsail console → Networking → Static IPs → IP attached to
+#           chatgpt-task-vps
+
+zone_id = "00000000000000000000000000000000"
+vps_ip  = "52.197.62.39"
