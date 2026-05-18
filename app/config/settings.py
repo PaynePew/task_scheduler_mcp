@@ -34,7 +34,7 @@ class Settings(BaseSettings):
     port: int = 8000
     log_level: str = "INFO"
     # Short git SHA stamped in by the Docker build; surfaced via /healthz so
-    # ALB / Caddy / UptimeRobot can correlate a running container with a build.
+    # ALB / Caddy / Better Stack can correlate a running container with a build.
     git_sha: str = "unknown"
 
     # Default pool size is the mcp-server / worker profile (ADR-011).

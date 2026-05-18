@@ -33,7 +33,7 @@ The available solution space spans: full cloud (cost prohibitive), full local (n
 
 A two-target deployment strategy where the runtime and the design artifact are explicitly separated.
 
-1. **Runtime target = AWS Lightsail Tokyo, $5/mo (2 GB RAM, 1 vCPU, 60 GB SSD).** Reachable at `https://scheduler.paynepew.dev`. Provisioned by an idempotent `bin/setup-vps.sh` script. Daily Postgres backup to Cloudflare R2. UptimeRobot monitors the live URL with a public status page.
+1. **Runtime target = AWS Lightsail Tokyo, $5/mo (2 GB RAM, 1 vCPU, 60 GB SSD).** Reachable at `https://scheduler.paynepew.dev`. Provisioned by an idempotent `bin/setup-vps.sh` script. Daily Postgres backup to Cloudflare R2. Better Stack monitors the live URL with a public status page (ADR-031, swapped from UptimeRobot when its front-end was unreachable from the deciders' network).
 
 2. **Design target = AWS ECS Fargate / RDS / ALB / SQS / IAM / VPC, fully Terraform-coded.** Validated end-to-end by a `workflow_dispatch` GitHub Actions workflow (`validate-fargate.yml`) that applies → smoke-tests → captures evidence → destroys. Runs once during W4 demo recording (bill < $5 per run).
 
@@ -237,9 +237,9 @@ rclone copy r2:chatgpt-task-backups/scheduler-YYYYMMDD-HHMMSS.sql.gz /tmp/
 gunzip -c /tmp/scheduler-*.sql.gz | docker compose exec -T postgres psql -U postgres scheduler
 ```
 
-**B. UptimeRobot uptime monitoring**
+**B. Better Stack uptime monitoring** (ADR-031 — swapped from UptimeRobot)
 
-HTTPS check `https://scheduler.paynepew.dev/healthz` every 5 min. Alerts: email + Slack webhook (same webhook used by future daily ops digest). **Public status page** linked from README — treated as first-class portfolio artifact equivalent to GitHub stars.
+HTTPS check `https://scheduler.paynepew.dev/healthz` every 3 min (Better Stack free-tier minimum, tighter than UptimeRobot's 5-min). Alerts: email + Slack webhook (same webhook used by future daily ops digest). **Public status page** on `betteruptime.com` subdomain linked from README — treated as first-class portfolio artifact equivalent to GitHub stars.
 
 **C. One-shot Fargate validation workflow** (`.github/workflows/validate-fargate.yml`)
 
@@ -269,7 +269,7 @@ Rejected hardening additions: custom SSH port (security-through-obscurity), Tail
 - **L4 Functional smoke** (both sub-gates required):
   - **L4a** Echo recurring (`* * * * *`) → 5 min later `task.list.v1` shows ≥ 2 completed JobRuns → proves `mcp-server` + `watcher` + `worker` + `recurring_watcher` alive and inter-communicating.
   - **L4b** Chain A→B: create `echo` job A (immediate); create `echo` job B with `trigger_on_job_id=A, trigger_on_status=SUCCEEDED`; wait 30s; assert both completed → proves `chain_watcher` alive. Cleanup: `task.cancel.v1` both job IDs.
-- **L5 Operational gates**: UptimeRobot green 24h+; R2 has first nightly pg_dump; manual restore drill against fresh local Compose passes.
+- **L5 Operational gates**: Better Stack status page green 24h+; R2 has first nightly pg_dump; manual restore drill against fresh local Compose passes.
 - **L6 Fargate evidence** (W4): `validate-fargate.yml` runs end-to-end successfully; artifacts captured; bill < $5 per run.
 - **L7 Demo video** (W4): 3-minute portfolio demo.
 
@@ -290,7 +290,7 @@ Rejected hardening additions: custom SSH port (security-through-obscurity), Tail
 | `docs/runbooks/restore-postgres.md` | New | R2 pull → local restore procedure |
 | `docs/runbooks/pre-fargate-validation-checklist.md` | New | Budgets / IAM / DNS readiness before invoking `validate-fargate.yml` |
 | `docs/W3-VERIFICATION.md` | New | L2 / L3 / L4 manual click-through (parallels W2-VERIFICATION.md) |
-| `README.md` | Modify | Demo URL section, UptimeRobot status page link, deployment architecture overview |
+| `README.md` | Modify | Demo URL section, Better Stack status page link, deployment architecture overview |
 
 No application-layer code changes outside the new `/healthz` handler.
 
@@ -386,7 +386,8 @@ These belong to later weeks (W4) or the future-upgrade list:
 | ADR-027 | Deployment target pivot | VPS-first (Lightsail Tokyo), Fargate as design artifact |
 | ADR-028 | Caddy 2 over nginx | Cert rotation + MCP plugin ecosystem forward-compat |
 | ADR-029 | VPS deployment mechanics | Build on GH Actions, push ghcr.io, SSH pull, containerised Postgres+ElasticMQ |
-| ADR-030 | Operational concerns | R2 backup, UptimeRobot, one-shot Fargate validation workflow |
+| ADR-030 | Operational concerns | R2 backup, monitoring (§ B partially superseded by ADR-031), one-shot Fargate validation workflow |
+| ADR-031 | Monitoring vendor swap | Better Stack replaces UptimeRobot (front-end inaccessible from deciders' network) |
 
 ### Verification (echoes Q-W3-8)
 
@@ -396,14 +397,14 @@ W3 is "done" when L1-L5 pass:
 2. **L2**: A fresh Lightsail instance provisioned by `bin/setup-vps.sh` reaches `docker compose ps` showing all services `running (healthy)` without manual intervention.
 3. **L3**: `curl -fsS https://scheduler.paynepew.dev/healthz` returns 200 from a GH Actions runner (external network proof); `openssl s_client -connect scheduler.paynepew.dev:443` shows a valid Let's Encrypt cert.
 4. **L4a** + **L4b**: documented in `docs/W3-VERIFICATION.md`; pass criteria per D8.
-5. **L5**: UptimeRobot status page shows ≥ 24h of green; R2 bucket contains the most recent nightly snapshot; restore drill against a fresh local Compose succeeds.
+5. **L5**: Better Stack status page shows ≥ 24h of green; R2 bucket contains the most recent nightly snapshot; restore drill against a fresh local Compose succeeds.
 
 L6 + L7 are W4 deliverables and explicitly excluded from W3 "done".
 
 ### Risks and mitigations
 
 - **Risk: Lightsail Tokyo experiences regional outage.** Mitigation: documented as a known portfolio-tier limitation in `README.md`; recovery requires `bin/setup-vps.sh` on a new instance + R2 backup restore. Estimated RTO ~1 hour.
-- **Risk: R2 token rotates silently; backups stop without alarm.** Mitigation: UptimeRobot HTTP HEAD probe against the newest R2 object every week; age > 48h triggers alert (planned during W3 monitoring setup).
+- **Risk: R2 token rotates silently; backups stop without alarm.** Mitigation: Better Stack keyword check against a public R2 status object refreshed weekly by a GH Actions cron (`bin/r2-backup-age.sh` → posts `{"status":"fresh"}` if newest snapshot < 48h, else `"stale"`); Better Stack alerts on the keyword absence (planned during W3 monitoring setup).
 - **Risk: Caddy MCP plugin landscape destabilises; D-32 forward-compat narrative weakens.** Mitigation: ADR-028's primary reasoning (cert rotation) stands independent; MCP plugin reasoning is supporting, not load-bearing.
 - **Risk: GitHub Actions free-tier exhaustion** (2000 min/mo on private repos). Mitigation: repo is public; GH Actions on public repos is free. Build cache via `cache-from/to: type=gha` keeps each run < 3 min.
 - **Risk: VPS `.env` file leaked via misconfigured docker-compose.** Mitigation: chmod 0600, owner `deploy`, never `git add`; `.env.example` ships with empty placeholders.
@@ -423,7 +424,7 @@ If a future implementer disagrees with any decision, that's the audit trail to r
 
 | Phase | Monthly cost (USD) |
 |---|---|
-| W3 idle (Lightsail $5 + R2 free + UptimeRobot free + Cloudflare DNS free + domain prorated ~$1) | **~$6** |
+| W3 idle (Lightsail $5 + R2 free + Better Stack free + Cloudflare DNS free + domain prorated ~$1) | **~$6** |
 | W3 active deploys (GH Actions free on public repo + image pushes free) | $0 incremental |
 | W4 one-shot Fargate validation | < $5 per run, one-time |
 | 12-month projected (job search active) | **~$70-80** |

@@ -1,10 +1,10 @@
 # ADR-030: VPS operational concerns — Cloudflare R2 backup, UptimeRobot monitoring, one-shot Fargate validation workflow
 
-- **Status**: Accepted
+- **Status**: Accepted (§ B partially superseded by [ADR-031](ADR-031-monitoring-better-stack-over-uptimerobot.md) on 2026-05-18 — vendor swap UptimeRobot → Better Stack; § A, § C, § D unchanged)
 - **Date**: 2026-05-17
 - **Deciders**: PaynePew
 - **Source**: Grilling Session #4, Q-W3-7
-- **Related**: ADR-027 (deployment target pivot to VPS), ADR-029 (VPS deployment mechanics)
+- **Related**: ADR-027 (deployment target pivot to VPS), ADR-029 (VPS deployment mechanics), ADR-031 (monitoring vendor swap)
 
 ## Context
 
@@ -65,6 +65,8 @@ gunzip -c /tmp/scheduler-*.sql.gz | docker compose exec -T postgres psql -U post
 ```
 
 ### B. UptimeRobot uptime monitoring + public status page
+
+> **Superseded 2026-05-18 by [ADR-031](ADR-031-monitoring-better-stack-over-uptimerobot.md)**: vendor swapped to Better Stack (`uptimerobot.com` not reachable from the deciders' network). Property set and acceptance shape are unchanged; the text below is preserved for decision provenance. Read this section as "Better Stack" wherever it says "UptimeRobot", and "3-min interval" wherever it says "5-min interval".
 
 - **Monitor**: HTTPS check against `https://scheduler.paynepew.dev/healthz`
   every 5 minutes (UptimeRobot free tier minimum interval)
