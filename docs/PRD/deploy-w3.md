@@ -241,6 +241,8 @@ gunzip -c /tmp/scheduler-*.sql.gz | docker compose exec -T postgres psql -U post
 
 HTTPS check `https://scheduler.paynepew.dev/healthz` every 3 min (Better Stack free-tier minimum, tighter than UptimeRobot's 5-min). Alerts: email + Slack webhook (same webhook used by future daily ops digest). **Public status page at `https://status.paynepew.dev`** (Cloudflare CNAME → `statuspage.betteruptime.com`, managed in `terraform/cloudflare/main.tf`; Better Stack free-tier custom-domain support became available during the sprint — verified 2026-05-18) linked from README — treated as first-class portfolio artifact equivalent to GitHub stars.
 
+**Deploy-time noise suppression (issue #77).** `deploy-vps.yml` wraps the SSH deploy + smoke test in two Better Stack API calls — PATCH `{"paused": true}` before, PATCH `{"paused": false}` after with `if: always()` so a failed deploy cannot leave the monitor silently muted. Eliminates the 10–30 s `mcp-server` recreate gap from uptime accounting without paying for rolling deploys.
+
 **C. One-shot Fargate validation workflow** (`.github/workflows/validate-fargate.yml`)
 
 `workflow_dispatch` trigger with `duration_minutes` input. Flow: init → plan → apply → poll ALB target healthy → smoke `/healthz` → capture evidence artifacts (Terraform outputs + ECS describe-services + RDS describe-db-instances + ALB DNS screenshot) → sleep `duration_minutes` → destroy → final sanity check (`describe-vpcs --filters Name=tag:Project,Values=chatgpt-task` returns empty).

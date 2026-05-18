@@ -40,6 +40,23 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # docker compose recreates mcp-server when IMAGE_TAG changes, producing a
+      # 10-30s window where Caddy returns 502. Better Stack polls every 3 min;
+      # the gap occasionally crosses two consecutive polls and fires a false
+      # alert. Free tier has no count-based threshold, so we pause the monitor
+      # around the deploy. Resume below uses `if: always()` so a failed deploy
+      # cannot leave the monitor silently muted. See issue #77 + ADR-031.
+      - name: Pause Better Stack monitor
+        env:
+          BS_TOKEN: ${{ secrets.BETTERSTACK_API_TOKEN }}
+          MONITOR_ID: ${{ vars.BETTERSTACK_MONITOR_ID }}
+        run: |
+          curl -fsS -X PATCH "https://uptime.betterstack.com/api/v3/monitors/$MONITOR_ID" \
+            -H "Authorization: Bearer $BS_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '{"paused": true}' > /dev/null
+          echo "Better Stack monitor $MONITOR_ID paused"
+
       # Pull new image, run migrations, recreate stack.
       # Rollback: IMAGE_TAG=<prev_sha> docker compose up -d on the VPS.
       - uses: appleboy/ssh-action@v1
@@ -77,3 +94,18 @@ jobs:
           done
           echo "Smoke test failed after 5 attempts"
           exit 1
+
+      # if: always() — runs even when an earlier step failed, so a broken
+      # deploy cannot leave the monitor paused indefinitely (which would
+      # silently suppress real downtime alerts).
+      - name: Resume Better Stack monitor
+        if: always()
+        env:
+          BS_TOKEN: ${{ secrets.BETTERSTACK_API_TOKEN }}
+          MONITOR_ID: ${{ vars.BETTERSTACK_MONITOR_ID }}
+        run: |
+          curl -fsS -X PATCH "https://uptime.betterstack.com/api/v3/monitors/$MONITOR_ID" \
+            -H "Authorization: Bearer $BS_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '{"paused": false}' > /dev/null
+          echo "Better Stack monitor $MONITOR_ID resumed"
