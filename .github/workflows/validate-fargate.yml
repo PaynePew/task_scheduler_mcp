@@ -1,0 +1,368 @@
+name: Validate Fargate (apply → smoke → evidence → destroy)
+
+# One-shot validation workflow for the Fargate Terraform stack.
+# Invocation: W4 demo-recording week only. Do NOT dispatch during W3.
+# See docs/runbooks/pre-fargate-validation-checklist.md before pressing Run.
+on:
+  workflow_dispatch:
+    inputs:
+      duration_minutes:
+        description: >
+          Minutes to keep the stack alive after the smoke test
+          (for manual inspection or demo recording). Min 1, max 120.
+        default: "30"
+        required: true
+        type: string
+
+env:
+  AWS_REGION: ap-northeast-1
+  PROJECT: chatgpt-task
+  TF_LOCK_TABLE: chatgpt-task-terraform-locks
+
+permissions:
+  id-token: write  # Required for OIDC token exchange
+  contents: read
+
+jobs:
+  validate-fargate:
+    name: Apply → Smoke → Evidence → Destroy
+    runs-on: ubuntu-latest
+    # Absolute cap: 120-min live window + ~30 min apply + ~30 min destroy + buffer
+    timeout-minutes: 240
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      # ------------------------------------------------------------------
+      # 0. Guard rails
+      # ------------------------------------------------------------------
+      - name: Validate duration_minutes (1–120)
+        run: |
+          d="${{ inputs.duration_minutes }}"
+          if ! [[ "$d" =~ ^[0-9]+$ ]] || [ "$d" -lt 1 ] || [ "$d" -gt 120 ]; then
+            echo "::error::duration_minutes must be an integer between 1 and 120 (got: $d)"
+            exit 1
+          fi
+          echo "Stack will stay live for ${d} minutes after smoke test."
+
+      # ------------------------------------------------------------------
+      # 1. Checkout + toolchain
+      # ------------------------------------------------------------------
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.9"
+          # Keep raw stdout for terraform output parsing later
+          terraform_wrapper: false
+
+      # ------------------------------------------------------------------
+      # 2. AWS auth (OIDC — no long-lived credentials stored)
+      # ------------------------------------------------------------------
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_FARGATE_VALIDATION_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          # 4-hour session covers 120-min live window + apply/destroy overhead
+          role-duration-seconds: 14400
+
+      # ------------------------------------------------------------------
+      # 3–4. Plan phase — init + plan every module, collect tfplans
+      # ------------------------------------------------------------------
+      - name: Plan — vpc
+        working-directory: terraform/vpc
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="key=vpc/terraform.tfstate" \
+            -backend-config="region=${{ env.AWS_REGION }}" \
+            -backend-config="dynamodb_table=${{ env.TF_LOCK_TABLE }}" \
+            -backend-config="encrypt=true"
+          terraform plan \
+            -var="aws_region=${{ env.AWS_REGION }}" \
+            -out=tfplan
+
+      - name: Plan — iam
+        working-directory: terraform/iam
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="key=iam/terraform.tfstate" \
+            -backend-config="region=${{ env.AWS_REGION }}" \
+            -backend-config="dynamodb_table=${{ env.TF_LOCK_TABLE }}" \
+            -backend-config="encrypt=true"
+          terraform plan \
+            -var="aws_region=${{ env.AWS_REGION }}" \
+            -var="budget_alert_email=${{ secrets.BUDGET_ALERT_EMAIL }}" \
+            -out=tfplan
+
+      - name: Plan — ecr
+        working-directory: terraform/ecr
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="key=ecr/terraform.tfstate" \
+            -backend-config="region=${{ env.AWS_REGION }}" \
+            -backend-config="dynamodb_table=${{ env.TF_LOCK_TABLE }}" \
+            -backend-config="encrypt=true"
+          terraform plan \
+            -var="aws_region=${{ env.AWS_REGION }}" \
+            -out=tfplan
+
+      - name: Plan — cw_logs
+        working-directory: terraform/cw_logs
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="key=cw_logs/terraform.tfstate" \
+            -backend-config="region=${{ env.AWS_REGION }}" \
+            -backend-config="dynamodb_table=${{ env.TF_LOCK_TABLE }}" \
+            -backend-config="encrypt=true"
+          terraform plan \
+            -var="aws_region=${{ env.AWS_REGION }}" \
+            -out=tfplan
+
+      - name: Plan — rds
+        working-directory: terraform/rds
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="key=rds/terraform.tfstate" \
+            -backend-config="region=${{ env.AWS_REGION }}" \
+            -backend-config="dynamodb_table=${{ env.TF_LOCK_TABLE }}" \
+            -backend-config="encrypt=true"
+          terraform plan \
+            -var="aws_region=${{ env.AWS_REGION }}" \
+            -out=tfplan
+
+      - name: Plan — sqs
+        working-directory: terraform/sqs
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="key=sqs/terraform.tfstate" \
+            -backend-config="region=${{ env.AWS_REGION }}" \
+            -backend-config="dynamodb_table=${{ env.TF_LOCK_TABLE }}" \
+            -backend-config="encrypt=true"
+          terraform plan \
+            -var="aws_region=${{ env.AWS_REGION }}" \
+            -out=tfplan
+
+      # terraform/compute added in issue #63 (Slice #7c: Compute & Ingress)
+      - name: Plan — compute
+        working-directory: terraform/compute
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="key=compute/terraform.tfstate" \
+            -backend-config="region=${{ env.AWS_REGION }}" \
+            -backend-config="dynamodb_table=${{ env.TF_LOCK_TABLE }}" \
+            -backend-config="encrypt=true"
+          terraform plan \
+            -var="aws_region=${{ env.AWS_REGION }}" \
+            -out=tfplan
+
+      - name: Upload tfplans as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplans
+          # Binary plan files for each module
+          path: |
+            terraform/vpc/tfplan
+            terraform/iam/tfplan
+            terraform/ecr/tfplan
+            terraform/cw_logs/tfplan
+            terraform/rds/tfplan
+            terraform/sqs/tfplan
+            terraform/compute/tfplan
+          retention-days: 90
+
+      # ------------------------------------------------------------------
+      # 5. Apply phase — apply in dependency order (~10 min for full stack)
+      # ------------------------------------------------------------------
+      - name: Apply — vpc
+        working-directory: terraform/vpc
+        run: terraform apply -auto-approve tfplan
+
+      - name: Apply — iam
+        working-directory: terraform/iam
+        run: terraform apply -auto-approve tfplan
+
+      - name: Apply — ecr
+        working-directory: terraform/ecr
+        run: terraform apply -auto-approve tfplan
+
+      - name: Apply — cw_logs
+        working-directory: terraform/cw_logs
+        run: terraform apply -auto-approve tfplan
+
+      - name: Apply — rds
+        working-directory: terraform/rds
+        run: terraform apply -auto-approve tfplan
+
+      - name: Apply — sqs
+        working-directory: terraform/sqs
+        run: terraform apply -auto-approve tfplan
+
+      - name: Apply — compute (ECS + ALB)
+        working-directory: terraform/compute
+        run: terraform apply -auto-approve tfplan
+
+      # ------------------------------------------------------------------
+      # 6. Poll ALB target group HealthyHostCount (timeout 5 min)
+      # ------------------------------------------------------------------
+      - name: Get ALB target group ARN from terraform output
+        id: tf-outputs
+        working-directory: terraform/compute
+        run: |
+          alb_dns=$(terraform output -raw alb_dns_name)
+          tg_arn=$(terraform output -raw alb_target_group_arn)
+          cluster=$(terraform output -raw ecs_cluster_name)
+          echo "alb_dns=${alb_dns}" >> "$GITHUB_OUTPUT"
+          echo "tg_arn=${tg_arn}" >> "$GITHUB_OUTPUT"
+          echo "cluster=${cluster}" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for ALB healthy host (5-min timeout)
+        env:
+          TG_ARN: ${{ steps.tf-outputs.outputs.tg_arn }}
+        run: |
+          deadline=$(( $(date +%s) + 300 ))
+          while [ "$(date +%s)" -lt "$deadline" ]; do
+            count=$(aws elbv2 describe-target-health \
+              --target-group-arn "$TG_ARN" \
+              --query 'length(TargetHealthDescriptions[?TargetHealth.State==`healthy`])' \
+              --output text)
+            if [ "${count:-0}" -ge 1 ]; then
+              echo "ALB reports ${count} healthy target(s). Proceeding."
+              exit 0
+            fi
+            echo "Healthy targets: ${count:-0} — waiting 15 s…"
+            sleep 15
+          done
+          echo "::error::Timed out waiting for healthy ALB target after 5 minutes."
+          exit 1
+
+      # ------------------------------------------------------------------
+      # 7. Smoke test — /healthz must return HTTP 200
+      # ------------------------------------------------------------------
+      - name: Smoke test — curl /healthz
+        env:
+          ALB_DNS: ${{ steps.tf-outputs.outputs.alb_dns }}
+        run: |
+          echo "Smoke-testing https://${ALB_DNS}/healthz"
+          curl --fail --silent --show-error --max-time 10 \
+            "https://${ALB_DNS}/healthz"
+          echo "Smoke test passed."
+
+      # ------------------------------------------------------------------
+      # 8. Evidence capture + artifact upload (90-day retention)
+      # ------------------------------------------------------------------
+      - name: Create artifacts directory
+        run: mkdir -p artifacts
+
+      - name: Capture Terraform outputs
+        working-directory: terraform/compute
+        run: terraform output -json > ../../artifacts/tf-outputs.json
+
+      - name: Capture ECS service descriptions
+        env:
+          CLUSTER: ${{ steps.tf-outputs.outputs.cluster }}
+        run: |
+          # List all services in the cluster then describe them
+          services=$(aws ecs list-services \
+            --cluster "$CLUSTER" \
+            --query 'serviceArns' \
+            --output text | tr '\t' ' ')
+          # shellcheck disable=SC2086
+          aws ecs describe-services \
+            --cluster "$CLUSTER" \
+            --services $services \
+            > artifacts/ecs-services.json
+
+      - name: Capture RDS instance descriptions
+        run: |
+          aws rds describe-db-instances \
+            --filters "Name=tag:Project,Values=${{ env.PROJECT }}" \
+            > artifacts/rds.json
+
+      - name: Upload evidence artifacts (90-day retention)
+        uses: actions/upload-artifact@v4
+        with:
+          name: fargate-validation-evidence
+          path: artifacts/
+          retention-days: 90
+
+      # ------------------------------------------------------------------
+      # 9. Keep stack alive for demo recording / manual inspection
+      # ------------------------------------------------------------------
+      - name: Keep stack alive — sleep ${{ inputs.duration_minutes }} min
+        run: |
+          d="${{ inputs.duration_minutes }}"
+          echo "Stack is live. Sleeping ${d} minute(s) before destroy."
+          echo "ALB: https://${{ steps.tf-outputs.outputs.alb_dns }}/healthz"
+          sleep $(( d * 60 ))
+
+      # ------------------------------------------------------------------
+      # 10. Destroy — reverse apply order
+      # ------------------------------------------------------------------
+      - name: Destroy — compute (ECS + ALB)
+        if: always()
+        working-directory: terraform/compute
+        run: terraform destroy -auto-approve -var="aws_region=${{ env.AWS_REGION }}"
+
+      - name: Destroy — sqs
+        if: always()
+        working-directory: terraform/sqs
+        run: terraform destroy -auto-approve -var="aws_region=${{ env.AWS_REGION }}"
+
+      - name: Destroy — rds
+        if: always()
+        working-directory: terraform/rds
+        run: |
+          terraform destroy -auto-approve \
+            -var="aws_region=${{ env.AWS_REGION }}"
+
+      - name: Destroy — cw_logs
+        if: always()
+        working-directory: terraform/cw_logs
+        run: terraform destroy -auto-approve -var="aws_region=${{ env.AWS_REGION }}"
+
+      - name: Destroy — ecr
+        if: always()
+        working-directory: terraform/ecr
+        run: terraform destroy -auto-approve -var="aws_region=${{ env.AWS_REGION }}"
+
+      - name: Destroy — iam
+        if: always()
+        working-directory: terraform/iam
+        run: |
+          terraform destroy -auto-approve \
+            -var="aws_region=${{ env.AWS_REGION }}" \
+            -var="budget_alert_email=${{ secrets.BUDGET_ALERT_EMAIL }}"
+
+      - name: Destroy — vpc
+        if: always()
+        working-directory: terraform/vpc
+        run: terraform destroy -auto-approve -var="aws_region=${{ env.AWS_REGION }}"
+
+      # ------------------------------------------------------------------
+      # 11. Final sanity — verify VPC is gone
+      # ------------------------------------------------------------------
+      - name: Final sanity — assert VPC is fully destroyed
+        if: always()
+        run: |
+          remaining=$(aws ec2 describe-vpcs \
+            --filters "Name=tag:Project,Values=${{ env.PROJECT }}" \
+            --query 'Vpcs[*].VpcId' \
+            --output text)
+          if [ -n "$remaining" ]; then
+            echo "::error::VPC(s) still present after destroy: ${remaining}"
+            echo "Run manual cleanup — see docs/runbooks/pre-fargate-validation-checklist.md"
+            exit 1
+          fi
+          echo "All VPCs with tag Project=${PROJECT} are gone. Stack is clean."
