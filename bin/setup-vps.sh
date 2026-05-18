@@ -106,7 +106,10 @@ create_deploy_user() {
 setup_repo() {
     if [[ -d "$DEPLOY_DIR/.git" ]]; then
         log "Repo already cloned at $DEPLOY_DIR, pulling latest..."
-        git -C "$DEPLOY_DIR" pull --ff-only
+        # Repo is owned by $DEPLOY_USER (set on first run); pull as that user
+        # so git's safe.directory check doesn't reject root running on a
+        # deploy-owned working tree.
+        sudo -u "$DEPLOY_USER" git -C "$DEPLOY_DIR" pull --ff-only
     else
         log "Cloning repo to $DEPLOY_DIR..."
         git clone --depth 1 "$REPO_URL" "$DEPLOY_DIR"
@@ -274,7 +277,8 @@ harden_ssh() {
 
     if [[ $changed -eq 1 ]]; then
         sshd -t  # validate config before reloading
-        systemctl reload sshd
+        # Ubuntu/Debian use ssh.service, Red Hat/Fedora use sshd.service
+        systemctl reload ssh 2>/dev/null || systemctl reload sshd
         log "SSH reloaded with hardened config."
     else
         log "SSH already hardened, skipping."
