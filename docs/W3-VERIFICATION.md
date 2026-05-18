@@ -426,9 +426,11 @@ curl -s -X POST "$BASE/mcp" \
 
 ### Step B5 — Cleanup: cancel both jobs
 
-Per ADR-022, `task.cancel.v1` is idempotent against already-terminal jobs.
-If all runs completed naturally, the server returns `INVALID_STATE` — that is
-expected here and **not a failure**.
+Per ADR-022 §3, `task.cancel.v1` returns `INVALID_STATE` when the job has
+already terminated naturally (all runs `SUCCEEDED`/`FAILED`). If both jobs
+completed in step B4, expect this error here — it is the documented
+cleanup outcome and **not a failure**. (Re-cancelling an already-`cancelled`
+job, by contrast, returns `ok: true`.)
 
 **MCP Inspector:**
 
