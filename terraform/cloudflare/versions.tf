@@ -9,6 +9,8 @@ terraform {
   }
 }
 
-# Provider reads token from CLOUDFLARE_API_TOKEN env var.
 # Token must have Zone.DNS:Edit scope on the paynepew.dev zone only.
-provider "cloudflare" {}
+# Set via TF_VAR_cloudflare_api_token env var or `-var` on apply.
+provider "cloudflare" {
+  api_token = var.cloudflare_api_token
+}
