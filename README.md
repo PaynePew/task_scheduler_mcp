@@ -1,17 +1,104 @@
 # ChatGPT Task Scheduler
 
-MCP-based job scheduler exposing **5 tools / 3 resources / 2 prompts** backed by Postgres + SQS (ElasticMQ locally).
+A **self-hostable scheduler MCP** that runs as a persistent HTTP server, exposing **5 tools / 3 resources / 2 prompts** for any MCP client (Claude Desktop, Cursor, Claude in Chrome) to schedule and manage recurring tasks. Backed by Postgres + SQS (ElasticMQ locally).
 
-## Live Demo
+> **Status — read me first**
+>
+> This is a **personal portfolio + self-hostable project**, not a multi-tenant SaaS.
+>
+> - The public demo URL (`scheduler.paynepew.dev`) has **no authentication** and **no SLA** — the `X-User-Id` request header is the only "tenant" boundary, and anyone can claim to be anyone. It is fine for a 30-second click-through but **do not point your real Claude Desktop at it for actual work**.
+> - For real use, **self-host** (instructions below). 5 minutes via Docker Compose.
+> - The cloud deployment is here as a **proof-of-life demo for recruiters** and as the artifact that backs the deployment ADRs (W3). It is not the recommended way to consume this MCP.
 
-**[https://scheduler.paynepew.dev](https://scheduler.paynepew.dev)**
+---
 
-- `GET /healthz` — liveness check; returns HTTP 200 with DB connectivity confirmation
-- MCP Inspector: `MCP_USER_ID=demo MCP_USER_TZ=UTC npx @modelcontextprotocol/inspector https://scheduler.paynepew.dev/mcp`
+## How to use this
 
-## Uptime Status
+Three paths depending on what you want.
 
-**[https://status.paynepew.dev](https://status.paynepew.dev)** — live uptime track record, powered by [Better Stack](https://betterstack.com) (monitoring vendor per [ADR-031](docs/adr/ADR-031-monitoring-better-stack-over-uptimerobot.md)). Checks `GET /healthz` every 3 minutes.
+### 1. Self-host (the intended path)
+
+```bash
+git clone https://github.com/PaynePew/chatgpt_task
+cd chatgpt_task
+cp .env.example .env
+docker compose --profile full up -d
+```
+
+Then point your MCP client at `http://localhost:8000/mcp`. Claude Desktop config (`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS):
+
+```json
+{
+  "mcpServers": {
+    "task-scheduler": {
+      "url": "http://localhost:8000/mcp",
+      "transport": "streamable-http",
+      "headers": { "X-User-Id": "me" }
+    }
+  }
+}
+```
+
+Restart Claude Desktop. The 🔨 icon should show **5 tools**.
+
+For always-on hosting on your own machine (NAS / homelab / cheap VPS), run [`bin/setup-vps.sh`](bin/setup-vps.sh) on a fresh Ubuntu 24.04 box — single idempotent script that installs Docker + Caddy reverse proxy + ufw + fail2ban + nightly Postgres backup cron, then registers a systemd unit so the stack restarts after reboot.
+
+See [Local Development](#local-development) below for the development workflow (tests, lint, MCP Inspector verification).
+
+### 2. Try the public demo (look, don't lean on it)
+
+[https://scheduler.paynepew.dev](https://scheduler.paynepew.dev)
+
+```bash
+# Quick check — should return {"ok": true, "db": "connected"}
+curl https://scheduler.paynepew.dev/healthz
+
+# Click-through via MCP Inspector (browser GUI)
+MCP_USER_ID=demo MCP_USER_TZ=UTC \
+  npx @modelcontextprotocol/inspector https://scheduler.paynepew.dev/mcp
+```
+
+Public uptime track record: [https://status.paynepew.dev](https://status.paynepew.dev) (Better Stack — checks `/healthz` every 3 min per [ADR-031](docs/adr/ADR-031-monitoring-better-stack-over-uptimerobot.md)).
+
+**Caveat (repeating myself, because it matters):** this URL is a single $5/mo VPS with no auth boundary. Data you write is visible to anyone who guesses your `X-User-Id` and is liable to be wiped at any time. Self-host for anything you care about.
+
+### 3. Read the code as a portfolio reference
+
+The repo is organised so the *design decisions* are first-class artifacts:
+
+- [`docs/adr/`](docs/adr/) — 31 ADRs covering W1 (MCP design), W2 (bonus capabilities), W3 (deployment)
+- [`docs/PRD/`](docs/PRD/) — sprint-level product specs
+- [`docs/runbooks/`](docs/runbooks/) — operational procedures (Postgres restore, deploy-time monitor mute, Fargate validation pre-flight)
+- See [Design Decisions (ADRs)](#design-decisions-adrs) below for the W3 cohort tour
+
+---
+
+## Why this MCP is an HTTP server, not a stdio binary
+
+Most published MCPs (filesystem, GitHub, sqlite, ...) are **stdio** — a client like Claude Desktop launches them as a subprocess on demand. Clean install: one `npm install`, done.
+
+**A scheduler can't do that.** Scheduled tasks fire at wall-clock times, not when a chat is open:
+
+```
+A user schedules: "every weekday at 9am, post the daily standup template"
+
+stdio MCP:    Claude Desktop closed at 9am Monday → scheduler subprocess
+              isn't running → no firing → the schedule is decoration.
+
+HTTP server:  scheduler is its own long-lived process. Client connects
+              when the user wants to query/create; the server fires ticks
+              regardless of which client is open.
+```
+
+So the MCP must live somewhere with 24/7 uptime. Three viable hosting options:
+
+| Option | Who hosts | Trade-off |
+|---|---|---|
+| **Self-host on always-on hardware** (NAS, homelab, cheap VPS) | You | Full control + own data. Setup overhead. **Recommended.** |
+| **Shared cloud demo** (like `scheduler.paynepew.dev`) | Someone else | Zero setup. No auth, no isolation — not viable for real data. |
+| **Run a local daemon on your laptop** | You | Works while laptop is awake. Misses ticks while sleeping or shut down. |
+
+This is also why the project ships **full IaC** — `bin/setup-vps.sh`, `infra/vps/docker-compose.yml`, Caddyfile, Terraform for the AWS path. The deployment is part of the product, not packaging around it.
 
 ---
 
@@ -19,7 +106,7 @@ MCP-based job scheduler exposing **5 tools / 3 resources / 2 prompts** backed by
 
 This project uses a **dual-target** deployment strategy that separates runtime from design artifact.
 
-**Runtime target (live now):** AWS Lightsail Tokyo ($5/mo, 2 GB RAM / 1 vCPU). Caddy 2 terminates TLS; five Python services + Postgres + ElasticMQ run as Docker containers, matching the local dev Compose shape. Every push to `main` triggers a GitHub Actions deploy: build → push to `ghcr.io` → SSH pull → migrate → smoke `curl /healthz`.
+**Runtime target (live now):** AWS Lightsail Tokyo ($5/mo, 2 GB RAM / 1 vCPU). Caddy 2 terminates TLS; five Python services + Postgres + ElasticMQ run as Docker containers, matching the local dev Compose shape. Every push to `main` triggers a GitHub Actions deploy: build → push to `ghcr.io` → SSH pull → migrate → smoke `curl /healthz`. During the brief container-recreate window, the Better Stack monitor is paused via API and resumed with `if: always()` (see [docs/runbooks/deploy-mute-external-monitor.md](docs/runbooks/deploy-mute-external-monitor.md)).
 
 **Design artifact (validated, not always-on):** AWS ECS Fargate / RDS PostgreSQL / ALB / SQS — fully Terraform-coded. Validated end-to-end via `validate-fargate.yml` (`workflow_dispatch`): apply → smoke → capture evidence → destroy. Bill < $5 per run, invoked once during W4 demo recording.
 
@@ -106,6 +193,10 @@ All W3 design decisions are in [`docs/adr/`](docs/adr/). The W3 cohort (ADR-024 
 ---
 
 ## Future Direction
+
+### Auth model — `(D-33)` real multi-tenant boundary
+
+The current `X-User-Id` header model (per [ADR-015](docs/adr/ADR-015-user-identity-resolver-fallback.md)) is W1's deliberate trust-only design — it lets the project ship the MCP shape without coupling to an auth provider. To make the public demo URL viable for actual third-party use, the swap is to OAuth (likely via [Cloudflare Access](https://developers.cloudflare.com/cloudflare-one/applications/configure-apps/self-hosted-apps/) or [Auth0](https://auth0.com/) free tier) feeding the resolved subject claim into the same `user_id` column. Schema and queries are auth-provider-agnostic; only the request middleware changes. Deliberately deferred until there's a real third-party user pulling on it.
 
 ### `(D-32)` Caddy MCP composability
 
@@ -217,7 +308,7 @@ tests/
 └── integration/   # require running Compose services
 ```
 
-## Verify with the MCP Inspector
+## Verify with the MCP Inspector (stdio)
 
 The MCP stdio server can be driven from the official inspector — no Claude client needed. Requires Node.js for `npx`.
 
@@ -238,16 +329,42 @@ Expected counts in the inspector:
 - **Resources tab:** 3 entries (2 static resources + 1 URI template)
 - **Prompts tab:** 2 prompts
 
-## Verify with Claude Desktop (L3 sanity check)
+## Verify with Claude Desktop
 
-Once the inspector tests pass, connect the server to Claude Desktop:
+Once the inspector tests pass, connect the server to Claude Desktop. **Two transport options:**
+
+### Option A — HTTP transport (matches the production setup; recommended for self-host)
+
+Run the HTTP entrypoint locally:
+
+```bash
+docker compose --profile full up -d
+```
+
+Then add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or the equivalent on your OS:
+
+```json
+{
+  "mcpServers": {
+    "task-scheduler": {
+      "url": "http://localhost:8000/mcp",
+      "transport": "streamable-http",
+      "headers": {
+        "X-User-Id": "me"
+      }
+    }
+  }
+}
+```
+
+### Option B — stdio transport (development / no compose stack needed)
 
 ```bash
 claude mcp add task-scheduler \
   -- uv run python -m app.entrypoints.mcp_stdio
 ```
 
-Or add manually to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS):
+Or add manually:
 
 ```json
 {
@@ -264,6 +381,8 @@ Or add manually to `~/Library/Application Support/Claude/claude_desktop_config.j
   }
 }
 ```
+
+> **Heads-up: stdio mode does not fire recurring jobs while Claude Desktop is closed** — the subprocess dies with the client. Use stdio for development; use HTTP (Option A) for actual scheduled-task use.
 
 Restart Claude Desktop fully. The 🔨 icon in the chat input should show **5 tools**. The Resources and Prompts surfaces are discovered automatically by Claude.
 
