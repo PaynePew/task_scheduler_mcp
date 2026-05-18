@@ -45,15 +45,26 @@ async def session_factory():
 
 @pytest.fixture
 def sqs() -> SQSClient:
-    """SQSClient pointed at ElasticMQ; drains leftover messages before each test."""
-    client = SQSClient()
-    while True:
-        msgs = client.receive_messages(max_messages=10, wait_seconds=0)
-        if not msgs:
-            break
-        for msg in msgs:
-            client.delete_message(msg["ReceiptHandle"])
-    return client
+    """SQSClient pointed at ElasticMQ; drains leftover messages from BOTH queues.
+
+    DLQ drain is required because an interrupted prior run of
+    test_retryable_three_times_lands_in_dlq can leave stale messages in the DLQ,
+    causing the next run's `assert len(dlq_msgs) == 1` to see 2 messages and fail.
+    """
+    from app.config.settings import settings
+
+    def _drain(c: SQSClient) -> None:
+        while True:
+            msgs = c.receive_messages(max_messages=10, wait_seconds=0)
+            if not msgs:
+                break
+            for msg in msgs:
+                c.delete_message(msg["ReceiptHandle"])
+
+    main = SQSClient()
+    _drain(main)
+    _drain(SQSClient(queue_url=settings.queue_dlq_url))
+    return main
 
 
 async def _insert_queued_run(
@@ -571,7 +582,9 @@ async def test_retryable_three_times_lands_in_dlq(session_factory, sqs):
     registry = {"always_retry": AlwaysRetryHandler()}
 
     # 連續3次: receive -> process_one(-> RETRYING, 不刪) -> 等 visibility過期
-    SHORT_VISIBILITY = 1
+    # SHORT_VISIBILITY=2 + sleep buffer=2.5 gives ElasticMQ enough headroom on
+    # contended CI runners; the previous 1s+0.3s buffer was too tight and flaked.
+    SHORT_VISIBILITY = 2
     for attempt in range(3):
         msg = sqs.receive_messages(
             max_messages=1,
@@ -580,7 +593,7 @@ async def test_retryable_three_times_lands_in_dlq(session_factory, sqs):
         )
         assert len(msg) == 1, f"attempt {attempt + 1}: main queue should have message"
         await process_one(session_factory, sqs, msg[0], registry=registry)
-        await asyncio.sleep(SHORT_VISIBILITY + 0.3)  # 等 visibility 過
+        await asyncio.sleep(SHORT_VISIBILITY + 0.5)  # 等 visibility 過
 
     # ElasticMQ 把第3+次的 deliver 視為超過 maxReceiveCount=3，redirect 到 DQL
     # 給SQS 一拍 sweep
