@@ -1,9 +1,11 @@
 # Copy to terraform.tfvars (gitignored) and fill in real values.
 #
-# zone_id:  Cloudflare dashboard → paynepew.dev → Overview → API section
-#           (right-hand sidebar, 32-char hex string)
-# vps_ip:   Lightsail console → Networking → Static IPs → IP attached to
-#           chatgpt-task-vps
+# cloudflare_api_token: Set via TF_VAR_cloudflare_api_token env var, NOT in this file.
+#                      Token from dash.cloudflare.com/profile/api-tokens with
+#                      Zone.DNS:Edit scope on paynepew.dev only.
+# zone_name:           Apex domain. Module looks up the Cloudflare zone_id via
+#                      API at plan time, so you only provide the human-readable name.
+# vps_ip:              Lightsail console → Networking → Static IPs (attached IP).
 
-zone_id = "00000000000000000000000000000000"
-vps_ip  = "52.197.62.39"
+zone_name = "paynepew.dev"
+vps_ip    = "52.197.62.39"

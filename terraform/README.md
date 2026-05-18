@@ -13,7 +13,8 @@ terraform/
 ├── vpc/         # VPC, subnets, IGW, route tables, S3 Gateway endpoint
 ├── iam/         # ECS execution role, task role, AWS Budgets alerts
 ├── ecr/         # ECR repository + lifecycle policy
-└── cw_logs/     # CloudWatch Log Groups per ECS service
+├── cw_logs/     # CloudWatch Log Groups per ECS service
+└── cloudflare/  # Cloudflare DNS — A record scheduler.paynepew.dev → Lightsail IP
 ```
 
 ## Apply order
@@ -81,6 +82,43 @@ terraform apply
 cd terraform/cw_logs
 terraform init -backend-config=../backend.tfvars -backend-config="key=cw_logs/terraform.tfstate"
 terraform apply
+```
+
+## Cloudflare DNS module
+
+The `cloudflare/` module is independent of AWS — it uses its own Cloudflare provider and
+keeps **local state** (no S3 backend needed; the record is trivially recreatable from the
+variables, and the state file is just a thin pointer to the Cloudflare record ID).
+
+Prerequisites: `paynepew.dev` registered via Cloudflare Registrar, plus a Cloudflare API
+token with `Zone.DNS:Edit` scope on `paynepew.dev` only.
+
+```bash
+cd terraform/cloudflare
+
+# Initialise with local state
+terraform init
+
+# Set the token via TF_VAR_ env var (sensitive, do NOT commit to terraform.tfvars)
+export TF_VAR_cloudflare_api_token="<token>"
+# PowerShell: $env:TF_VAR_cloudflare_api_token = "<token>"
+
+# Copy the example tfvars and edit vps_ip
+cp terraform.tfvars.example terraform.tfvars
+# edit: zone_name = "paynepew.dev", vps_ip = "<LIGHTSAIL_STATIC_IP>"
+
+# Review the plan — proxied=false (ADR-028) so Caddy can complete the ACME challenge
+terraform plan
+
+# Apply — creates scheduler.paynepew.dev A record
+terraform apply
+```
+
+Verify propagation (globally, within ~1-5 minutes):
+
+```bash
+dig +short scheduler.paynepew.dev @1.1.1.1
+dig +short scheduler.paynepew.dev @8.8.8.8
 ```
 
 ## CI validation

@@ -23,6 +23,7 @@ jobs:
           - sqs
           - alb
           - ecs
+          - cloudflare
 
     steps:
       - name: Checkout
