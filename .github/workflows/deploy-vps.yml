@@ -47,12 +47,17 @@ jobs:
           host: scheduler.paynepew.dev
           username: deploy
           key: ${{ secrets.VPS_SSH_KEY }}
-          # script_stop: true → exit non-zero on first failed command. Without
-          # this, a failed `migrate` would still let `up -d` run (starting the
-          # new image against an unmigrated DB → crashloop), and the workflow
-          # would report success based on `up -d`'s exit code alone.
-          script_stop: true
+          # `set -euo pipefail` aborts on the first failed command. Without
+          # this, a failed `migrate` would still let `up -d` run (starting
+          # the new image against an unmigrated DB → crashloop), and the
+          # workflow would report success based on `up -d`'s exit code
+          # alone. The legacy `script_stop: true` input was removed in
+          # appleboy/ssh-action v1 — the shell-side directive is the
+          # documented replacement
+          # (https://github.com/appleboy/ssh-action#error-handling).
           script: |
+            #!/usr/bin/env bash
+            set -euo pipefail
             cd /opt/chatgpt_task
             export IMAGE_TAG=${{ github.sha }}
             docker compose pull
