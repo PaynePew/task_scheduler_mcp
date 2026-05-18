@@ -81,10 +81,14 @@ jobs:
             docker compose run --rm migrate
             docker compose up -d --remove-orphans
 
+      # TEMP fault-injection for issue #77 AC verification — proves the
+      # `if: always()` resume step still fires when a step BETWEEN Pause and
+      # Resume fails (i.e. monitor cannot get stuck in Paused state).
+      # Reverted immediately after the failing run is observed.
       - name: Smoke test
         run: |
           for i in 1 2 3 4 5; do
-            if curl -fsS --max-time 10 https://scheduler.paynepew.dev/healthz; then
+            if curl -fsS --max-time 10 https://scheduler.paynepew.dev/this-does-not-exist; then
               echo ""
               echo "Smoke test passed on attempt $i"
               exit 0
