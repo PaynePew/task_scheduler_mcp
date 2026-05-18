@@ -114,7 +114,7 @@ def run_l4a(client: httpx.Client, rpc_offset: int) -> tuple[bool, str]:
             break
     else:
         # cleanup before failing
-        _cancel_quietly(client, rpc_offset + 3, job_id)
+        _cancel_quietly(client, rpc_offset + 3, job_id, step="A4")
         return False, (
             f"L4a A3 FAILED — only {len(completed_runs)} completed run(s) "
             f"after {L4A_TIMEOUT}s (need ≥2). "
@@ -193,8 +193,8 @@ def run_l4b(client: httpx.Client, rpc_offset: int) -> tuple[bool, str]:
         if status_a_val == "completed" and status_b_val == "completed":
             break
     else:
-        _cancel_quietly(client, rpc_offset + 5, job_a)
-        _cancel_quietly(client, rpc_offset + 6, job_b)
+        _cancel_quietly(client, rpc_offset + 5, job_a, step="B5", label="A")
+        _cancel_quietly(client, rpc_offset + 6, job_b, step="B5", label="B")
         hint = ""
         if status_b_val != "completed" and status_a_val == "completed":
             hint = " B did not complete after A — check 'docker compose logs chain_watcher'."
@@ -206,9 +206,9 @@ def run_l4b(client: httpx.Client, rpc_offset: int) -> tuple[bool, str]:
 
     print(f"  B4 ✓  A={status_a_val!r}, B={status_b_val!r}")
 
-    # Step B5 — cancel both (idempotent per ADR-022)
+    # Step B5 — cancel both. Naturally-terminated jobs return INVALID_STATE per ADR-022 § 3.
     for jid, label in [(job_a, "A"), (job_b, "B")]:
-        _cancel_quietly(client, rpc_offset + 7, jid, label=label)
+        _cancel_quietly(client, rpc_offset + 7, jid, step="B5", label=label)
 
     return True, f"L4b PASSED — chain A({job_a})→B({job_b}) both completed"
 
@@ -223,22 +223,24 @@ def _cancel_quietly(
     rpc_id: int,
     job_id: int,
     *,
+    step: str = "",
     label: str = "",
 ) -> None:
     """Cancel a job; swallow INVALID_STATE (already-terminal jobs per ADR-022)."""
+    prefix = f"  {step} " if step else "  "
     try:
         result = _call(client, rpc_id, "task.cancel.v1", {"job_id": job_id})
         tag = f" {label}" if label else ""
         if result.get("ok"):
-            print(f"  B5 ✓  cancelled job{tag} {job_id}")
+            print(f"{prefix}✓  cancelled job{tag} {job_id}")
         else:
             code = result.get("error", {}).get("code", "?")
             if code == "INVALID_STATE":
-                print(f"  B5 ✓  job{tag} {job_id} already terminal (INVALID_STATE — expected)")
+                print(f"{prefix}✓  job{tag} {job_id} already terminal (INVALID_STATE — expected)")
             else:
-                print(f"  B5 ⚠  cancel job{tag} {job_id} returned: {result['error']}")
+                print(f"{prefix}⚠  cancel job{tag} {job_id} returned: {result['error']}")
     except Exception as exc:
-        print(f"  B5 ⚠  cancel job {job_id} raised {exc!r}")
+        print(f"{prefix}⚠  cancel job {job_id} raised {exc!r}")
 
 
 # ---------------------------------------------------------------------------
