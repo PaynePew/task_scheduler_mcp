@@ -122,14 +122,14 @@ setup_repo() {
         log "WARNING: $DEPLOY_DIR/.env created from .env.example — fill in secrets before starting."
     fi
 
-    # Copy infra/vps files into deploy dir root (idempotent)
+    # Copy infra/vps files into deploy dir root (idempotent).
+    # elasticmq.conf already lives at repo root after clone, so no copy needed.
     cp "$DEPLOY_DIR/$INFRA_SRC/docker-compose.yml" "$DEPLOY_DIR/docker-compose.yml"
     cp "$DEPLOY_DIR/$INFRA_SRC/Caddyfile" "$DEPLOY_DIR/Caddyfile"
-    cp "$DEPLOY_DIR/$ELASTICMQ_CONF" "$DEPLOY_DIR/elasticmq.conf"
     chown "$DEPLOY_USER:$DEPLOY_USER" \
         "$DEPLOY_DIR/docker-compose.yml" \
         "$DEPLOY_DIR/Caddyfile" \
-        "$DEPLOY_DIR/elasticmq.conf"
+        "$DEPLOY_DIR/$ELASTICMQ_CONF"
 }
 
 # ── 7. Systemd unit for docker compose ───────────────────────────────────────
