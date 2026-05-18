@@ -451,3 +451,191 @@ async def test_no_duplicate_spawn_for_same_cron_tick(session_factory, caplog):
     assert any("skipping spawn" in r.message for r in caplog.records), (
         "Expected 'skipping spawn' log message for the duplicate event"
     )
+
+
+# ---------------------------------------------------------------------------
+# Issue #82 regression: run finishes BEFORE its own scheduled_at, in its own poll.
+#
+# Field-observed scenario from scheduler.paynepew.dev:
+#   - Watcher's lookahead claims a PENDING run a few hundred ms before scheduled_at
+#   - The echo action is < 10 ms, so the run finishes BEFORE its tick boundary
+#   - SUCCEEDED event's occurred_at < prev_run.scheduled_at
+#   - next_after(occurred_at) re-computes the SAME scheduled_at as the just-completed run
+#   - already_live pre-check passes (prev_run is already SUCCEEDED, not in NON_TERMINAL list)
+#   - Duplicate run spawned at the same scheduled_at
+#
+# The same-batch test above can't catch this because each event is processed in
+# its OWN poll_once tick — already_live has no concurrent non-terminal run to see.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+async def test_no_duplicate_spawn_when_run_finishes_before_scheduled_at(session_factory):
+    """Run completes BEFORE its scheduled_at → next spawn must not collide on that tick.
+
+    Per-minute cron. R1.scheduled_at = T (a tick boundary), but R1 actually
+    finished at T-0.1s (claimed early by Watcher's lookahead window, action ran
+    in < 10ms). SUCCEEDED occurred_at = T-0.1s < scheduled_at, so the naive
+    next_after(occurred_at) returns T (the same tick R1 was scheduled for).
+
+    Fixed by anchoring next_after at max(occurred_at, scheduled_at + 1µs).
+    """
+    tick = datetime(2026, 1, 1, 12, 32, 0, tzinfo=UTC)
+    occurred_at = tick - timedelta(milliseconds=100)  # finished 0.1s BEFORE scheduled tick
+
+    async with session_factory() as session:
+        async with session.begin():
+            job = Job(
+                user_id="recurring-watcher-test",
+                description="every-minute echo",
+                action="echo",
+                action_params={"message": "tick"},
+                job_type="recurring",
+                scheduled_at=None,
+                cron_expr="* * * * *",
+                timezone="UTC",
+            )
+            session.add(job)
+            await session.flush()
+
+            bucket = tick.replace(minute=0, second=0, microsecond=0).isoformat()
+            run1 = JobRun(
+                time_bucket=bucket,
+                job_id=job.job_id,
+                scheduled_at=tick,
+                status="SUCCEEDED",
+                start_at=occurred_at - timedelta(milliseconds=5),
+                finish_at=occurred_at,
+            )
+            session.add(run1)
+            await session.flush()
+
+            session.add(
+                RunEvent(
+                    run_id=run1.run_id,
+                    job_id=job.job_id,
+                    event_type="SUCCEEDED",
+                    status_from="RUNNING",
+                    status_to="SUCCEEDED",
+                    occurred_at=occurred_at,
+                )
+            )
+
+    count = await poll_once(session_factory)
+    assert count == 1
+
+    async with session_factory() as session:
+        async with session.begin():
+            all_runs = (
+                (await session.execute(select(JobRun).where(JobRun.job_id == job.job_id)))
+                .scalars()
+                .all()
+            )
+
+    pending = [r for r in all_runs if r.status == "PENDING"]
+    assert len(pending) == 1, (
+        f"Expected 1 PENDING run after early-completion tick, got {len(pending)}: "
+        f"{[(r.run_id, r.scheduled_at, r.status) for r in all_runs]}"
+    )
+
+    # The new run MUST be at a STRICTLY LATER tick than R1, not the same boundary.
+    assert pending[0].scheduled_at > run1.scheduled_at, (
+        f"Spawned run at {pending[0].scheduled_at} is not strictly after "
+        f"R1.scheduled_at={run1.scheduled_at} — duplicate-tick bug"
+    )
+    # Specifically: the next minute boundary.
+    assert pending[0].scheduled_at == tick + timedelta(minutes=1)
+
+
+@pytest.mark.integration
+async def test_at_most_one_run_per_scheduled_at_over_n_ticks(session_factory):
+    """Drive N sequential ticks (each finishing before scheduled_at) — no two
+    runs share the same scheduled_at.
+
+    Simulates a sustained early-completion regime (fast action + Watcher
+    lookahead) over multiple iterations. With the bug, this produces 2N runs
+    instead of N+1.
+    """
+    cron = "* * * * *"
+    base = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+    n_ticks = 5
+
+    async with session_factory() as session:
+        async with session.begin():
+            job = Job(
+                user_id="recurring-watcher-test",
+                description="every-minute echo",
+                action="echo",
+                action_params={"message": "tick"},
+                job_type="recurring",
+                scheduled_at=None,
+                cron_expr=cron,
+                timezone="UTC",
+            )
+            session.add(job)
+            await session.flush()
+            job_id = job.job_id
+
+            bucket = base.replace(minute=0, second=0, microsecond=0).isoformat()
+            seed_run = JobRun(
+                time_bucket=bucket,
+                job_id=job_id,
+                scheduled_at=base,
+                status="SUCCEEDED",
+                start_at=base - timedelta(milliseconds=200),
+                finish_at=base - timedelta(milliseconds=100),
+            )
+            session.add(seed_run)
+            await session.flush()
+            session.add(
+                RunEvent(
+                    run_id=seed_run.run_id,
+                    job_id=job_id,
+                    event_type="SUCCEEDED",
+                    status_from="RUNNING",
+                    status_to="SUCCEEDED",
+                    occurred_at=base - timedelta(milliseconds=100),
+                )
+            )
+
+    # Drive N ticks: each poll spawns one PENDING run; we then mark it SUCCEEDED
+    # at finish_at = scheduled_at - 100ms (the bug condition) and loop.
+    for _ in range(n_ticks):
+        await poll_once(session_factory)
+        async with session_factory() as session:
+            async with session.begin():
+                pending_run = (
+                    await session.execute(
+                        select(JobRun).where(JobRun.job_id == job_id, JobRun.status == "PENDING")
+                    )
+                ).scalar_one()
+                finish_at = pending_run.scheduled_at - timedelta(milliseconds=100)
+                pending_run.status = "SUCCEEDED"
+                pending_run.start_at = finish_at - timedelta(milliseconds=5)
+                pending_run.finish_at = finish_at
+                session.add(
+                    RunEvent(
+                        run_id=pending_run.run_id,
+                        job_id=job_id,
+                        event_type="SUCCEEDED",
+                        status_from="RUNNING",
+                        status_to="SUCCEEDED",
+                        occurred_at=finish_at,
+                    )
+                )
+
+    async with session_factory() as session:
+        async with session.begin():
+            all_runs = (
+                (await session.execute(select(JobRun).where(JobRun.job_id == job_id)))
+                .scalars()
+                .all()
+            )
+
+    scheduled_ats = [r.scheduled_at for r in all_runs]
+    assert len(scheduled_ats) == len(set(scheduled_ats)), (
+        f"Duplicate scheduled_at across runs: "
+        f"{sorted([(r.run_id, r.scheduled_at, r.status) for r in all_runs], key=lambda x: x[1])}"
+    )
+    # seed + N driven ticks
+    assert len(all_runs) == n_ticks + 1

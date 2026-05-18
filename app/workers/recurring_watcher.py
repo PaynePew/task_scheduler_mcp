@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import exists, select, update
@@ -77,7 +77,28 @@ async def poll_once(
                     )
                 else:
                     tz = ZoneInfo(job.timezone or "UTC")
-                    run_at = next_after(job.cron_expr, tz, event.occurred_at)
+                    # Anchor next-tick computation to max(occurred_at, prev_run.scheduled_at + 1µs).
+                    # The Watcher claims PENDING runs a few hundred ms before scheduled_at
+                    # (lookahead window), so a fast action can finish BEFORE its own
+                    # scheduled tick boundary. Using occurred_at alone in next_after()
+                    # (which has inclusive semantics) then re-spawns the SAME tick.
+                    # Clamping to prev_run.scheduled_at + 1µs guarantees we always
+                    # advance to a strictly later cron occurrence while preserving
+                    # the "skip missed ticks" behavior when occurred_at is well past
+                    # the scheduled tick (delayed-execution case).
+                    prev_run = (
+                        await session.execute(
+                            select(JobRun).where(
+                                JobRun.run_id == event.run_id,
+                                JobRun.job_id == job.job_id,
+                            )
+                        )
+                    ).scalar_one()
+                    anchor = max(
+                        event.occurred_at,
+                        prev_run.scheduled_at + timedelta(microseconds=1),
+                    )
+                    run_at = next_after(job.cron_expr, tz, anchor)
 
                     # Forbid-concurrency pre-check (ADR-016 addendum): skip spawn
                     # if a non-terminal run already exists for this job. Within the
