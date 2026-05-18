@@ -59,7 +59,7 @@ Internet → ALB (HTTPS / ACM cert)
 
 Parent PRD: [Issue #57 — W3 Deployment Surface](https://github.com/PaynePew/chatgpt_task/issues/57) · [`docs/PRD/deploy-w3.md`](docs/PRD/deploy-w3.md)
 
-The 7-layer acceptance gate (per [ADR-021](docs/adr/ADR-021-acceptance-gate-layering.md)):
+The 7-layer acceptance gate (per [`docs/PRD/deploy-w3.md` § D8](docs/PRD/deploy-w3.md); layering concept from [ADR-021](docs/adr/ADR-021-acceptance-gate-layering.md)):
 
 | Layer | Description | Status |
 |---|---|---|
