@@ -2,13 +2,128 @@
 
 MCP-based job scheduler exposing **5 tools / 3 resources / 2 prompts** backed by Postgres + SQS (ElasticMQ locally).
 
+## Live Demo
+
+**[https://scheduler.paynepew.dev](https://scheduler.paynepew.dev)**
+
+- `GET /healthz` — liveness check; returns HTTP 200 with DB connectivity confirmation
+- MCP Inspector: `MCP_USER_ID=demo MCP_USER_TZ=UTC npx @modelcontextprotocol/inspector https://scheduler.paynepew.dev/mcp`
+
+## Uptime Status
+
+**[https://status.paynepew.dev](https://status.paynepew.dev)** — live uptime track record, powered by [Better Stack](https://betterstack.com) (monitoring vendor per [ADR-031](docs/adr/ADR-031-monitoring-better-stack-over-uptimerobot.md)). Checks `GET /healthz` every 3 minutes.
+
+---
+
+## Deployment Architecture
+
+This project uses a **dual-target** deployment strategy that separates runtime from design artifact.
+
+**Runtime target (live now):** AWS Lightsail Tokyo ($5/mo, 2 GB RAM / 1 vCPU). Caddy 2 terminates TLS; five Python services + Postgres + ElasticMQ run as Docker containers, matching the local dev Compose shape. Every push to `main` triggers a GitHub Actions deploy: build → push to `ghcr.io` → SSH pull → migrate → smoke `curl /healthz`.
+
+**Design artifact (validated, not always-on):** AWS ECS Fargate / RDS PostgreSQL / ALB / SQS — fully Terraform-coded. Validated end-to-end via `validate-fargate.yml` (`workflow_dispatch`): apply → smoke → capture evidence → destroy. Bill < $5 per run, invoked once during W4 demo recording.
+
+**Why dual?** Always-on Fargate costs $1,400–1,700/year — not viable during a job search. The VPS costs $60/year and keeps the demo live. The Fargate Terraform module is verifiable by anyone with AWS credentials; the architecture is a portfolio artifact, not a marketing claim.
+
+```
+VPS path (live)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Internet → Cloudflare DNS
+         → Caddy 2 (auto-TLS, scheduler.paynepew.dev)
+         → docker compose (AWS Lightsail Tokyo, ~$5/mo)
+               ├── mcp-server   (HTTP + stdio MCP transports)
+               ├── watcher      (FOR UPDATE SKIP LOCKED poll)
+               ├── worker       (SQS consumer)
+               ├── recurring_watcher
+               └── chain_watcher
+                   + Postgres 16 + ElasticMQ (SQS-compatible)
+
+Fargate path (design artifact — Terraform-coded, validated once in W4)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Internet → ALB (HTTPS / ACM cert)
+         → ECS Fargate tasks (same 5 services, ~$117/mo idle)
+         → RDS PostgreSQL (private subnet)  + SQS (managed)
+```
+
+| | VPS (runtime) | Fargate (design artifact) |
+|---|---|---|
+| **Platform** | AWS Lightsail Tokyo | ECS Fargate / RDS / ALB / SQS |
+| **Monthly cost** | ~$5 | ~$117–145 idle |
+| **TLS** | Caddy auto-ACME | ACM + ALB |
+| **Data** | Postgres in container + R2 backup | RDS Multi-AZ-ready |
+| **Validated by** | Every CI/CD push | `validate-fargate.yml` (W4) |
+
+---
+
+## Roadmap
+
+Parent PRD: [Issue #57 — W3 Deployment Surface](https://github.com/PaynePew/chatgpt_task/issues/57) · [`docs/PRD/deploy-w3.md`](docs/PRD/deploy-w3.md)
+
+The 7-layer acceptance gate (per [ADR-021](docs/adr/ADR-021-acceptance-gate-layering.md)):
+
+| Layer | Description | Status |
+|---|---|---|
+| **L1** | Code green — all GH Actions workflows pass on `main`; `terraform plan` succeeds in PR | ✅ W3 |
+| **L2** | Local provision — fresh Lightsail instance → all services healthy via `bin/setup-vps.sh` | ✅ W3 |
+| **L3** | Live URL — `https://scheduler.paynepew.dev/healthz` returns 200 from external network; TLS valid | ✅ W3 |
+| **L4a** | Echo recurring (`* * * * *`) → ≥ 2 completed JobRuns after 5 min | ✅ W3 |
+| **L4b** | Chain A→B: both echo jobs complete; `chain_watcher` proved live | ✅ W3 |
+| **L5** | Better Stack ≥ 24h green; R2 nightly backup present; restore drill passes | ✅ W3 |
+| **L6** | Fargate evidence — `validate-fargate.yml` runs end-to-end; bill < $5 | ⬜ W4 |
+| **L7** | Demo video — 3-minute portfolio demo against live VPS + Fargate apply | ⬜ W4 |
+
+---
+
+## Cost Transparency
+
+Cost projection from [`docs/PRD/deploy-w3.md` § Cost projection](docs/PRD/deploy-w3.md):
+
+| Phase | Monthly (USD) |
+|---|---|
+| W3 idle (Lightsail $5 + R2 free + Better Stack free + Cloudflare DNS free + domain ~$1 prorated) | **~$6** |
+| Active deploys (GH Actions free on public repo; image pushes free) | $0 incremental |
+| W4 one-shot Fargate validation | < $5 per run, one-time |
+| **12-month projected (job search active)** | **~$70–80** |
+| Comparison: original always-on Fargate plan | $1,400–1,700 |
+
+---
+
+## Design Decisions (ADRs)
+
+All W3 design decisions are in [`docs/adr/`](docs/adr/). The W3 cohort (ADR-024 through ADR-031):
+
+| ADR | Decision |
+|---|---|
+| [ADR-024](docs/adr/ADR-024-tier-scoping-and-w3-cut-scope.md) | W3 tier scoping — what ships vs what's deferred |
+| [ADR-025](docs/adr/ADR-025-network-topology-w3-public-ecs-private-rds.md) | Network topology — public ECS tasks, private RDS, no NAT Gateway |
+| [ADR-026](docs/adr/ADR-026-ecs-service-topology-and-replica-count.md) | ECS service topology — 5 services, fixed replicas, worker autoscaling |
+| [ADR-027](docs/adr/ADR-027-deployment-target-pivot-vps-first-aws-as-design-artifact.md) | Deployment target pivot — VPS-first runtime, Fargate as design artifact |
+| [ADR-028](docs/adr/ADR-028-caddy-over-nginx-for-vps-reverse-proxy.md) | Caddy 2 over nginx — cert rotation + MCP plugin ecosystem forward-compat |
+| [ADR-029](docs/adr/ADR-029-vps-deployment-mechanics-ghcr-push-ssh-pull-containerized-data.md) | VPS deployment mechanics — build on GH Actions, push ghcr.io, SSH pull |
+| [ADR-030](docs/adr/ADR-030-vps-operational-concerns-backup-monitoring-fargate-validation.md) | Operational concerns — R2 backup, monitoring, one-shot Fargate validation |
+| [ADR-031](docs/adr/ADR-031-monitoring-better-stack-over-uptimerobot.md) | Monitoring vendor swap — Better Stack replaces UptimeRobot |
+
+---
+
+## Future Direction
+
+### `(D-32)` Caddy MCP composability
+
+The Caddy reverse proxy choice ([ADR-028](docs/adr/ADR-028-caddy-over-nginx-for-vps-reverse-proxy.md)) was made partly for forward-compatibility with the emerging Caddy MCP plugin ecosystem (`YawLabs/caddy-mcp`, `lum8rjack/caddy-mcp`). The `(D-32)` backlog item tracks the possibility of composing multiple MCP servers at the proxy layer — routing different MCP tool namespaces to different upstreams via Caddyfile — without application-layer changes. This positions the reverse proxy as a multi-MCP gateway rather than a simple pass-through.
+
+---
+
+## MCP surface
+
 Tools: `task.create.v1`, `task.list.v1`, `task.status.v1`, `task.cancel.v1`, `task.list_actions.v1`  
 Resources: `tasks://list`, `tasks://actions`, `tasks://job/{job_id}` (template)  
 Prompts: `daily_review`, `setup_summary`
 
 W2 bonus features: recurring (cron) jobs · job chaining · cancel semantics · MCP resources + prompts. See [`docs/PRD/bonus-w2.md`](docs/PRD/bonus-w2.md) for the full W2 design.
 
-## Quickstart
+---
+
+## Local Development
 
 ### Prerequisites
 
