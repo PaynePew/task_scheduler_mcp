@@ -12,3 +12,13 @@ output "dns_record_ip" {
   description = "IP address the A record resolves to."
   value       = cloudflare_record.scheduler.content
 }
+
+output "status_page_hostname" {
+  description = "Fully-qualified domain name of the Better Stack status page CNAME (ADR-031)."
+  value       = cloudflare_record.status.hostname
+}
+
+output "status_page_target" {
+  description = "CNAME target the status hostname resolves to (Better Stack edge)."
+  value       = cloudflare_record.status.content
+}

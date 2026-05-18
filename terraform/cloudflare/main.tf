@@ -14,3 +14,20 @@ resource "cloudflare_record" "scheduler" {
 
   comment = "scheduler.paynepew.dev → Lightsail Tokyo VPS (managed by terraform/cloudflare, ADR-028)"
 }
+
+# ADR-031: status.paynepew.dev → Better Stack status page custom domain.
+# proxied = false because Better Stack issues its own Let's Encrypt cert via
+# ACME against the CNAME target; Cloudflare proxying would replace the cert
+# and break custom-domain TLS. The 1-click Cloudflare authorize flow in the
+# Better Stack UI is deliberately bypassed — managing the record via IaC
+# keeps `terraform plan` as the single source of truth for DNS state.
+resource "cloudflare_record" "status" {
+  zone_id = data.cloudflare_zone.main.id
+  name    = "status"
+  type    = "CNAME"
+  content = "statuspage.betteruptime.com"
+  ttl     = 300
+  proxied = false
+
+  comment = "status.paynepew.dev → Better Stack status page (managed by terraform/cloudflare, ADR-031)"
+}
