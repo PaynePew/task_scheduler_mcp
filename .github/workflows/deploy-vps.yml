@@ -51,7 +51,7 @@ jobs:
           BS_TOKEN: ${{ secrets.BETTERSTACK_API_TOKEN }}
           MONITOR_ID: ${{ vars.BETTERSTACK_MONITOR_ID }}
         run: |
-          curl -fsS -X PATCH "https://uptime.betterstack.com/api/v3/monitors/$MONITOR_ID" \
+          curl -fsS -X PATCH "https://uptime.betterstack.com/api/v2/monitors/$MONITOR_ID" \
             -H "Authorization: Bearer $BS_TOKEN" \
             -H "Content-Type: application/json" \
             -d '{"paused": true}' > /dev/null
@@ -104,7 +104,7 @@ jobs:
           BS_TOKEN: ${{ secrets.BETTERSTACK_API_TOKEN }}
           MONITOR_ID: ${{ vars.BETTERSTACK_MONITOR_ID }}
         run: |
-          curl -fsS -X PATCH "https://uptime.betterstack.com/api/v3/monitors/$MONITOR_ID" \
+          curl -fsS -X PATCH "https://uptime.betterstack.com/api/v2/monitors/$MONITOR_ID" \
             -H "Authorization: Bearer $BS_TOKEN" \
             -H "Content-Type: application/json" \
             -d '{"paused": false}' > /dev/null
