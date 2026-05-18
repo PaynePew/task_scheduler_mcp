@@ -58,11 +58,22 @@ polished, which matters when the page is linked from the resume.
 ### Configuration
 
 - **Monitor**: HTTPS check `https://scheduler.paynepew.dev/healthz`, 3-min
-  interval, alert when 2 consecutive failures
-- **Alert contacts**: deciders' personal email + Slack incoming webhook
-  (`SLACK_WEBHOOK_URL` env var on the VPS; same webhook used by the W4
-  Action Sprint daily ops digest — dual-purpose channel preserved from
-  ADR-030)
+  interval, alert when downtime persists ≥ 5 min (Better Stack free-tier
+  ceiling; count-based thresholds not available on this plan — at 3-min
+  poll cadence this is equivalent to ~2 consecutive failures).
+- **Alert contacts**:
+  - **Email** — deciders' personal email (built-in Better Stack channel).
+  - **Slack** — Slack workspace OAuth app install, posting to
+    `#scheduler-alerts`. The original "incoming webhook + `SLACK_WEBHOOK_URL`
+    on the VPS, dual-purpose with the W4 daily ops digest" framing
+    (inherited from ADR-030 §B) was abandoned during W3-S06 implementation
+    in favour of the Slack-native OAuth flow Better Stack offers, which
+    is operationally simpler. `SLACK_WEBHOOK_URL` provisioning on the VPS
+    is therefore **deferred to W4** where the daily-digest consumer is
+    actually built — no point storing an unused secret. The W4 daily
+    digest will install its own incoming webhook independent of the
+    Better Stack OAuth app; both can coexist in the same Slack workspace
+    targeting the same channel.
 - **Public status page**: served at **`https://status.paynepew.dev`** via
   Cloudflare CNAME → `statuspage.betteruptime.com` (managed in
   `terraform/cloudflare/main.tf` as `cloudflare_record.status`, ADR-031);
@@ -109,8 +120,37 @@ headroom for the future R2-backup-age probe planned in ADR-030 § B
   state stays managed through `terraform plan` per the IaC discipline
   in commit `5ccff5d`.
 
+## Known operational gap — deploy-time false alerts
+
+`deploy-vps.yml` ends with `docker compose up -d --remove-orphans`, which
+recreates the `mcp-server` container whenever `IMAGE_TAG` changes
+(every push to `main`). The stop-old → start-new → Python boot + DB pool
+warmup sequence yields a ~10–30 s window where Caddy returns 502; this
+occasionally crosses two consecutive Better Stack polls and fires a false
+"down" alert. Empirical: ~96.6 % monitor uptime in the first 2 h of
+W3-S06 operation, with the noise cluster aligned to push timestamps.
+
+The free-tier 5-min duration ceiling on the alert threshold cannot tune
+the noise out — at 3-min poll cadence it is already ~2 consecutive
+failures, which the deploy window does cross.
+
+Resolution: tracked as **issue #77 (W3-S06b)** — pause the Better Stack
+monitor via API before the SSH deploy step and resume it after the smoke
+test (`if: always()` so a failed deploy doesn't silently mute the
+monitor). Pause is preferred over scheduled-maintenance windows because
+it is one PATCH each way and produces equivalent uptime accounting; MW
+gives nicer status-page wording but is not load-bearing for the
+portfolio narrative. The R2-backup-age probe planned above will need
+the same pause/resume wrapper when it lands.
+
+Out of scope for both this ADR and #77: rolling deploys with multiple
+`mcp-server` replicas + Caddy load balance. Revisit if zero-downtime
+becomes a portfolio requirement in W4+.
+
 ## References
 
 - Better Stack free tier: https://betterstack.com/uptime
+- Better Stack API (monitor pause/resume): https://betterstack.com/docs/uptime/api/monitors/
 - ADR-030 (this ADR partially supersedes § B)
 - Issue #65 — W3-S06 implementation slice
+- Issue #77 — W3-S06b deploy-time monitor pause (known operational gap)
