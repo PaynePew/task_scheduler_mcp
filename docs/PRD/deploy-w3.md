@@ -239,7 +239,7 @@ gunzip -c /tmp/scheduler-*.sql.gz | docker compose exec -T postgres psql -U post
 
 **B. Better Stack uptime monitoring** (ADR-031 — swapped from UptimeRobot)
 
-HTTPS check `https://scheduler.paynepew.dev/healthz` every 3 min (Better Stack free-tier minimum, tighter than UptimeRobot's 5-min). Alerts: email + Slack webhook (same webhook used by future daily ops digest). **Public status page** on `betteruptime.com` subdomain linked from README — treated as first-class portfolio artifact equivalent to GitHub stars.
+HTTPS check `https://scheduler.paynepew.dev/healthz` every 3 min (Better Stack free-tier minimum, tighter than UptimeRobot's 5-min). Alerts: email + Slack webhook (same webhook used by future daily ops digest). **Public status page at `https://status.paynepew.dev`** (Cloudflare CNAME → `statuspage.betteruptime.com`, managed in `terraform/cloudflare/main.tf`; Better Stack free-tier custom-domain support became available during the sprint — verified 2026-05-18) linked from README — treated as first-class portfolio artifact equivalent to GitHub stars.
 
 **C. One-shot Fargate validation workflow** (`.github/workflows/validate-fargate.yml`)
 
@@ -278,7 +278,7 @@ Rejected hardening additions: custom SSH port (security-through-obscurity), Tail
 | Module | Status | Purpose |
 |---|---|---|
 | `terraform/` (sub-modules: vpc, iam, rds, ecs, alb, sqs, ecr, logs) | New | Fargate design artifact, validated by L6 |
-| `terraform/cloudflare/` | New | DNS A record for `scheduler.paynepew.dev` → Lightsail static IP |
+| `terraform/cloudflare/` | New | DNS A record for `scheduler.paynepew.dev` → Lightsail static IP; CNAME for `status.paynepew.dev` → Better Stack edge (ADR-031) |
 | `bin/setup-vps.sh` | New | Idempotent VPS provisioning (Docker, Caddy, ufw, fail2ban, deploy user, systemd unit, R2 rclone config, pg-backup cron) |
 | `infra/vps/Caddyfile` | New | Reverse proxy config |
 | `infra/vps/docker-compose.yml` | New | VPS-flavored Compose (`image:` refs to ghcr.io, no `build:`) |

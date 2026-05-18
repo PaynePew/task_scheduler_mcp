@@ -45,7 +45,7 @@ the monitoring + status page provider in place of UptimeRobot.
 | Email alerts | ✅ | ✅ |
 | Slack webhook alerts | ✅ | ✅ |
 | Custom subdomain status page | paid tier | free tier (`<slug>.betteruptime.com`) |
-| Custom domain on status page | paid tier | paid tier (parity) |
+| Custom domain on status page | paid tier | free tier (verified 2026-05-18 — pricing moved during the W3 sprint) |
 | Reachable from deciders' network | ❌ (blocked) | ✅ |
 | Cost | $0/mo | $0/mo |
 
@@ -63,9 +63,17 @@ polished, which matters when the page is linked from the resume.
   (`SLACK_WEBHOOK_URL` env var on the VPS; same webhook used by the W4
   Action Sprint daily ops digest — dual-purpose channel preserved from
   ADR-030)
-- **Public status page**: subdomain on `betteruptime.com`; title
-  "ChatGPT Task Scheduler"; show 30/60/90-day uptime; linked from project
-  README + `paynepew.dev` landing page
+- **Public status page**: served at **`https://status.paynepew.dev`** via
+  Cloudflare CNAME → `statuspage.betteruptime.com` (managed in
+  `terraform/cloudflare/main.tf` as `cloudflare_record.status`, ADR-031);
+  title "ChatGPT Task Scheduler"; show 30/60/90-day uptime; linked from
+  project README + `paynepew.dev` landing page. Custom domain was selected
+  over the default `<slug>.betteruptime.com` subdomain because (a) Better
+  Stack's free-tier custom-domain support materialised during the sprint
+  (verified 2026-05-18) and (b) `status.paynepew.dev` lives under the same
+  brand as `scheduler.paynepew.dev`, reinforcing the portfolio narrative.
+  The CNAME is `proxied = false` so Better Stack's ACME issues a real
+  Let's Encrypt cert against the target rather than Cloudflare replacing it.
 
 ### Cost
 
@@ -91,7 +99,15 @@ headroom for the future R2-backup-age probe planned in ADR-030 § B
   for `"status":"fresh"`.
 - The `git_sha` correlation comment in `app/config/settings.py` is updated
   to name Better Stack instead of UptimeRobot.
-- Issue #65 (W3-S06) is retitled and rewritten to reference Better Stack.
+- Issue #65 (W3-S06) is retitled and rewritten to reference Better Stack;
+  the status page URL in the acceptance criteria is
+  `https://status.paynepew.dev` (not `<slug>.betteruptime.com`).
+- `terraform/cloudflare/main.tf` gains `cloudflare_record.status`
+  (CNAME `status` → `statuspage.betteruptime.com`, `proxied = false`,
+  TTL 300 to match the scheduler A record). The Better Stack
+  "1-click Cloudflare authorize" flow is deliberately bypassed — DNS
+  state stays managed through `terraform plan` per the IaC discipline
+  in commit `5ccff5d`.
 
 ## References
 
