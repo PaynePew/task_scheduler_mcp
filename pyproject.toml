@@ -26,6 +26,7 @@ dev = [
     "pytest-asyncio",
     "pytest-cov",
     "ruff",
+    "moto[s3]",
 ]
 
 [tool.pytest.ini_options]
