@@ -1,6 +1,6 @@
 services:
   mcp-server:
-    image: ghcr.io/paynepew/task_scheduler_mcp:${IMAGE_TAG:-latest}
+    image: ghcr.io/paynepew/chatgpt_task:${IMAGE_TAG:-latest}
     command: ["python", "-m", "app.entrypoints.mcp_http"]
     env_file: .env
     restart: unless-stopped
@@ -15,7 +15,7 @@ services:
       retries: 3
 
   watcher:
-    image: ghcr.io/paynepew/task_scheduler_mcp:${IMAGE_TAG:-latest}
+    image: ghcr.io/paynepew/chatgpt_task:${IMAGE_TAG:-latest}
     command: ["python", "-m", "app.entrypoints.watcher"]
     env_file: .env
     restart: unless-stopped
@@ -24,7 +24,7 @@ services:
         condition: service_completed_successfully
 
   worker:
-    image: ghcr.io/paynepew/task_scheduler_mcp:${IMAGE_TAG:-latest}
+    image: ghcr.io/paynepew/chatgpt_task:${IMAGE_TAG:-latest}
     command: ["python", "-m", "app.entrypoints.worker"]
     env_file: .env
     restart: unless-stopped
@@ -33,7 +33,7 @@ services:
         condition: service_completed_successfully
 
   recurring-watcher:
-    image: ghcr.io/paynepew/task_scheduler_mcp:${IMAGE_TAG:-latest}
+    image: ghcr.io/paynepew/chatgpt_task:${IMAGE_TAG:-latest}
     command: ["python", "-m", "app.entrypoints.recurring_watcher"]
     env_file: .env
     restart: unless-stopped
@@ -42,7 +42,7 @@ services:
         condition: service_completed_successfully
 
   chain-watcher:
-    image: ghcr.io/paynepew/task_scheduler_mcp:${IMAGE_TAG:-latest}
+    image: ghcr.io/paynepew/chatgpt_task:${IMAGE_TAG:-latest}
     command: ["python", "-m", "app.entrypoints.chain_watcher"]
     env_file: .env
     restart: unless-stopped
@@ -51,7 +51,7 @@ services:
         condition: service_completed_successfully
 
   migrate:
-    image: ghcr.io/paynepew/task_scheduler_mcp:${IMAGE_TAG:-latest}
+    image: ghcr.io/paynepew/chatgpt_task:${IMAGE_TAG:-latest}
     command: ["python", "-m", "app.entrypoints.migrate"]
     env_file: .env
     depends_on:

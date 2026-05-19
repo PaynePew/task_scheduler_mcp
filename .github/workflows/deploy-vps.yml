@@ -35,8 +35,8 @@ jobs:
           context: .
           push: true
           tags: |
-            ghcr.io/paynepew/task_scheduler_mcp:latest
-            ghcr.io/paynepew/task_scheduler_mcp:${{ github.sha }}
+            ghcr.io/paynepew/chatgpt_task:latest
+            ghcr.io/paynepew/chatgpt_task:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -75,7 +75,7 @@ jobs:
           script: |
             #!/usr/bin/env bash
             set -euo pipefail
-            cd /opt/task_scheduler_mcp
+            cd /opt/chatgpt_task
             export IMAGE_TAG=${{ github.sha }}
             docker compose pull
             docker compose run --rm migrate
