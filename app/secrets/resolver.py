@@ -34,10 +34,6 @@ class SecretResolutionError(Exception):
 
     retryable: bool = False
 
-    def __init__(self, message: str) -> None:
-        super().__init__(message)
-        self.retryable = False
-
 
 def build_effective_whitelist() -> frozenset[str]:
     """Merge DEFAULT_WHITELIST with ALLOWED_TEMPLATE_VARS env var."""
