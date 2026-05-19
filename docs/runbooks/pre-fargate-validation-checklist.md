@@ -173,10 +173,102 @@ aws ec2 describe-vpcs \
 
 ---
 
+## Automated checks added in W4-S13
+
+The workflow now includes the following automated gates — no manual action
+required for these, but understanding them helps diagnose failures.
+
+### `dry_mode` pre-flight (cost: $0)
+
+Before any live run, dispatch with **`dry_mode: true`**:
+
+1. Open `.github/workflows/validate-fargate.yml` → **Run workflow**.
+2. Check `dry_mode` → leave `duration_minutes` at default → click **Run
+   workflow**.
+3. The run will init + plan all 7 Terraform modules and upload a `tfplans`
+   artifact. It completes in < 5 min and incurs $0 in AWS charges.
+4. Inspect the plan output in the workflow logs. If any module shows a
+   Terraform syntax error, the run will fail before any resources are created.
+
+Use dry mode for any change to a Terraform module — it validates the change
+for free before you press the live button.
+
+### IAM key validity check
+
+Verify the OIDC credentials are still valid before a live run:
+
+```bash
+aws sts get-caller-identity
+```
+
+Confirm the returned ARN matches the
+`chatgpt-task-github-actions-fargate-validation` role. If the credentials
+are expired or the role is missing, the workflow will fail at step 2 (AWS
+auth) before any resources are created.
+
+### Prior-run cleanup check
+
+Confirm no lingering resources from a previous run:
+
+```bash
+# Check for tagged VPCs
+aws ec2 describe-vpcs \
+  --filters "Name=tag:Project,Values=chatgpt-task" \
+  --query 'Vpcs[*].VpcId' --output text
+
+# Check for tagged RDS instances
+aws rds describe-db-instances \
+  --filters "Name=tag:Project,Values=chatgpt-task" \
+  --query 'DBInstances[*].DBInstanceIdentifier' --output text
+
+# Check for orphaned resources via Resource Groups Tagging API
+aws resourcegroupstaggingapi get-resources \
+  --tag-filters Key=Project,Values=task-scheduler-mcp \
+  --query 'ResourceTagMappingList[*].ResourceARN' --output text
+```
+
+If any of these return non-empty output, run the manual cleanup steps in the
+**Roll-back plan** section above before dispatching again.
+
+### Post-apply sanity gates (automated)
+
+After `terraform apply` completes, the workflow automatically asserts:
+
+| Gate | Command | Assertion |
+|------|---------|-----------|
+| ECS | `aws ecs describe-services` | `runningCount == desiredCount` for all services |
+| ALB | `aws elbv2 describe-target-health` | all targets in `healthy` state |
+| RDS | `aws rds describe-db-instances` | DB instance status is `available` |
+
+Each gate fails fast with an explicit error message naming the failing
+assertion. If any gate fails, the smoke test is skipped but destroy still
+runs (the destroy steps use `if: always()`).
+
+### Expected vs actual cost reconciliation (post-run)
+
+After a live run completes, check AWS Cost Explorer to confirm actual spend:
+
+1. Navigate to **AWS Cost Explorer** → **Cost & usage**.
+2. Filter by tag `Project=chatgpt-task`, time range = today.
+3. Compare against the estimate in the **Cost guard-rails** section above.
+
+A 30-minute run should cost $0.50–$1.50. A result materially higher than $3
+suggests resources were not destroyed — check the orphan check step in the
+workflow logs and run the manual cleanup if needed.
+
+---
+
 ## Pre-dispatch sign-off
 
 All items above checked → open `.github/workflows/validate-fargate.yml` →
 **Run workflow** → set `duration_minutes` → click **Run workflow**.
+
+**Recommended pre-flight sequence:**
+
+1. Run with `dry_mode: true` — confirm plan succeeds, no Terraform errors.
+2. Confirm prior-run cleanup check is clean (commands above).
+3. Confirm AWS Budgets alerts are active.
+4. Run with `dry_mode: false`, `duration_minutes: 30`.
 
 Monitor the workflow run in GitHub Actions. The `fargate-validation-evidence`
 artifact (with `tf-outputs.json`, `ecs-services.json`, `rds.json`) is
