@@ -492,14 +492,14 @@ async def test_w2_bonuses(mcp_client, session_factory, sqs):
         )
 
         # ------------------------------------------------------------------
-        # Step 10: Resources — resources/list (2 static) + templates/list (1)
-        # = 3 total entries; resources/read tasks://list filters by caller.
+        # Step 10: Resources — resources/list (3 static) + templates/list (1)
+        # = 4 total entries (3 static → 4 after W4-S09 added tasks://recent-results).
         # ------------------------------------------------------------------
         resources = await _list_resources(client)
         templates = await _list_resource_templates(client)
         total_resource_entries = len(resources) + len(templates)
-        assert total_resource_entries == 3, (
-            f"step 10: expected 3 resource entries (resources + templates), got "
+        assert total_resource_entries == 4, (
+            f"step 10: expected 4 resource entries (resources + templates), got "
             f"{len(resources)} resources + {len(templates)} templates = {total_resource_entries}"
         )
         resource_uris = {r["uri"] for r in resources}
@@ -508,6 +508,9 @@ async def test_w2_bonuses(mcp_client, session_factory, sqs):
         )
         assert "tasks://actions" in resource_uris, (
             f"step 10: tasks://actions not in resources: {resource_uris}"
+        )
+        assert "tasks://recent-results" in resource_uris, (
+            f"step 10: tasks://recent-results not in resources: {resource_uris}"
         )
         assert any("job" in t.get("uriTemplate", "") for t in templates), (
             f"step 10: job template missing from resourceTemplates: {templates}"

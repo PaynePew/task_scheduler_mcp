@@ -1,4 +1,6 @@
-"""Integration tests for MCP resources R1 (tasks://list), R2 (tasks://job/{id}), R3 (tasks://actions), R4 (tasks://recent-results).
+"""Integration tests for MCP resources R1–R4.
+
+Resources: tasks://list, tasks://job/{id}, tasks://actions, tasks://recent-results.
 
 Run with:
     uv run pytest -m integration tests/integration/test_resources.py
@@ -459,8 +461,9 @@ async def test_recent_results_cap_at_50(session_factory):
 
 def test_resources_list_has_four_entries():
     """resources/list returns 4 entries after adding tasks://recent-results."""
-    from app.mcp.server import create_server
     import mcp.types as mcp_types
+
+    from app.mcp.server import create_server
 
     server = create_server(user_id="r4-reg-user")
     assert mcp_types.ListResourcesRequest in server.request_handlers

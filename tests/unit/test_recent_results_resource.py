@@ -10,8 +10,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app.mcp.resources.recent_results import (
-    _TERMINAL_STATUSES,
     _MAX_ROWS,
+    _TERMINAL_STATUSES,
     read_tasks_recent_results,
 )
 
@@ -79,8 +79,9 @@ async def test_single_run_correct_shape(mock_query):
     """A single terminal run is serialised with the required fields."""
     finish = datetime(2026, 5, 19, 10, 0, 0, tzinfo=UTC)
     start = datetime(2026, 5, 19, 9, 55, 0, tzinfo=UTC)
-    row = _make_row(run_id=42, job_id=7, status="SUCCEEDED", action="echo",
-                    start_at=start, finish_at=finish)
+    row = _make_row(
+        run_id=42, job_id=7, status="SUCCEEDED", action="echo", start_at=start, finish_at=finish
+    )
     mock_query.return_value = [row]
 
     contents = await read_tasks_recent_results("user-1")
@@ -275,4 +276,6 @@ async def test_cutoff_is_24h_before_queried_at(mock_query):
     after = datetime.now(tz=UTC)
 
     cutoff = mock_query.call_args.kwargs["cutoff"]
-    assert before - timedelta(hours=24, seconds=1) < cutoff < after - timedelta(hours=24) + timedelta(seconds=1)
+    lower = before - timedelta(hours=24, seconds=1)
+    upper = after - timedelta(hours=24) + timedelta(seconds=1)
+    assert lower < cutoff < upper
