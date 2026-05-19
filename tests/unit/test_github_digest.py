@@ -272,7 +272,7 @@ async def test_error_403_rate_limited_is_retryable():
 
     assert result.ok is False
     assert result.retryable is True
-    assert "rate-limited" in (result.error or "").lower() or "rate" in (result.error or "").lower()
+    assert "rate-limited" in (result.error or "").lower()
 
 
 @pytest.mark.asyncio
