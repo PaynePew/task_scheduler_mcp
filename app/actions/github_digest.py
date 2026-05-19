@@ -176,7 +176,7 @@ class GitHubDigestHandler:
             items = resp.json()
             open_count += len(items)
             for pr in items:
-                updated_at = datetime.fromisoformat(pr["updated_at"].replace("Z", "+00:00"))
+                updated_at = datetime.fromisoformat(pr["updated_at"])
                 age = now - updated_at
                 if age >= stale_threshold:
                     stuck.append(
