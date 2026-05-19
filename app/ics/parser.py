@@ -162,11 +162,7 @@ def _expand_rrule(
     range_end: datetime.datetime,
 ) -> list[datetime.datetime]:
     """Expand RRULE within range, respecting EXDATE exclusions."""
-    rrule_prop = component.get("RRULE")
-    if rrule_prop is None:
-        return [dtstart]
-
-    rrule_text = "RRULE:" + rrule_prop.to_ical().decode()
+    rrule_text = "RRULE:" + component["RRULE"].to_ical().decode()
 
     try:
         rule = rrulestr(
@@ -187,10 +183,8 @@ def _expand_rrule(
             for d in exd.dts:
                 exdates.add(_to_aware_datetime(d.dt))
 
-    occurrences = [
-        occ.replace(tzinfo=_UTC) if occ.tzinfo is None else occ.astimezone(_UTC)
+    return [
+        _to_aware_datetime(occ)
         for occ in rule.between(range_start, range_end, inc=True)
         if _to_aware_datetime(occ) not in exdates
     ]
-
-    return occurrences
