@@ -21,8 +21,8 @@ set -uo pipefail
 HOST="${VPS_HOST:-scheduler.paynepew.dev}"
 USER="${VPS_USER:-deploy}"
 PORT="${VPS_PORT:-22}"
-DEPLOY_DIR="${DEPLOY_DIR:-/opt/chatgpt_task}"
-IMAGE="${IMAGE:-ghcr.io/paynepew/chatgpt_task:latest}"
+DEPLOY_DIR="${DEPLOY_DIR:-/opt/task_scheduler_mcp}"
+IMAGE="${IMAGE:-ghcr.io/paynepew/task_scheduler_mcp:latest}"
 
 KEY_FILE="${1:-}"
 
@@ -44,8 +44,8 @@ if [[ -z "$KEY_FILE" ]]; then
     echo "  VPS_HOST       (default: scheduler.paynepew.dev)" >&2
     echo "  VPS_USER       (default: deploy)" >&2
     echo "  VPS_PORT       (default: 22)" >&2
-    echo "  DEPLOY_DIR     (default: /opt/chatgpt_task)" >&2
-    echo "  IMAGE          (default: ghcr.io/paynepew/chatgpt_task:latest)" >&2
+    echo "  DEPLOY_DIR     (default: /opt/task_scheduler_mcp)" >&2
+    echo "  IMAGE          (default: ghcr.io/paynepew/task_scheduler_mcp:latest)" >&2
     exit 1
 fi
 
@@ -149,7 +149,7 @@ if ! $SSH_CMD "docker pull $IMAGE" >/dev/null 2>&1; then
     fail "Cannot pull $IMAGE on VPS"
     hint "Check the package's visibility: github.com/users/<owner>/packages/container/<name>"
     hint "Should be Public, OR deploy user must 'docker login ghcr.io' with PAT"
-    hint "Also check 'Manage Actions access' on the package: link to PaynePew/chatgpt_task"
+    hint "Also check 'Manage Actions access' on the package: link to PaynePew/task_scheduler_mcp"
     exit 10
 fi
 pass "$IMAGE pullable on VPS"
