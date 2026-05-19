@@ -17,10 +17,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 import pytest_asyncio
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker
-
-from sqlalchemy import select
 
 from app.db.engine import create_async_engine
 from app.db.models import Job, JobRun
