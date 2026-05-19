@@ -173,7 +173,7 @@ async def test_upstream_reader_error_message(session_factory):
             payload = await read_upstream(run_id=run.run_id, session=session)
 
     assert isinstance(payload, UpstreamError)
-    assert "upstream failed" in payload.message
+    assert "upstream failed" in payload.error_msg
 
 
 # ---------------------------------------------------------------------------
