@@ -10,8 +10,10 @@ Run with:
 from __future__ import annotations
 
 import email
+import os
 import socket
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 from aiosmtpd.controller import Controller
@@ -84,9 +86,7 @@ async def test_email_send_end_to_end_single_recipient(smtp_server):
         body="Hello from email_send integration test",
     )
 
-    import os
-
-    with __import__("unittest.mock", fromlist=["patch"]).patch.dict(os.environ, _env(host, port)):
+    with patch.dict(os.environ, _env(host, port)):
         result = await handler.execute(run=None, params=params)
 
     assert result.ok is True, f"Expected ok=True, got error={result.error}"
@@ -113,9 +113,7 @@ async def test_email_send_end_to_end_multi_recipient(smtp_server):
         body="Group message",
     )
 
-    import os
-
-    with __import__("unittest.mock", fromlist=["patch"]).patch.dict(os.environ, _env(host, port)):
+    with patch.dict(os.environ, _env(host, port)):
         result = await handler.execute(run=None, params=params)
 
     assert result.ok is True
@@ -135,9 +133,7 @@ async def test_email_send_subject_appears_in_message(smtp_server):
         body="body text",
     )
 
-    import os
-
-    with __import__("unittest.mock", fromlist=["patch"]).patch.dict(os.environ, _env(host, port)):
+    with patch.dict(os.environ, _env(host, port)):
         result = await handler.execute(run=None, params=params)
 
     assert result.ok is True
