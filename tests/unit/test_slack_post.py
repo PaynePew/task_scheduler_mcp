@@ -292,8 +292,13 @@ async def test_slack_post_resolves_webhook_url_via_env():
 # ---------------------------------------------------------------------------
 
 
-def _make_mock_session_factory(upstream_payload: object) -> Any:
-    """Build a session factory that makes read_upstream return *upstream_payload*."""
+def _make_mock_session_factory() -> Any:
+    """Mock async_session_factory whose session no-ops .begin() / context exit.
+
+    The handler reads upstream via ``read_upstream``, which each test patches
+    separately — this helper only needs to satisfy the ``async with factory()``
+    and ``async with session.begin()`` shape.
+    """
     mock_session = AsyncMock()
     mock_session.begin = MagicMock(return_value=mock_session)
     mock_session.__aenter__ = AsyncMock(return_value=mock_session)
@@ -303,14 +308,13 @@ def _make_mock_session_factory(upstream_payload: object) -> Any:
     mock_factory_ctx.__aenter__ = AsyncMock(return_value=mock_session)
     mock_factory_ctx.__aexit__ = AsyncMock(return_value=None)
 
-    mock_factory = MagicMock(return_value=mock_factory_ctx)
-    return mock_factory, mock_session
+    return MagicMock(return_value=mock_factory_ctx)
 
 
 @pytest.mark.asyncio
 async def test_from_run_id_ok_raw_template():
     data = {"summary": "5 issues closed"}
-    mock_factory, mock_session = _make_mock_session_factory(Ok(data=data))
+    mock_factory = _make_mock_session_factory()
 
     with patch("app.actions.slack_post.read_upstream", AsyncMock(return_value=Ok(data=data))):
         with patch.dict("os.environ", {"SLACK_WEBHOOK_URL": "https://hooks.slack.com/test"}):
@@ -325,7 +329,7 @@ async def test_from_run_id_ok_raw_template():
 @pytest.mark.asyncio
 async def test_from_run_id_upstream_error_raw_template():
     payload = UpstreamError(error_msg="upstream failed")
-    mock_factory, _ = _make_mock_session_factory(payload)
+    mock_factory = _make_mock_session_factory()
 
     with patch("app.actions.slack_post.read_upstream", AsyncMock(return_value=payload)):
         with patch.dict("os.environ", {"SLACK_WEBHOOK_URL": "https://hooks.slack.com/test"}):
@@ -340,7 +344,7 @@ async def test_from_run_id_upstream_error_raw_template():
 @pytest.mark.asyncio
 async def test_from_run_id_no_result_digest_v1():
     payload = NoResult()
-    mock_factory, _ = _make_mock_session_factory(payload)
+    mock_factory = _make_mock_session_factory()
 
     with patch("app.actions.slack_post.read_upstream", AsyncMock(return_value=payload)):
         with patch.dict("os.environ", {"SLACK_WEBHOOK_URL": "https://hooks.slack.com/test"}):
@@ -357,7 +361,7 @@ async def test_from_run_id_no_result_digest_v1():
 @pytest.mark.asyncio
 async def test_from_run_id_invalid_json_interview_brief():
     payload = InvalidJson(raw='{"bad": }')
-    mock_factory, _ = _make_mock_session_factory(payload)
+    mock_factory = _make_mock_session_factory()
 
     with patch("app.actions.slack_post.read_upstream", AsyncMock(return_value=payload)):
         with patch.dict("os.environ", {"SLACK_WEBHOOK_URL": "https://hooks.slack.com/test"}):
@@ -379,7 +383,7 @@ async def test_from_run_id_invalid_json_interview_brief():
 @pytest.mark.asyncio
 async def test_digest_v1_ok_path_formats_data():
     data = {"PRs": 3, "Issues": 7}
-    mock_factory, _ = _make_mock_session_factory(Ok(data=data))
+    mock_factory = _make_mock_session_factory()
     posted_payloads: list[dict] = []
 
     async def capture_post(url: str, **kwargs: object) -> httpx.Response:
@@ -411,7 +415,7 @@ async def test_digest_v1_ok_path_formats_data():
 @pytest.mark.asyncio
 async def test_digest_v1_error_path_shows_warning():
     payload = UpstreamError(error_msg="github rate limited")
-    mock_factory, _ = _make_mock_session_factory(payload)
+    mock_factory = _make_mock_session_factory()
     posted_payloads: list[dict] = []
 
     async def capture_post(url: str, **kwargs: object) -> httpx.Response:
@@ -442,7 +446,7 @@ async def test_digest_v1_error_path_shows_warning():
 @pytest.mark.asyncio
 async def test_interview_brief_ok_path_formats_data():
     data = {"Candidate": "Alice", "Role": "SWE"}
-    mock_factory, _ = _make_mock_session_factory(Ok(data=data))
+    mock_factory = _make_mock_session_factory()
     posted_payloads: list[dict] = []
 
     async def capture_post(url: str, **kwargs: object) -> httpx.Response:
@@ -473,7 +477,7 @@ async def test_interview_brief_ok_path_formats_data():
 @pytest.mark.asyncio
 async def test_interview_brief_error_path_shows_warning():
     payload = UpstreamError(error_msg="calendar unavailable")
-    mock_factory, _ = _make_mock_session_factory(payload)
+    mock_factory = _make_mock_session_factory()
     posted_payloads: list[dict] = []
 
     async def capture_post(url: str, **kwargs: object) -> httpx.Response:
@@ -504,7 +508,7 @@ async def test_interview_brief_error_path_shows_warning():
 @pytest.mark.asyncio
 async def test_raw_ok_path():
     data = "raw upstream text"
-    mock_factory, _ = _make_mock_session_factory(Ok(data=data))
+    mock_factory = _make_mock_session_factory()
     posted_payloads: list[dict] = []
 
     async def capture_post(url: str, **kwargs: object) -> httpx.Response:
@@ -532,7 +536,7 @@ async def test_raw_ok_path():
 @pytest.mark.asyncio
 async def test_raw_error_path():
     payload = UpstreamError(error_msg="timeout error")
-    mock_factory, _ = _make_mock_session_factory(payload)
+    mock_factory = _make_mock_session_factory()
     posted_payloads: list[dict] = []
 
     async def capture_post(url: str, **kwargs: object) -> httpx.Response:
