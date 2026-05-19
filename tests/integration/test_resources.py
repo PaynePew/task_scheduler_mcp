@@ -1,4 +1,4 @@
-"""Integration tests for MCP resources R1 (tasks://list), R2 (tasks://job/{id}), R3 (tasks://actions).
+"""Integration tests for MCP resources R1 (tasks://list), R2 (tasks://job/{id}), R3 (tasks://actions), R4 (tasks://recent-results).
 
 Run with:
     uv run pytest -m integration tests/integration/test_resources.py
@@ -7,6 +7,7 @@ Run with:
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 
 import pytest
 import pytest_asyncio
@@ -21,6 +22,7 @@ from app.domain.jobs import create_job
 from app.mcp.resources.actions_resource import read_tasks_actions
 from app.mcp.resources.job_resource import read_tasks_job
 from app.mcp.resources.list_resource import read_tasks_list
+from app.mcp.resources.recent_results import read_tasks_recent_results
 
 _AnyUrl = TypeAdapter(AnyUrl)
 
@@ -272,3 +274,193 @@ def test_tools_still_registered():
     import mcp.types as mcp_types
 
     assert mcp_types.ListToolsRequest in server.request_handlers
+
+
+# ---------------------------------------------------------------------------
+# R4: tasks://recent-results helpers
+# ---------------------------------------------------------------------------
+
+
+async def _seed_terminal_run(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    user_id: str,
+    status: str,
+    finish_at: datetime,
+    idempotency_key: str | None = None,
+) -> tuple[int, int]:
+    """Create a job + run, then force the run's status and finish_at.
+
+    Returns (job_id, run_id).
+    """
+    job = await _make_job(factory, user_id=user_id, idempotency_key=idempotency_key)
+    async with factory() as session:
+        async with session.begin():
+            await session.execute(
+                update(JobRun)
+                .where(JobRun.job_id == job.job_id)
+                .values(status=status, finish_at=finish_at)
+            )
+        run_row = await session.execute(
+            text("SELECT run_id FROM job_runs WHERE job_id = :jid LIMIT 1"),
+            {"jid": job.job_id},
+        )
+        run_id = run_row.scalar_one()
+    return job.job_id, run_id
+
+
+# ---------------------------------------------------------------------------
+# R4: tasks://recent-results — integration tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+async def test_recent_results_empty_when_no_runs(session_factory):
+    """R4 returns empty runs list when user has no terminal runs in the last 24h."""
+    contents = await read_tasks_recent_results("r4-no-runs", session_factory=session_factory)
+    payload = json.loads(contents[0].content)
+
+    assert payload["user_id"] == "r4-no-runs"
+    assert payload["window_hours"] == 24
+    assert payload["runs"] == []
+    assert "queried_at" in payload
+
+
+@pytest.mark.integration
+async def test_recent_results_returns_terminal_run(session_factory):
+    """R4 returns a recently-completed run with the expected JSON shape."""
+    finish = datetime.now(tz=UTC) - timedelta(hours=1)
+    job_id, run_id = await _seed_terminal_run(
+        session_factory,
+        user_id="r4-one",
+        status="SUCCEEDED",
+        finish_at=finish,
+    )
+
+    contents = await read_tasks_recent_results("r4-one", session_factory=session_factory)
+    payload = json.loads(contents[0].content)
+
+    assert len(payload["runs"]) == 1
+    run = payload["runs"][0]
+    assert run["job_id"] == job_id
+    assert run["run_id"] == run_id
+    assert run["action"] == "echo"
+    assert run["status"] == "completed"
+    assert "start_at" in run
+    assert "finish_at" in run
+    assert "error_excerpt" in run
+    assert contents[0].mime_type == "application/json"
+
+
+@pytest.mark.integration
+async def test_recent_results_excludes_old_runs(session_factory):
+    """R4 excludes runs with finish_at older than 24h."""
+    old_finish = datetime.now(tz=UTC) - timedelta(hours=25)
+    await _seed_terminal_run(
+        session_factory,
+        user_id="r4-old",
+        status="SUCCEEDED",
+        finish_at=old_finish,
+    )
+
+    contents = await read_tasks_recent_results("r4-old", session_factory=session_factory)
+    payload = json.loads(contents[0].content)
+
+    assert payload["runs"] == []
+
+
+@pytest.mark.integration
+async def test_recent_results_status_filtering(session_factory):
+    """R4 only returns SUCCEEDED, FAILED, and CANCELLED runs — not PENDING/RUNNING."""
+    now = datetime.now(tz=UTC)
+    # Seed one of each terminal status
+    for i, status in enumerate(["SUCCEEDED", "FAILED", "CANCELLED"]):
+        await _seed_terminal_run(
+            session_factory,
+            user_id="r4-filter",
+            status=status,
+            finish_at=now - timedelta(minutes=i + 1),
+            idempotency_key=f"r4-filter-{i}",
+        )
+    # Seed a PENDING run (should not appear — no finish_at)
+    await _make_job(session_factory, user_id="r4-filter", idempotency_key="r4-filter-pending")
+
+    contents = await read_tasks_recent_results("r4-filter", session_factory=session_factory)
+    payload = json.loads(contents[0].content)
+
+    returned_statuses = {r["status"] for r in payload["runs"]}
+    assert returned_statuses == {"completed", "failed", "cancelled"}
+    # Verify PENDING is absent
+    assert "scheduled" not in returned_statuses
+
+
+@pytest.mark.integration
+async def test_recent_results_user_scoping(session_factory):
+    """R4 never returns runs belonging to a different user."""
+    finish = datetime.now(tz=UTC) - timedelta(hours=1)
+    other_job_id, _ = await _seed_terminal_run(
+        session_factory,
+        user_id="r4-other-user",
+        status="SUCCEEDED",
+        finish_at=finish,
+    )
+
+    contents = await read_tasks_recent_results("r4-caller", session_factory=session_factory)
+    payload = json.loads(contents[0].content)
+
+    returned_job_ids = {r["job_id"] for r in payload["runs"]}
+    assert other_job_id not in returned_job_ids
+
+
+@pytest.mark.integration
+async def test_recent_results_ordering_newest_first(session_factory):
+    """R4 returns runs ordered by finish_at DESC (newest first)."""
+    now = datetime.now(tz=UTC)
+    finishes = [now - timedelta(hours=h) for h in (3, 1, 5, 2)]
+    for i, finish in enumerate(finishes):
+        await _seed_terminal_run(
+            session_factory,
+            user_id="r4-order",
+            status="SUCCEEDED",
+            finish_at=finish,
+            idempotency_key=f"r4-order-{i}",
+        )
+
+    contents = await read_tasks_recent_results("r4-order", session_factory=session_factory)
+    payload = json.loads(contents[0].content)
+
+    finish_times = [r["finish_at"] for r in payload["runs"]]
+    assert finish_times == sorted(finish_times, reverse=True)
+
+
+@pytest.mark.integration
+async def test_recent_results_cap_at_50(session_factory):
+    """R4 returns at most 50 runs even when more exist."""
+    finish = datetime.now(tz=UTC) - timedelta(hours=1)
+    for i in range(55):
+        await _seed_terminal_run(
+            session_factory,
+            user_id="r4-cap",
+            status="SUCCEEDED",
+            finish_at=finish - timedelta(minutes=i),
+            idempotency_key=f"r4-cap-{i}",
+        )
+
+    contents = await read_tasks_recent_results("r4-cap", session_factory=session_factory)
+    payload = json.loads(contents[0].content)
+
+    assert len(payload["runs"]) == 50
+
+
+# ---------------------------------------------------------------------------
+# R4: resources/list now shows 4 entries
+# ---------------------------------------------------------------------------
+
+
+def test_resources_list_has_four_entries():
+    """resources/list returns 4 entries after adding tasks://recent-results."""
+    from app.mcp.server import create_server
+    import mcp.types as mcp_types
+
+    server = create_server(user_id="r4-reg-user")
+    assert mcp_types.ListResourcesRequest in server.request_handlers
