@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any, ClassVar
 
 import httpx
 from pydantic import BaseModel
 
 from app.actions.base import ActionResult
+from app.secrets.resolver import SecretResolutionError, _build_effective_whitelist, resolve
 
 MAX_RESPONSE_BYTES = 2048  # 2 KB
 
@@ -30,17 +32,26 @@ class HttpCallHandler:
     timeout_seconds: ClassVar[int] = 30
 
     async def execute(self, run: Any, params: HttpCallParams) -> ActionResult:
+        whitelist = _build_effective_whitelist()
+        env = dict(os.environ)
+        try:
+            resolved_headers = resolve(params.headers, env, whitelist)
+            resolved_url = resolve(params.url, env, whitelist)
+            resolved_body = resolve(params.body, env, whitelist)
+        except SecretResolutionError as exc:
+            return ActionResult(ok=False, result=None, error=str(exc), retryable=False)
+
         try:
             async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
                 kwargs: dict[str, Any] = {
                     "method": params.method,
-                    "url": params.url,
-                    "headers": params.headers or {},
+                    "url": resolved_url,
+                    "headers": resolved_headers or {},
                 }
-                if isinstance(params.body, dict):
-                    kwargs["json"] = params.body
-                elif isinstance(params.body, str):
-                    kwargs["content"] = params.body.encode("utf-8")
+                if isinstance(resolved_body, dict):
+                    kwargs["json"] = resolved_body
+                elif isinstance(resolved_body, str):
+                    kwargs["content"] = resolved_body.encode("utf-8")
 
                 response = await client.request(**kwargs)
         except httpx.RequestError as exc:
