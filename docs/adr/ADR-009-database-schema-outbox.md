@@ -40,3 +40,40 @@ We deliberately **do not** physically partition `jobs` by `user_id`. At prototyp
 - Schema includes W2 bonus columns (`cron_expr`, `trigger_on_job_id`, `trigger_on_status`, `raw_user_input`, `parsing_metadata`) from day 1 to avoid W2 migration churn.
 - W1 partitioning via column-only means watcher queries are still O(log n) within the current `time_bucket`; W2 native partitioning makes pruning explicit.
 - Full schema lives in `.doc/learn/system-design.md` § 7.4 — this ADR records *why*, not the column list.
+
+## Event flow (D3)
+
+Sequence from task creation through chained downstream dispatch:
+
+```mermaid
+sequenceDiagram
+    participant LLM as LLM Client
+    participant MCP as MCP Server
+    participant DB as Postgres
+    participant W as Watcher
+    participant Q as SQS / ElasticMQ
+    participant WK as Worker
+    participant AH as ActionHandler
+    participant CW as ChainWatcher
+
+    LLM->>MCP: task.create.v1(action, params, schedule)
+    MCP->>DB: INSERT jobs + job_runs (status=PENDING)
+    MCP-->>LLM: {job_id}
+
+    W->>DB: SELECT FOR UPDATE SKIP LOCKED (due runs)
+    DB-->>W: job_run row
+    W->>Q: SendMessage(run_id)
+    W->>DB: UPDATE job_runs SET status=QUEUED
+
+    WK->>Q: ReceiveMessage
+    WK->>DB: UPDATE job_runs SET status=RUNNING (claim-and-mark)
+    WK->>AH: execute(run, params)
+    AH-->>WK: ActionResult {ok, result}
+    WK->>DB: UPDATE job_runs SET status=SUCCEEDED
+    WK->>DB: INSERT run_events (type=TERMINAL, same txn)
+
+    CW->>DB: SELECT run_events WHERE NOT processed_by ChainWatcher
+    DB-->>CW: terminal event for completed run
+    CW->>DB: UPDATE job_runs SET status=PENDING (downstream WAITING run)
+    CW->>DB: UPDATE run_events.processed_by (mark consumed)
+```

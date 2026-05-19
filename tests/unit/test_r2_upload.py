@@ -418,15 +418,16 @@ def test_r2_upload_registered_in_registry():
     assert isinstance(ACTION_REGISTRY["r2_upload"], R2UploadHandler)
 
 
-def test_registry_has_six_actions():
-    """task.list_actions.v1 now exposes 6 actions."""
-    assert len(ACTION_REGISTRY) == 6
+def test_registry_has_seven_actions():
+    """task.list_actions.v1 now exposes 7 actions."""
+    assert len(ACTION_REGISTRY) == 7
     expected = {
         "echo",
         "http_call",
         "calendar_digest_ics",
         "slack_post",
         "github_digest",
+        "email_send",
         "r2_upload",
     }
     assert set(ACTION_REGISTRY.keys()) == expected
