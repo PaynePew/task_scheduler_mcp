@@ -169,7 +169,8 @@ async def test_pr_stale_days_filter_identifies_stale_prs():
         result = await handler.execute(run=None, params=params)
 
     assert result.ok is True
-    stuck = result.result["prs"]["stuck"]  # type: ignore[index]
+    assert result.result is not None
+    stuck = result.result["prs"]["stuck"]
     stuck_numbers = [p["number"] for p in stuck]
     assert 10 in stuck_numbers
     assert 11 not in stuck_numbers
@@ -193,7 +194,8 @@ async def test_pr_stale_days_boundary_zero_means_all_stuck():
         result = await handler.execute(run=None, params=params)
 
     assert result.ok is True
-    assert any(p["number"] == 5 for p in result.result["prs"]["stuck"])  # type: ignore[index]
+    assert result.result is not None
+    assert any(p["number"] == 5 for p in result.result["prs"]["stuck"])
 
 
 # ---------------------------------------------------------------------------
@@ -222,7 +224,8 @@ async def test_pr_items_in_issues_endpoint_are_filtered_out():
         result = await handler.execute(run=None, params=params)
 
     assert result.ok is True
-    label_numbers = [i["number"] for i in result.result["labels"]["bug"]]  # type: ignore[index]
+    assert result.result is not None
+    label_numbers = [i["number"] for i in result.result["labels"]["bug"]]
     assert 1 in label_numbers
     assert 2 not in label_numbers
 
