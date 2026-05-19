@@ -1,0 +1,144 @@
+:root {
+  --bg: #ffffff;
+  --fg: #111111;
+  --muted: #555555;
+  --accent: #0066cc;
+  --accent-hover: #0052a3;
+  --btn-secondary-bg: #f0f0f0;
+  --btn-secondary-hover: #dcdcdc;
+  --border: #dddddd;
+  --footer-bg: #f8f8f8;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f1117;
+    --fg: #e8e8e8;
+    --muted: #999999;
+    --accent: #4da3ff;
+    --accent-hover: #78b8ff;
+    --btn-secondary-bg: #1e2230;
+    --btn-secondary-hover: #2a3145;
+    --border: #2a2d3a;
+    --footer-bg: #0a0c12;
+  }
+}
+
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  background: var(--bg);
+  color: var(--fg);
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  line-height: 1.6;
+}
+
+main {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2rem 1rem;
+}
+
+.hero {
+  max-width: 640px;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1.25rem;
+  text-align: center;
+}
+
+.hero-gif {
+  max-width: 100%;
+  height: auto;
+  max-height: 320px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+}
+
+h1 {
+  font-size: clamp(1.6rem, 5vw, 2.4rem);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.tagline {
+  font-size: clamp(0.95rem, 2.5vw, 1.1rem);
+  color: var(--muted);
+  max-width: 480px;
+}
+
+.ctas {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  justify-content: center;
+  margin-top: 0.5rem;
+}
+
+.btn {
+  display: inline-block;
+  padding: 0.6rem 1.4rem;
+  border-radius: 6px;
+  font-size: 0.95rem;
+  font-weight: 500;
+  text-decoration: none;
+  background: var(--btn-secondary-bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.btn:hover {
+  background: var(--btn-secondary-hover);
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: #ffffff;
+  border-color: var(--accent);
+}
+
+.btn-primary:hover {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+footer {
+  padding: 1rem;
+  background: var(--footer-bg);
+  border-top: 1px solid var(--border);
+  text-align: center;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+footer a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+footer a:hover {
+  text-decoration: underline;
+}
+
+@media (max-width: 480px) {
+  .ctas {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .btn {
+    text-align: center;
+  }
+}
