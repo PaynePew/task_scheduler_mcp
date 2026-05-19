@@ -77,6 +77,11 @@ Mapping happens at the MCP handler boundary. DB keeps the precise truth; LLM get
 - **`lookahead window`** — the 5-minute future horizon the Watcher considers due. Matches SQS `DelaySeconds` max for our use case.
 - **`heartbeat`** — every 30 seconds while a long action runs, the Worker calls `ChangeMessageVisibility` to extend SQS visibility. On crash, the timeout expires and the message becomes visible to another worker.
 
+### Chain-fed handlers and the inter-handler data plane
+
+- **`chain-fed handler`** — an `ActionHandler` whose `params_model` includes the optional field `from_run_id: int | None`. When `from_run_id` is non-null at execution time, the handler reads the upstream `JobRun.result` as its primary input instead of (or in addition to) its own params. See ADR-033.
+- **`inter-handler data plane`** — the column `JobRun.result` (a JSON string) is the data carrier between chained handlers. The upstream handler serializes its output into `ActionResult.result`; the downstream handler reads it via `app.chain.upstream_reader.read_upstream`. `ChainWatcher` handles status coordination (WAITING → PENDING) but never touches `result` — those are separate concerns.
+
 ## §5 Data patterns
 
 - **`outbox`** (transactional outbox pattern) — every status transition writes a `RunEvent` in the **same transaction** as the `job_runs.status` update. Downstream consumers (`RecurringJobWatcher`, `ChainWatcher`) read the immutable event log, never the mutable status column. Eliminates a class of races.
@@ -150,7 +155,9 @@ Set `Job.trigger_on_job_id` to make this `Job`'s runs wait for another `Job` to 
 
 The downstream `Job`'s initial `JobRun` is created with `status='WAITING'` and `wait_for_run_id` set. `ChainWatcher` flips it when the blocker terminates.
 
-W1: schema in place. W2: `ChainWatcher` logic.
+**Data flow in chained handlers** is a separate convention layered above `ChainWatcher`. See `chain-fed handler` and `inter-handler data plane` in §4, and ADR-033 for the full specification including the recommended Design B pattern (`trigger_on_status=ANY` + downstream internal ok-path/error-path branching) and the anti-pattern (do NOT create handlers like `slack_post_from_github_digest` — specialisation is via params, not class names).
+
+W1: schema in place. W2: `ChainWatcher` logic. W4: `from_run_id` convention + `upstream_reader` module.
 
 ### Recurring
 
