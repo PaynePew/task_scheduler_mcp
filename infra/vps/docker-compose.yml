@@ -90,6 +90,7 @@ services:
       - "443:443"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./static:/var/www:ro
       - caddy_data:/data
     depends_on:
       - mcp-server
