@@ -229,5 +229,5 @@ If the Resume step is skipped instead of running: `if: always()` is missing or m
 
 - The Better Stack–specific implementation: [.github/workflows/deploy-vps.yml](../../.github/workflows/deploy-vps.yml)
 - Why we picked Better Stack over UptimeRobot: [ADR-031](../adr/ADR-031-monitoring-better-stack-over-uptimerobot.md)
-- The driving issue + AC evidence: [#77](https://github.com/PaynePew/chatgpt_task/issues/77)
+- The driving issue + AC evidence: [#77](https://github.com/PaynePew/task_scheduler_mcp/issues/77)
 - PRD reference: [docs/PRD/deploy-w3.md §D7-B](../PRD/deploy-w3.md)

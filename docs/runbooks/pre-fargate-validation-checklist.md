@@ -10,7 +10,7 @@ succeeds — confirm the cost guard-rails are live first.
 ## Cost guard-rails
 
 - [ ] **AWS Budgets — $10 warning alert confirmed.**
-  Navigate to AWS Budgets → confirm budget `chatgpt-task-monthly-warn` exists
+  Navigate to AWS Budgets → confirm budget `task-scheduler-mcp-monthly-warn` exists
   with a $10 actual-spend threshold and an email subscriber.
   _Defined by `terraform/iam` module (slice #7a). If not yet applied, run:_
   ```bash
@@ -20,7 +20,7 @@ succeeds — confirm the cost guard-rails are live first.
   ```
 
 - [ ] **AWS Budgets — $30 cap alert confirmed.**
-  Navigate to AWS Budgets → confirm budget `chatgpt-task-monthly-cap` exists
+  Navigate to AWS Budgets → confirm budget `task-scheduler-mcp-monthly-cap` exists
   with a $30 actual-spend threshold and the same email subscriber.
 
 - [ ] **Estimated cost reviewed.**
@@ -35,8 +35,8 @@ succeeds — confirm the cost guard-rails are live first.
 
 - [ ] **OIDC role trust policy reviewed.**
   Verify in the AWS Console (IAM → Roles →
-  `chatgpt-task-github-actions-fargate-validation`) that the trust policy
-  contains **only** `repo:PaynePew/chatgpt_task:*` in the `sub` condition.
+  `task-scheduler-mcp-github-actions-fargate-validation`) that the trust policy
+  contains **only** `repo:PaynePew/task_scheduler_mcp:*` in the `sub` condition.
   No wildcard on the account or provider level.
 
 - [ ] **GitHub secret `AWS_FARGATE_VALIDATION_ROLE_ARN` is set.**
@@ -46,7 +46,7 @@ succeeds — confirm the cost guard-rails are live first.
 
 - [ ] **GitHub secret `TF_STATE_BUCKET` is set.**
   Should match the S3 bucket created by `terraform/bootstrap`
-  (`chatgpt-task-terraform-state-<ACCOUNT_ID>`).
+  (`task-scheduler-mcp-terraform-state-<ACCOUNT_ID>`).
 
 - [ ] **GitHub secret `BUDGET_ALERT_EMAIL` is set.**
   Email address to receive AWS Budgets alerts.
@@ -79,29 +79,29 @@ minutes before `terraform destroy` is triggered.
 If the final destroy step fails and VPCs remain, perform this manual cleanup
 in order. Each item can be checked in the AWS Console or via the CLI.
 
-1. **ECS services** — AWS Console → ECS → Clusters → `chatgpt-task` →
+1. **ECS services** — AWS Console → ECS → Clusters → `task-scheduler-mcp` →
    Services. Set desired count to 0 for each service, then delete them.
    ```bash
-   aws ecs list-services --cluster chatgpt-task --query serviceArns --output text \
+   aws ecs list-services --cluster task-scheduler-mcp --query serviceArns --output text \
      | tr '\t' '\n' \
-     | xargs -I{} aws ecs update-service --cluster chatgpt-task --service {} --desired-count 0
-   aws ecs delete-cluster --cluster chatgpt-task
+     | xargs -I{} aws ecs update-service --cluster task-scheduler-mcp --service {} --desired-count 0
+   aws ecs delete-cluster --cluster task-scheduler-mcp
    ```
 
 2. **ALB + target groups** — AWS Console → EC2 → Load Balancers → delete ALB
-   with tag `Project=chatgpt-task`. Then delete orphaned target groups.
+   with tag `Project=task-scheduler-mcp`. Then delete orphaned target groups.
    ```bash
    aws elbv2 describe-load-balancers \
-     --query "LoadBalancers[?contains(LoadBalancerName,'chatgpt-task')].LoadBalancerArn" \
+     --query "LoadBalancers[?contains(LoadBalancerName,'task-scheduler-mcp')].LoadBalancerArn" \
      --output text | xargs aws elbv2 delete-load-balancer --load-balancer-arn
    ```
 
 3. **RDS instance** — AWS Console → RDS → Databases → delete
-   `chatgpt-task-*` instance. Choose "Create final snapshot: No" and
+   `task-scheduler-mcp-*` instance. Choose "Create final snapshot: No" and
    "Retain automated backups: No" to avoid lingering costs.
    ```bash
    aws rds describe-db-instances \
-     --filters "Name=tag:Project,Values=chatgpt-task" \
+     --filters "Name=tag:Project,Values=task-scheduler-mcp" \
      --query "DBInstances[*].DBInstanceIdentifier" \
      --output text | xargs -I{} aws rds delete-db-instance \
        --db-instance-identifier {} --skip-final-snapshot \
@@ -109,19 +109,19 @@ in order. Each item can be checked in the AWS Console or via the CLI.
    ```
 
 4. **SQS queues** — AWS Console → SQS → delete queues prefixed with
-   `chatgpt-task-`.
+   `task-scheduler-mcp-`.
    ```bash
-   aws sqs list-queues --queue-name-prefix chatgpt-task \
+   aws sqs list-queues --queue-name-prefix task-scheduler-mcp \
      --query QueueUrls --output text | tr '\t' '\n' \
      | xargs -I{} aws sqs delete-queue --queue-url {}
    ```
 
-5. **Security groups** — Delete all SGs with tag `Project=chatgpt-task`.
+5. **Security groups** — Delete all SGs with tag `Project=task-scheduler-mcp`.
    Note: SGs cannot be deleted while attached to running resources; confirm
    steps 1–2 are done first.
    ```bash
    aws ec2 describe-security-groups \
-     --filters "Name=tag:Project,Values=chatgpt-task" \
+     --filters "Name=tag:Project,Values=task-scheduler-mcp" \
      --query "SecurityGroups[*].GroupId" \
      --output text | tr '\t' '\n' \
      | xargs -I{} aws ec2 delete-security-group --group-id {}
@@ -129,14 +129,14 @@ in order. Each item can be checked in the AWS Console or via the CLI.
 
 6. **RDS subnet group** — After RDS instance is gone:
    ```bash
-   aws rds delete-db-subnet-group --db-subnet-group-name chatgpt-task
+   aws rds delete-db-subnet-group --db-subnet-group-name task-scheduler-mcp
    ```
 
-7. **VPC** — Delete the VPC with tag `Project=chatgpt-task`. The console will
+7. **VPC** — Delete the VPC with tag `Project=task-scheduler-mcp`. The console will
    list dependencies that must be removed first (subnets, IGW, route tables).
    ```bash
    vpc_id=$(aws ec2 describe-vpcs \
-     --filters "Name=tag:Project,Values=chatgpt-task" \
+     --filters "Name=tag:Project,Values=task-scheduler-mcp" \
      --query "Vpcs[0].VpcId" --output text)
    # Detach and delete IGW
    igw=$(aws ec2 describe-internet-gateways \
@@ -154,7 +154,7 @@ in order. Each item can be checked in the AWS Console or via the CLI.
 
 8. **IAM roles** — Only if `terraform/iam` destroy also failed:
    ```bash
-   for role in chatgpt-task-ecs-task-execution chatgpt-task-ecs-task; do
+   for role in task-scheduler-mcp-ecs-task-execution task-scheduler-mcp-ecs-task; do
      aws iam detach-role-policy --role-name "$role" \
        --policy-arn arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy \
        2>/dev/null || true
@@ -165,7 +165,7 @@ in order. Each item can be checked in the AWS Console or via the CLI.
 After manual cleanup, re-run the final sanity check:
 ```bash
 aws ec2 describe-vpcs \
-  --filters "Name=tag:Project,Values=chatgpt-task" \
+  --filters "Name=tag:Project,Values=task-scheduler-mcp" \
   --query "Vpcs[*].VpcId" \
   --output text
 # Expected: empty output

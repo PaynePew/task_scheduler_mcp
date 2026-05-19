@@ -3,13 +3,13 @@
 # Run as root. Safe to re-run on an already-provisioned VPS — every step is
 # guarded so re-runs are no-ops.
 #
-# Usage: curl -fsSL https://raw.githubusercontent.com/PaynePew/chatgpt_task/main/bin/setup-vps.sh | sudo bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/PaynePew/task_scheduler_mcp/main/bin/setup-vps.sh | sudo bash
 # Or after cloning: sudo bash bin/setup-vps.sh
 set -euo pipefail
 
 # ── Config ────────────────────────────────────────────────────────────────────
-REPO_URL="https://github.com/PaynePew/chatgpt_task.git"
-DEPLOY_DIR="/opt/chatgpt_task"
+REPO_URL="https://github.com/PaynePew/task_scheduler_mcp.git"
+DEPLOY_DIR="/opt/task_scheduler_mcp"
 DEPLOY_USER="deploy"
 INFRA_SRC="infra/vps"
 ELASTICMQ_CONF="elasticmq.conf"
@@ -137,15 +137,15 @@ setup_repo() {
 
 # ── 7. Systemd unit for docker compose ───────────────────────────────────────
 install_systemd_unit() {
-    local unit="/etc/systemd/system/chatgpt-task.service"
+    local unit="/etc/systemd/system/task-scheduler-mcp.service"
     if [[ -f "$unit" ]]; then
         log "systemd unit already installed, skipping."
         return
     fi
-    log "Installing chatgpt-task systemd unit..."
+    log "Installing task-scheduler-mcp systemd unit..."
     cat > "$unit" <<EOF
 [Unit]
-Description=ChatGPT Task Scheduler (docker compose)
+Description=Task Scheduler MCP (docker compose)
 After=docker.service network-online.target
 Requires=docker.service
 Wants=network-online.target
@@ -163,8 +163,8 @@ TimeoutStartSec=120
 WantedBy=multi-user.target
 EOF
     systemctl daemon-reload
-    systemctl enable chatgpt-task.service
-    log "chatgpt-task.service enabled (starts on reboot)."
+    systemctl enable task-scheduler-mcp.service
+    log "task-scheduler-mcp.service enabled (starts on reboot)."
 }
 
 # ── 8. Backup cron ────────────────────────────────────────────────────────────
@@ -180,7 +180,7 @@ install_backup_cron() {
 # Nightly Postgres → Cloudflare R2 backup with 7-day retention.
 set -euo pipefail
 
-DEPLOY_DIR="/opt/chatgpt_task"
+DEPLOY_DIR="/opt/task_scheduler_mcp"
 TS=$(date -u +%Y%m%d-%H%M%S)
 DUMP_FILE="/tmp/scheduler-${TS}.sql.gz"
 
@@ -191,13 +191,13 @@ docker compose exec -T postgres pg_dump -U postgres scheduler \
     | gzip > "$DUMP_FILE"
 
 # Upload to R2
-rclone copy "$DUMP_FILE" r2:chatgpt-task-backups/
+rclone copy "$DUMP_FILE" r2:task-scheduler-mcp-backups/
 
 # Clean local temp file
 rm -f "$DUMP_FILE"
 
 # Enforce 7-day retention in R2
-rclone delete --min-age 7d r2:chatgpt-task-backups/
+rclone delete --min-age 7d r2:task-scheduler-mcp-backups/
 BACKUP
     chmod 750 "$script"
     log "Backup cron installed: $script"
@@ -359,7 +359,7 @@ main() {
     log "  1. Edit $DEPLOY_DIR/.env — fill in POSTGRES_PASSWORD, R2_*, MCP_USER_ID, MCP_USER_TZ"
     log "  2. Re-run this script to configure rclone (needs R2 credentials)"
     log "  3. Start services: cd $DEPLOY_DIR && sudo -u $DEPLOY_USER docker compose up -d"
-    log "     OR: systemctl start chatgpt-task"
+    log "     OR: systemctl start task-scheduler-mcp"
     log "  4. Verify: sudo -u $DEPLOY_USER docker compose ps"
     log "  5. DNS: point scheduler.paynepew.dev → this VPS IP"
 }

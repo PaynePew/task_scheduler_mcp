@@ -39,11 +39,11 @@ terraform init
 
 # Review the plan
 terraform plan \
-  -var="state_bucket_name=chatgpt-task-terraform-state-<ACCOUNT_ID>"
+  -var="state_bucket_name=task-scheduler-mcp-terraform-state-<ACCOUNT_ID>"
 
 # Apply — creates S3 bucket + DynamoDB lock table
 terraform apply \
-  -var="state_bucket_name=chatgpt-task-terraform-state-<ACCOUNT_ID>"
+  -var="state_bucket_name=task-scheduler-mcp-terraform-state-<ACCOUNT_ID>"
 ```
 
 Note the `state_bucket_name` output; use it as the `bucket` value in the
@@ -55,10 +55,10 @@ After bootstrap, apply in order. Each module needs a `backend.tfvars` that
 points at the bootstrap-created bucket. Example `backend.tfvars`:
 
 ```hcl
-bucket         = "chatgpt-task-terraform-state-<ACCOUNT_ID>"
+bucket         = "task-scheduler-mcp-terraform-state-<ACCOUNT_ID>"
 key            = "<module>/terraform.tfstate"
 region         = "ap-northeast-1"
-dynamodb_table = "chatgpt-task-terraform-locks"
+dynamodb_table = "task-scheduler-mcp-terraform-locks"
 encrypt        = true
 ```
 

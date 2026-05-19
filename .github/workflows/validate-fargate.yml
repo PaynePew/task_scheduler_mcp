@@ -16,8 +16,8 @@ on:
 
 env:
   AWS_REGION: ap-northeast-1
-  PROJECT: chatgpt-task
-  TF_LOCK_TABLE: chatgpt-task-terraform-locks
+  PROJECT: task-scheduler-mcp
+  TF_LOCK_TABLE: task-scheduler-mcp-terraform-locks
 
 permissions:
   id-token: write  # Required for OIDC token exchange

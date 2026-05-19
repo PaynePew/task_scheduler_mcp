@@ -38,8 +38,8 @@ GitHub Actions workflow (`.github/workflows/deploy-vps.yml`):
 1. On push to `main`, checkout + Docker buildx setup
 2. Login to `ghcr.io` using `GITHUB_TOKEN` (no separate registry credentials)
 3. `docker buildx build` and push two tags:
-   - `ghcr.io/paynepew/chatgpt_task:latest`
-   - `ghcr.io/paynepew/chatgpt_task:${{ github.sha }}` (pinned)
+   - `ghcr.io/paynepew/task_scheduler_mcp:latest`
+   - `ghcr.io/paynepew/task_scheduler_mcp:${{ github.sha }}` (pinned)
 4. SSH into VPS (`appleboy/ssh-action`) using `secrets.VPS_SSH_KEY`
 5. On VPS, `IMAGE_TAG=${git_sha} docker compose pull && docker compose run --rm migrate && docker compose up -d --remove-orphans`
 6. Post-deploy smoke test: `curl -fsS https://scheduler.paynepew.dev/healthz`
@@ -60,7 +60,7 @@ Concretely the VPS `docker-compose.yml`:
 ```yaml
 services:
   mcp-server:
-    image: ghcr.io/paynepew/chatgpt_task:${IMAGE_TAG:-latest}
+    image: ghcr.io/paynepew/task_scheduler_mcp:${IMAGE_TAG:-latest}
     command: python -m app.entrypoints.mcp_server
     env_file: .env
     restart: unless-stopped
@@ -100,7 +100,7 @@ on `ghcr.io`). Local dev → VPS deploy mental model is identical.
 
 | Secret | Lives where | How loaded |
 |---|---|---|
-| `DB_URL`, `MCP_USER_ID`, `MCP_USER_TZ` | `/opt/chatgpt_task/.env` on VPS (chmod 0600) | Docker `env_file:` |
+| `DB_URL`, `MCP_USER_ID`, `MCP_USER_TZ` | `/opt/task_scheduler_mcp/.env` on VPS (chmod 0600) | Docker `env_file:` |
 | `GITHUB_PAT` (W3.5 action sprint) | same `.env` | same |
 | `SLACK_WEBHOOK_URL` (W3.5 action sprint) | same `.env` | same |
 | `VPS_SSH_KEY` (deploy private key) | GitHub Actions secret | SSH action consumes |

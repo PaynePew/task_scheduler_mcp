@@ -29,8 +29,8 @@ Stateful data layer for the Fargate design artifact (ADR-027). Creates the RDS P
 | `ecs_tasks_sg_id` | required | ECS tasks SG ID (from `ecs` module in slice #7c) |
 | `rds_multi_az` | `false` | Multi-AZ toggle — flip to `true` in W4+ for HA |
 | `instance_class` | `db.t4g.micro` | RDS instance class |
-| `db_name` | `chatgpt_task` | Initial database name |
-| `db_username` | `chatgpt_task` | Master DB username |
+| `db_name` | `task_scheduler_mcp` | Initial database name |
+| `db_username` | `task_scheduler_mcp` | Master DB username |
 
 ## Outputs
 
