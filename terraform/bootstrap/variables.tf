@@ -7,7 +7,7 @@ variable "aws_region" {
 variable "project" {
   description = "Project name prefix used for resource naming."
   type        = string
-  default     = "chatgpt-task"
+  default     = "task-scheduler-mcp"
 }
 
 variable "state_bucket_name" {
@@ -18,5 +18,5 @@ variable "state_bucket_name" {
 variable "lock_table_name" {
   description = "Name for the DynamoDB table used for state locking."
   type        = string
-  default     = "chatgpt-task-terraform-locks"
+  default     = "task-scheduler-mcp-terraform-locks"
 }

@@ -1,4 +1,4 @@
-# ChatGPT Task Scheduler
+# Task Scheduler MCP
 
 A **self-hostable scheduler MCP** that runs as a persistent HTTP server, exposing **5 tools / 3 resources / 2 prompts** for any MCP client (Claude Desktop, Cursor, Claude in Chrome) to schedule and manage recurring tasks. Backed by Postgres + SQS (ElasticMQ locally).
 
@@ -19,8 +19,8 @@ Three paths depending on what you want.
 ### 1. Self-host (the intended path)
 
 ```bash
-git clone https://github.com/PaynePew/chatgpt_task
-cd chatgpt_task
+git clone https://github.com/PaynePew/task_scheduler_mcp
+cd task_scheduler_mcp
 cp .env.example .env
 docker compose --profile full up -d
 ```
@@ -144,7 +144,7 @@ Internet → ALB (HTTPS / ACM cert)
 
 ## Roadmap
 
-Parent PRD: [Issue #57 — W3 Deployment Surface](https://github.com/PaynePew/chatgpt_task/issues/57) · [`docs/PRD/deploy-w3.md`](docs/PRD/deploy-w3.md)
+Parent PRD: [Issue #57 — W3 Deployment Surface](https://github.com/PaynePew/task_scheduler_mcp/issues/57) · [`docs/PRD/deploy-w3.md`](docs/PRD/deploy-w3.md)
 
 The 7-layer acceptance gate (per [`docs/PRD/deploy-w3.md` § D8](docs/PRD/deploy-w3.md); layering concept from [ADR-021](docs/adr/ADR-021-acceptance-gate-layering.md)):
 

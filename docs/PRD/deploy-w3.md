@@ -37,7 +37,7 @@ A two-target deployment strategy where the runtime and the design artifact are e
 
 2. **Design target = AWS ECS Fargate / RDS / ALB / SQS / IAM / VPC, fully Terraform-coded.** Validated end-to-end by a `workflow_dispatch` GitHub Actions workflow (`validate-fargate.yml`) that applies → smoke-tests → captures evidence → destroys. Runs once during W4 demo recording (bill < $5 per run).
 
-3. **CI/CD = GitHub Actions on every push to `main`.** Build container image, push to `ghcr.io/paynepew/chatgpt_task` tagged with `latest` + `${git_sha}`. SSH into the VPS, pull the image, run migrations, recreate the docker-compose stack, smoke test against the live URL.
+3. **CI/CD = GitHub Actions on every push to `main`.** Build container image, push to `ghcr.io/paynepew/task_scheduler_mcp` tagged with `latest` + `${git_sha}`. SSH into the VPS, pull the image, run migrations, recreate the docker-compose stack, smoke test against the live URL.
 
 4. **Reverse proxy + HTTPS = Caddy 2.** Single-binary auto-ACME, 5-line Caddyfile. Chosen for cert-rotation simplicity, audit-ability, and forward-compatibility with the emerging Caddy MCP plugin ecosystem.
 
@@ -191,9 +191,9 @@ The Fargate design path uses ALB + ACM (ADR-005); the two TLS surfaces are indep
 
 ### D6. VPS deployment mechanics (ADR-029)
 
-**Build location**: GitHub Actions runners (free for public repo). **Image transport**: `ghcr.io/paynepew/chatgpt_task` (free for public packages). **Image tags**: `latest` + `${git_sha}` (no semver — portfolio code has no release ceremony). **VPS action on deploy**: SSH into VPS, `docker compose pull`, `docker compose run --rm migrate`, `docker compose up -d --remove-orphans`, smoke test `curl https://scheduler.paynepew.dev/healthz`.
+**Build location**: GitHub Actions runners (free for public repo). **Image transport**: `ghcr.io/paynepew/task_scheduler_mcp` (free for public packages). **Image tags**: `latest` + `${git_sha}` (no semver — portfolio code has no release ceremony). **VPS action on deploy**: SSH into VPS, `docker compose pull`, `docker compose run --rm migrate`, `docker compose up -d --remove-orphans`, smoke test `curl https://scheduler.paynepew.dev/healthz`.
 
-VPS-side `docker-compose.yml` references `image: ghcr.io/paynepew/chatgpt_task:${IMAGE_TAG:-latest}` for the 5 services. Postgres 16 + ElasticMQ + Caddy all containerised. **Same compose shape as local development** (only `build:` swapped for `image:`).
+VPS-side `docker-compose.yml` references `image: ghcr.io/paynepew/task_scheduler_mcp:${IMAGE_TAG:-latest}` for the 5 services. Postgres 16 + ElasticMQ + Caddy all containerised. **Same compose shape as local development** (only `build:` swapped for `image:`).
 
 Rationale for Postgres-in-container on VPS (vs managed RDS):
 
@@ -204,7 +204,7 @@ Rationale for Postgres-in-container on VPS (vs managed RDS):
 
 Secrets policy:
 
-- VPS-only secrets (DB password, future GitHub PAT, future Slack webhook URL) live in `/opt/chatgpt_task/.env`, chmod 0600, owner `deploy:deploy`
+- VPS-only secrets (DB password, future GitHub PAT, future Slack webhook URL) live in `/opt/task_scheduler_mcp/.env`, chmod 0600, owner `deploy:deploy`
 - GitHub Actions only holds `VPS_SSH_KEY` and uses auto-injected `GITHUB_TOKEN` for ghcr.io
 - Nothing in `.env` enters git (gated by `.gitignore`)
 
@@ -220,12 +220,12 @@ Nightly cron on the VPS:
 #!/usr/bin/env bash
 set -euo pipefail
 TS=$(date -u +%Y%m%d-%H%M%S)
-cd /opt/chatgpt_task
+cd /opt/task_scheduler_mcp
 docker compose exec -T postgres pg_dump -U postgres scheduler \
   | gzip > /tmp/scheduler-$TS.sql.gz
-rclone copy /tmp/scheduler-$TS.sql.gz r2:chatgpt-task-backups/
+rclone copy /tmp/scheduler-$TS.sql.gz r2:task-scheduler-mcp-backups/
 rm /tmp/scheduler-$TS.sql.gz
-rclone delete --min-age 7d r2:chatgpt-task-backups/
+rclone delete --min-age 7d r2:task-scheduler-mcp-backups/
 ```
 
 Cloudflare R2 chosen over S3 / B2 for: zero egress fee, free 10 GB tier, S3-compatible API (frictionless AWS migration). Daily snapshots < 10 MB compressed; 7-day retention < 100 MB — well within free tier.
@@ -233,7 +233,7 @@ Cloudflare R2 chosen over S3 / B2 for: zero egress fee, free 10 GB tier, S3-comp
 Restore procedure (`docs/runbooks/restore-postgres.md`):
 
 ```bash
-rclone copy r2:chatgpt-task-backups/scheduler-YYYYMMDD-HHMMSS.sql.gz /tmp/
+rclone copy r2:task-scheduler-mcp-backups/scheduler-YYYYMMDD-HHMMSS.sql.gz /tmp/
 gunzip -c /tmp/scheduler-*.sql.gz | docker compose exec -T postgres psql -U postgres scheduler
 ```
 
@@ -245,7 +245,7 @@ HTTPS check `https://scheduler.paynepew.dev/healthz` every 3 min (Better Stack f
 
 **C. One-shot Fargate validation workflow** (`.github/workflows/validate-fargate.yml`)
 
-`workflow_dispatch` trigger with `duration_minutes` input. Flow: init → plan → apply → poll ALB target healthy → smoke `/healthz` → capture evidence artifacts (Terraform outputs + ECS describe-services + RDS describe-db-instances + ALB DNS screenshot) → sleep `duration_minutes` → destroy → final sanity check (`describe-vpcs --filters Name=tag:Project,Values=chatgpt-task` returns empty).
+`workflow_dispatch` trigger with `duration_minutes` input. Flow: init → plan → apply → poll ALB target healthy → smoke `/healthz` → capture evidence artifacts (Terraform outputs + ECS describe-services + RDS describe-db-instances + ALB DNS screenshot) → sleep `duration_minutes` → destroy → final sanity check (`describe-vpcs --filters Name=tag:Project,Values=task-scheduler-mcp` returns empty).
 
 Estimated per-run cost: $0.50-1.50. Pre-flight checklist in `docs/runbooks/pre-fargate-validation-checklist.md`: Budgets alert confirmed at $10 / $30, IAM keys ready, DNS swap plan if validation includes external smoke test.
 

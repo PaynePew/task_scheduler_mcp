@@ -7,13 +7,13 @@ variable "aws_region" {
 variable "project" {
   description = "Project name prefix used for resource naming and tagging."
   type        = string
-  default     = "chatgpt-task"
+  default     = "task-scheduler-mcp"
 }
 
 variable "repository_name" {
   description = "Name of the ECR repository."
   type        = string
-  default     = "chatgpt-task"
+  default     = "task-scheduler-mcp"
 }
 
 variable "untagged_expiry_days" {

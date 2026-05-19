@@ -37,17 +37,17 @@ Nightly cron on the VPS dumps Postgres and uploads to a Cloudflare R2 bucket.
 #!/usr/bin/env bash
 set -euo pipefail
 TS=$(date -u +%Y%m%d-%H%M%S)
-cd /opt/chatgpt_task
+cd /opt/task_scheduler_mcp
 docker compose exec -T postgres pg_dump -U postgres scheduler \
   | gzip > /tmp/scheduler-$TS.sql.gz
-rclone copy /tmp/scheduler-$TS.sql.gz r2:chatgpt-task-backups/
+rclone copy /tmp/scheduler-$TS.sql.gz r2:task-scheduler-mcp-backups/
 rm /tmp/scheduler-$TS.sql.gz
-rclone delete --min-age 7d r2:chatgpt-task-backups/
+rclone delete --min-age 7d r2:task-scheduler-mcp-backups/
 ```
 
 **Configuration**:
 
-- R2 bucket `chatgpt-task-backups` in the deciders' Cloudflare account
+- R2 bucket `task-scheduler-mcp-backups` in the deciders' Cloudflare account
 - `rclone` config (`/root/.config/rclone/rclone.conf`) with R2 API token
   (token stored in VPS `.env`, read by `bin/setup-vps.sh` during provisioning)
 - Retention: 7 daily snapshots; older snapshots deleted by the same script
@@ -60,7 +60,7 @@ portfolio-scale data; 7-day retention < 100 MB.
 **Restore procedure** (documented in `docs/runbooks/restore-postgres.md`):
 
 ```bash
-rclone copy r2:chatgpt-task-backups/scheduler-YYYYMMDD-HHMMSS.sql.gz /tmp/
+rclone copy r2:task-scheduler-mcp-backups/scheduler-YYYYMMDD-HHMMSS.sql.gz /tmp/
 gunzip -c /tmp/scheduler-*.sql.gz | docker compose exec -T postgres psql -U postgres scheduler
 ```
 
@@ -100,7 +100,7 @@ the demo URL can also see the 30-day uptime track record.
 8. **Idle period**: `sleep ${inputs.duration_minutes:-30}` to allow manual
    inspection / Inspector flow / demo recording
 9. `terraform destroy -auto-approve`
-10. Final sanity: `aws ec2 describe-vpcs --filters Name=tag:Project,Values=chatgpt-task` returns empty list
+10. Final sanity: `aws ec2 describe-vpcs --filters Name=tag:Project,Values=task-scheduler-mcp` returns empty list
 
 **Trigger inputs**:
 
@@ -130,7 +130,7 @@ demo to record.
 | fail2ban | Default jail.local with SSH bantime 5m, maxretry 5 | Debian/Ubuntu standard |
 | ufw rules | allow 22/tcp, 80/tcp, 443/tcp; deny incoming default | ufw docs |
 | `unattended-upgrades` | security-only auto-update enabled | Ubuntu standard |
-| Non-root user | `deploy` user owns `/opt/chatgpt_task`, in `docker` group | least privilege |
+| Non-root user | `deploy` user owns `/opt/task_scheduler_mcp`, in `docker` group | least privilege |
 | Docker log driver | `local` driver, `max-size=10m`, `max-file=3` | Docker daemon.json |
 | Swap | None (2 GB RAM plan has sufficient headroom) | Lightsail $5 plan |
 
