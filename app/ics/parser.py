@@ -97,7 +97,6 @@ def parse_events(
 
         rrule_prop = component.get("RRULE")
         if rrule_prop is not None:
-            # Expand recurring event within a padded window
             occurrences = _expand_rrule(component, start_dt, range_start_dt, range_end_dt)
             for occ_start in occurrences:
                 occ_end = occ_start + duration
