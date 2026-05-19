@@ -14,7 +14,7 @@ def error(
     code: str,
     message: str,
     field: str | None = None,
-    expected: str | None = None,
+    expected: Any = None,
 ) -> dict[str, Any]:
     """Wrap an error result: {"ok": false, "error": {"code", "message", ...}}."""
     err: dict[str, Any] = {"code": code, "message": message}

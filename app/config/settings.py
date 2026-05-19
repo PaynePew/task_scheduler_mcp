@@ -50,5 +50,10 @@ class Settings(BaseSettings):
     reconciler_dlq_grace_seconds: int = 180
     reconciler_queued_grace_seconds: int = 90
 
+    # Per-user rate limits for task.create.v1 (ADR-042).
+    # Two windows: a 24h daily cap and a 1-minute burst cap.
+    rate_limit_daily: int = 1000
+    rate_limit_burst_per_minute: int = 10
+
 
 settings = Settings()
