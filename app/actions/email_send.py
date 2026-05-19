@@ -60,7 +60,7 @@ class EmailSendParams(BaseModel):
     subject: str
     body: str | None = None
     from_run_id: int | None = None
-    template: str | None = None
+    template: EmailTemplate | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -85,7 +85,7 @@ def _format_digest_v1(data: Any, *, is_error: bool = False) -> str:
     return "\n".join(lines)
 
 
-_TEMPLATE_FORMATTERS: dict[str, Callable[..., str]] = {
+_TEMPLATE_FORMATTERS: dict[EmailTemplate, Callable[..., str]] = {
     EmailTemplate.raw: _format_raw,
     EmailTemplate.digest_v1: _format_digest_v1,
 }
@@ -262,8 +262,8 @@ class EmailSendHandler:
         params: EmailSendParams,
         resolved_body: str | None,
     ) -> str | ActionResult:
-        template_name = params.template or EmailTemplate.raw
-        formatter = _TEMPLATE_FORMATTERS.get(template_name, _format_raw)
+        template = params.template or EmailTemplate.raw
+        formatter = _TEMPLATE_FORMATTERS[template]
 
         if params.from_run_id is not None:
             return await self._body_from_upstream(params.from_run_id, formatter)
