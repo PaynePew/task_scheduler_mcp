@@ -29,6 +29,7 @@ from app.mcp.resources.actions_resource import read_tasks_actions
 from app.mcp.resources.job_resource import read_tasks_job
 from app.mcp.resources.list_resource import read_tasks_list
 from app.mcp.resources.recent_results import read_tasks_recent_results
+from app.ratelimit.checker import Allow, RateLimits, check_rate_limit
 from app.secrets.literal_detection import detect_literal_secret
 
 logger = logging.getLogger(__name__)
@@ -337,6 +338,18 @@ async def _handle_task_create(
 
     try:
         async with session_factory() as session:
+            limits = RateLimits(
+                daily=settings.rate_limit_daily,
+                burst=settings.rate_limit_burst_per_minute,
+            )
+            decision = await check_rate_limit(user_id, session, limits)
+            if not isinstance(decision, Allow):
+                return error(
+                    "USER_INPUT",
+                    f"Rate limit exceeded: {decision.reason}",
+                    field="user_id",
+                    expected={"retry_after_seconds": decision.retry_after_seconds},
+                )
             job = await create_job(
                 session,
                 user_id=user_id,
