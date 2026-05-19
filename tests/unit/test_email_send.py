@@ -346,7 +346,7 @@ def test_email_send_registered_in_registry():
     assert isinstance(ACTION_REGISTRY["email_send"], H)
 
 
-def test_list_actions_returns_five_actions():
-    """task.list_actions.v1 should now expose 5 actions (including email_send)."""
+def test_list_actions_includes_email_send():
+    """task.list_actions.v1 should expose email_send among the registered actions."""
     assert len(ACTION_REGISTRY) >= 5
     assert "email_send" in ACTION_REGISTRY
