@@ -194,13 +194,13 @@ docker compose exec -T postgres pg_dump -U postgres scheduler \
     | gzip > "$DUMP_FILE"
 
 # Upload to R2
-rclone copy "$DUMP_FILE" r2:task-scheduler-mcp-backups/
+rclone copy "$DUMP_FILE" r2:chatgpt-task-backups/
 
 # Clean local temp file
 rm -f "$DUMP_FILE"
 
 # Enforce 7-day retention in R2
-rclone delete --min-age 7d r2:task-scheduler-mcp-backups/
+rclone delete --min-age 7d r2:chatgpt-task-backups/
 BACKUP
     chmod 750 "$script"
     log "Backup cron installed: $script"
