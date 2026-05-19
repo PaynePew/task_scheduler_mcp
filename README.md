@@ -25,14 +25,14 @@ Built for: developers who run their own webhooks/APIs and want to schedule them 
 
 ```mermaid
 flowchart LR
-    User([User]) --> LLM[LLM Client\nClaude / Cursor]
-    LLM -->|MCP tool call| MCP[MCP Server\nHTTP · stdio]
+    User([User]) --> LLM[LLM Client<br/>Claude / Cursor]
+    LLM -->|MCP tool call| MCP[MCP Server<br/>HTTP · stdio]
     MCP --> DB[(Postgres)]
-    DB --> W[Watcher\nSKIP LOCKED]
+    DB --> W[Watcher<br/>SKIP LOCKED]
     W -->|enqueue| Q[(SQS / ElasticMQ)]
     Q --> Worker[Worker]
     Worker -->|dispatches| AH[ActionHandler]
-    AH -->|outbound API call| Ext[External Service\nSlack · GitHub · SMTP · R2 · ICS]
+    AH -->|outbound API call| Ext[External Service<br/>Slack · GitHub · SMTP · R2 · ICS]
     Worker --> DB
     DB --> CW[ChainWatcher]
     DB --> RW[RecurringJobWatcher]
