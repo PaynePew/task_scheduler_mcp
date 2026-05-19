@@ -40,11 +40,6 @@ def _patch_http(status_code: int = 200, body: str = "ok"):
     return patch("app.actions.slack_post.httpx.AsyncClient", return_value=ctx)
 
 
-def _make_handler_no_db() -> SlackPostHandler:
-    """Handler with no from_run_id usage (no DB needed)."""
-    return SlackPostHandler()
-
-
 # ---------------------------------------------------------------------------
 # Template formatter unit tests
 # ---------------------------------------------------------------------------
