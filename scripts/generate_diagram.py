@@ -714,7 +714,7 @@ def draw_rrect(x, y, w, h, fill, outline, lw=2, radius=8):
     )
 
 
-def draw_text_centered(cx, cy, text, size=15, bold=False, color="#000000", max_w=None):
+def draw_text_centered(cx, cy, text, size=15, bold=False, color="#000000"):
     font = load_font(size, bold)
     lines = text.split("\n")
     line_h = size + 4
