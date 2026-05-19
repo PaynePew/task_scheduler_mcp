@@ -18,6 +18,8 @@ dependencies = [
     "httpx",
     "croniter>=6.2.2",
     "icalendar>=6.0",
+    "aiosmtplib>=3.0",
+    "email-validator>=2.0",
 ]
 
 [dependency-groups]
@@ -26,6 +28,7 @@ dev = [
     "pytest-asyncio",
     "pytest-cov",
     "ruff",
+    "aiosmtpd>=1.4",
 ]
 
 [tool.pytest.ini_options]
