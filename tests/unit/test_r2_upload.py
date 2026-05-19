@@ -53,8 +53,14 @@ def _make_handler(
     return R2UploadHandler(session_factory=session_factory, s3_client_factory=factory)
 
 
-def _make_mock_session_factory(upstream_result: Any) -> Any:
-    """Mock session factory that patches read_upstream to return the given payload."""
+def _make_mock_session_factory() -> Any:
+    """Build an async-context-manager mock with the shape the handler expects.
+
+    The actual upstream variant returned by ``read_upstream`` is configured per
+    test via ``patch("app.actions.r2_upload.read_upstream", ...)``; this helper
+    only fakes the ``async with factory() as session: async with session.begin():``
+    plumbing the handler walks before calling read_upstream.
+    """
     mock_session = AsyncMock()
     mock_session.begin = MagicMock(return_value=mock_session)
     mock_session.__aenter__ = AsyncMock(return_value=mock_session)
@@ -270,7 +276,7 @@ async def test_botocore_error_is_retryable():
 async def test_from_run_id_ok_serializes_json():
     """from_run_id with Ok upstream → JSON-serialized content is uploaded."""
     data = {"report": "daily", "count": 42}
-    mock_session_factory = _make_mock_session_factory(Ok(data=data))
+    mock_session_factory = _make_mock_session_factory()
     mock_client = _make_mock_s3_client()
     handler = R2UploadHandler(
         session_factory=mock_session_factory, s3_client_factory=lambda: mock_client
@@ -290,7 +296,7 @@ async def test_from_run_id_ok_serializes_json():
 @pytest.mark.asyncio
 async def test_from_run_id_upstream_error_returns_failure():
     """from_run_id with UpstreamError → handler returns not-retryable failure."""
-    mock_session_factory = _make_mock_session_factory(None)
+    mock_session_factory = _make_mock_session_factory()
     mock_client = _make_mock_s3_client()
     handler = R2UploadHandler(
         session_factory=mock_session_factory, s3_client_factory=lambda: mock_client
@@ -310,7 +316,7 @@ async def test_from_run_id_upstream_error_returns_failure():
 @pytest.mark.asyncio
 async def test_from_run_id_no_result_returns_failure():
     """from_run_id with NoResult → handler returns not-retryable failure."""
-    mock_session_factory = _make_mock_session_factory(None)
+    mock_session_factory = _make_mock_session_factory()
     mock_client = _make_mock_s3_client()
     handler = R2UploadHandler(
         session_factory=mock_session_factory, s3_client_factory=lambda: mock_client
@@ -329,7 +335,7 @@ async def test_from_run_id_no_result_returns_failure():
 async def test_from_run_id_invalid_json_uploads_raw():
     """from_run_id with InvalidJson → raw bytes are uploaded (pass-through)."""
     raw = "not-valid-json-but-upload-anyway"
-    mock_session_factory = _make_mock_session_factory(None)
+    mock_session_factory = _make_mock_session_factory()
     mock_client = _make_mock_s3_client()
     handler = R2UploadHandler(
         session_factory=mock_session_factory, s3_client_factory=lambda: mock_client
