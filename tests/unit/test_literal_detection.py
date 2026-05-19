@@ -6,7 +6,6 @@ import pytest
 
 from app.secrets.literal_detection import detect_literal_secret
 
-
 # ---------------------------------------------------------------------------
 # Known prefixes should be detected
 # ---------------------------------------------------------------------------

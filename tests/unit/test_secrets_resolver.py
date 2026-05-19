@@ -14,7 +14,6 @@ from app.secrets.resolver import (
     resolve,
 )
 
-
 ENV = {
     "ANTHROPIC_API_KEY": "sk-ant-real-key",
     "OPENAI_API_KEY": "sk-openai-key",
@@ -72,7 +71,10 @@ def test_list_values_resolved():
 
 
 def test_mixed_nested_structure():
-    inp = {"headers": {"Authorization": "Bearer ${ANTHROPIC_API_KEY}"}, "tags": ["${OPENAI_API_KEY}"]}
+    inp = {
+        "headers": {"Authorization": "Bearer ${ANTHROPIC_API_KEY}"},
+        "tags": ["${OPENAI_API_KEY}"],
+    }
     result = resolve(inp, ENV, DEFAULT_WHITELIST)
     assert result == {
         "headers": {"Authorization": "Bearer sk-ant-real-key"},

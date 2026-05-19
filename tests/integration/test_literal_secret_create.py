@@ -32,7 +32,11 @@ async def _create_with_params(action_params: dict) -> dict:
 async def test_literal_anthropic_key_in_headers_rejected():
     """sk-ant-xxx in action_params.headers → USER_INPUT error."""
     result = await _create_with_params(
-        {"method": "POST", "url": "https://api.example.com", "headers": {"Authorization": "Bearer sk-ant-api03-realkey1234567890"}}
+        {
+            "method": "POST",
+            "url": "https://api.example.com",
+            "headers": {"Authorization": "Bearer sk-ant-api03-realkey1234567890"},
+        }
     )
     assert result["ok"] is False
     err = result["error"]
@@ -45,7 +49,11 @@ async def test_literal_anthropic_key_in_headers_rejected():
 async def test_literal_openai_key_in_body_rejected():
     """sk-xxxxxxxx in action_params.body → USER_INPUT error."""
     result = await _create_with_params(
-        {"method": "POST", "url": "https://api.openai.com/v1/chat", "body": {"api_key": "sk-proj-secretkeyhere1234"}}
+        {
+            "method": "POST",
+            "url": "https://api.openai.com/v1/chat",
+            "body": {"api_key": "sk-proj-secretkeyhere1234"},
+        }
     )
     assert result["ok"] is False
     err = result["error"]
@@ -55,14 +63,17 @@ async def test_literal_openai_key_in_body_rejected():
 
 @pytest.mark.integration
 async def test_no_literal_secret_proceeds_to_db():
-    """action_params without secrets does not trigger detection; proceeds to DB (and fails with UNKNOWN_ACTION)."""
+    """action_params without secrets passes detection; proceeds to domain layer."""
     result = await _create_with_params(
-        {"method": "GET", "url": "https://example.com", "headers": {"Authorization": "Bearer ${ANTHROPIC_API_KEY}"}}
+        {
+            "method": "GET",
+            "url": "https://example.com",
+            "headers": {"Authorization": "Bearer ${ANTHROPIC_API_KEY}"},
+        }
     )
-    # The dummy session factory would raise if called, but unknown_action is caught earlier
-    # by domain.jobs.create_job -> this may succeed with UNKNOWN_ACTION or INTERNAL depending
-    # on action. But the key check: it does NOT return a USER_INPUT/literal-secret error.
-    assert result.get("error", {}).get("code") != "USER_INPUT" or "literal" not in result.get("error", {}).get("message", "")
+    # The key check: no USER_INPUT/literal-secret error returned from detection.
+    err = result.get("error", {})
+    assert not (err.get("code") == "USER_INPUT" and "literal" in err.get("message", ""))
 
 
 @pytest.mark.integration
@@ -71,4 +82,5 @@ async def test_template_var_in_params_not_rejected():
     result = await _create_with_params(
         {"headers": {"Authorization": "Bearer ${ANTHROPIC_API_KEY}"}}
     )
-    assert result.get("ok") is not False or "literal" not in result.get("error", {}).get("message", "")
+    err = result.get("error", {})
+    assert not (err.get("code") == "USER_INPUT" and "literal" in err.get("message", ""))

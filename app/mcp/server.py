@@ -20,7 +20,6 @@ from app.db.engine import async_session_factory as default_session_factory
 from app.domain.jobs import create_job
 from app.mcp.envelope import error, success
 from app.mcp.errors import map_domain_error
-from app.secrets.literal_detection import detect_literal_secret
 from app.mcp.handlers.cancel import TASK_CANCEL_SCHEMA, handle_task_cancel
 from app.mcp.handlers.list import TASK_LIST_SCHEMA, handle_task_list
 from app.mcp.handlers.status import TASK_STATUS_SCHEMA, handle_task_status
@@ -29,6 +28,7 @@ from app.mcp.prompts import setup_summary as _setup_summary
 from app.mcp.resources.actions_resource import read_tasks_actions
 from app.mcp.resources.job_resource import read_tasks_job
 from app.mcp.resources.list_resource import read_tasks_list
+from app.secrets.literal_detection import detect_literal_secret
 
 logger = logging.getLogger(__name__)
 
@@ -291,9 +291,12 @@ async def _handle_task_create(
     if matched_prefix is not None:
         return error(
             "USER_INPUT",
-            f"action_params appears to contain a literal credential (matched prefix: {matched_prefix!r}). "
-            "Use ${VAR_NAME} form instead (e.g. ${ANTHROPIC_API_KEY}) so the value is "
-            "read from the server environment at execution time.",
+            (
+                f"action_params appears to contain a literal credential"
+                f" (matched prefix: {matched_prefix!r})."
+                " Use ${VAR_NAME} form instead (e.g. ${ANTHROPIC_API_KEY})"
+                " so the value is read from the server environment at execution time."
+            ),
             field="action_params",
             expected="${VAR_NAME} reference instead of a literal credential",
         )
