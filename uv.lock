@@ -445,6 +445,20 @@ wheels = [
 ]
 
 [[package]]
+name = "icalendar"
+version = "7.1.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "python-dateutil" },
+    { name = "typing-extensions", marker = "python_full_version < '3.13'" },
+    { name = "tzdata" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/10/1b/f02e4d997f50d8274c877bbf4f7809e6b04216c4d0b859e6ac7f8566165a/icalendar-7.1.1.tar.gz", hash = "sha256:df80df31f57d345b68b2d07be579a24e8103f7b6555c548e8ef8246cb2353186", size = 469560, upload-time = "2026-05-18T11:11:25.188Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d0/86/33636ea5600a30f4674650f460903ca817d4aa0f3a5c655db1b5511fd6d6/icalendar-7.1.1-py3-none-any.whl", hash = "sha256:5e581b8376df7c66972edcf1597c99efc07011829f73df420c2648784c424b42", size = 472071, upload-time = "2026-05-18T11:11:23.904Z" },
+]
+
+[[package]]
 name = "idna"
 version = "3.14"
 source = { registry = "https://pypi.org/simple" }
@@ -1127,6 +1141,7 @@ dependencies = [
     { name = "boto3" },
     { name = "croniter" },
     { name = "httpx" },
+    { name = "icalendar" },
     { name = "mcp" },
     { name = "psycopg", extra = ["binary"] },
     { name = "pydantic" },
@@ -1149,6 +1164,7 @@ requires-dist = [
     { name = "boto3" },
     { name = "croniter", specifier = ">=6.2.2" },
     { name = "httpx" },
+    { name = "icalendar", specifier = ">=6.0" },
     { name = "mcp" },
     { name = "psycopg", extras = ["binary"] },
     { name = "pydantic", specifier = ">=2" },
