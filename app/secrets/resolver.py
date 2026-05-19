@@ -39,7 +39,7 @@ class SecretResolutionError(Exception):
         self.retryable = False
 
 
-def _build_effective_whitelist() -> frozenset[str]:
+def build_effective_whitelist() -> frozenset[str]:
     """Merge DEFAULT_WHITELIST with ALLOWED_TEMPLATE_VARS env var."""
     extra_raw = os.environ.get("ALLOWED_TEMPLATE_VARS", "")
     extras = {v.strip() for v in extra_raw.split(",") if v.strip()}

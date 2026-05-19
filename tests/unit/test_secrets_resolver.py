@@ -10,7 +10,7 @@ import pytest
 from app.secrets.resolver import (
     DEFAULT_WHITELIST,
     SecretResolutionError,
-    _build_effective_whitelist,
+    build_effective_whitelist,
     resolve,
 )
 
@@ -159,7 +159,7 @@ def test_bool_value_passes_through():
 def test_allowed_template_vars_extends_whitelist():
     """ALLOWED_TEMPLATE_VARS env var adds vars to the effective whitelist."""
     with patch.dict(os.environ, {"ALLOWED_TEMPLATE_VARS": "MY_CUSTOM_VAR,ANOTHER_VAR"}):
-        whitelist = _build_effective_whitelist()
+        whitelist = build_effective_whitelist()
     assert "MY_CUSTOM_VAR" in whitelist
     assert "ANOTHER_VAR" in whitelist
     # base vars still present
@@ -169,7 +169,7 @@ def test_allowed_template_vars_extends_whitelist():
 def test_allowed_template_vars_empty_no_change():
     """Empty ALLOWED_TEMPLATE_VARS leaves default whitelist unchanged."""
     with patch.dict(os.environ, {"ALLOWED_TEMPLATE_VARS": ""}):
-        whitelist = _build_effective_whitelist()
+        whitelist = build_effective_whitelist()
     assert whitelist == DEFAULT_WHITELIST
 
 
@@ -177,6 +177,6 @@ def test_resolve_uses_env_extended_whitelist():
     """When ALLOWED_TEMPLATE_VARS=MY_CUSTOM_VAR, custom var resolves at runtime."""
     env_with_custom = {**ENV, "MY_CUSTOM_VAR": "custom-value"}
     with patch.dict(os.environ, {"ALLOWED_TEMPLATE_VARS": "MY_CUSTOM_VAR"}):
-        whitelist = _build_effective_whitelist()
+        whitelist = build_effective_whitelist()
     result = resolve("${MY_CUSTOM_VAR}", env_with_custom, whitelist)
     assert result == "custom-value"

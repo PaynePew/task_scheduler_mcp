@@ -9,7 +9,7 @@ import httpx
 from pydantic import BaseModel
 
 from app.actions.base import ActionResult
-from app.secrets.resolver import SecretResolutionError, _build_effective_whitelist, resolve
+from app.secrets.resolver import SecretResolutionError, build_effective_whitelist, resolve
 
 MAX_RESPONSE_BYTES = 2048  # 2 KB
 
@@ -32,7 +32,7 @@ class HttpCallHandler:
     timeout_seconds: ClassVar[int] = 30
 
     async def execute(self, run: Any, params: HttpCallParams) -> ActionResult:
-        whitelist = _build_effective_whitelist()
+        whitelist = build_effective_whitelist()
         env = dict(os.environ)
         try:
             resolved_headers = resolve(params.headers, env, whitelist)
