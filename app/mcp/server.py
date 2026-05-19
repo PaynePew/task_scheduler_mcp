@@ -337,19 +337,20 @@ async def _handle_task_create(
             )
 
     try:
-        async with session_factory() as session:
-            limits = RateLimits(
-                daily=settings.rate_limit_daily,
-                burst=settings.rate_limit_burst_per_minute,
+        limits = RateLimits(
+            daily=settings.rate_limit_daily,
+            burst=settings.rate_limit_burst_per_minute,
+        )
+        async with session_factory() as rl_session:
+            decision = await check_rate_limit(user_id, rl_session, limits)
+        if not isinstance(decision, Allow):
+            return error(
+                "USER_INPUT",
+                f"Rate limit exceeded: {decision.reason}",
+                field="user_id",
+                expected={"retry_after_seconds": decision.retry_after_seconds},
             )
-            decision = await check_rate_limit(user_id, session, limits)
-            if not isinstance(decision, Allow):
-                return error(
-                    "USER_INPUT",
-                    f"Rate limit exceeded: {decision.reason}",
-                    field="user_id",
-                    expected={"retry_after_seconds": decision.retry_after_seconds},
-                )
+        async with session_factory() as session:
             job = await create_job(
                 session,
                 user_id=user_id,
