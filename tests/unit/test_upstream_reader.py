@@ -46,7 +46,6 @@ def _make_run(result: str | None = None, error_message: str | None = None) -> Ma
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
 async def test_no_result_when_run_not_found():
     session = _make_session(None)
     payload = await read_upstream(999, session)
@@ -58,7 +57,6 @@ async def test_no_result_when_run_not_found():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
 async def test_no_result_when_result_null_no_error():
     run = _make_run(result=None, error_message=None)
     session = _make_session(run)
@@ -71,7 +69,6 @@ async def test_no_result_when_result_null_no_error():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
 async def test_upstream_error_when_result_null_with_error_message():
     run = _make_run(result=None, error_message="connection refused")
     session = _make_session(run)
@@ -85,7 +82,6 @@ async def test_upstream_error_when_result_null_with_error_message():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
 async def test_ok_when_result_is_valid_json_object():
     data = {"status": "ok", "count": 42}
     run = _make_run(result=json.dumps(data))
@@ -95,7 +91,6 @@ async def test_ok_when_result_is_valid_json_object():
     assert payload.data == data
 
 
-@pytest.mark.asyncio
 async def test_ok_when_result_is_valid_json_array():
     data = [1, 2, 3]
     run = _make_run(result=json.dumps(data))
@@ -105,7 +100,6 @@ async def test_ok_when_result_is_valid_json_array():
     assert payload.data == data
 
 
-@pytest.mark.asyncio
 async def test_ok_when_result_is_valid_json_string():
     run = _make_run(result=json.dumps("hello"))
     session = _make_session(run)
@@ -114,7 +108,6 @@ async def test_ok_when_result_is_valid_json_string():
     assert payload.data == "hello"
 
 
-@pytest.mark.asyncio
 async def test_ok_when_result_is_valid_json_number():
     run = _make_run(result="123")
     session = _make_session(run)
@@ -128,7 +121,6 @@ async def test_ok_when_result_is_valid_json_number():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
 async def test_invalid_json_when_result_is_not_json():
     run = _make_run(result="not-json{{")
     session = _make_session(run)
@@ -137,7 +129,6 @@ async def test_invalid_json_when_result_is_not_json():
     assert payload.raw == "not-json{{"
 
 
-@pytest.mark.asyncio
 async def test_invalid_json_when_result_is_truncated():
     run = _make_run(result='{"key": ')
     session = _make_session(run)
@@ -151,7 +142,6 @@ async def test_invalid_json_when_result_is_truncated():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
 async def test_payload_variants_are_distinct_types():
     """Each variant is a distinct class; isinstance checks work as expected."""
     assert not isinstance(NoResult(), Ok)
@@ -162,7 +152,6 @@ async def test_payload_variants_are_distinct_types():
     assert not isinstance(InvalidJson(raw="x"), Ok)
 
 
-@pytest.mark.asyncio
 async def test_ok_is_frozen():
     """Ok is a frozen dataclass — mutation raises AttributeError."""
     payload = Ok(data={"k": "v"})
