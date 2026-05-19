@@ -129,6 +129,9 @@ setup_repo() {
     # elasticmq.conf already lives at repo root after clone, so no copy needed.
     cp "$DEPLOY_DIR/$INFRA_SRC/docker-compose.yml" "$DEPLOY_DIR/docker-compose.yml"
     cp "$DEPLOY_DIR/$INFRA_SRC/Caddyfile" "$DEPLOY_DIR/Caddyfile"
+    # Sync static landing-page assets so Caddy's ./static:/var/www mount resolves.
+    rsync -a --delete "$DEPLOY_DIR/$INFRA_SRC/static/" "$DEPLOY_DIR/static/"
+    chown -R "$DEPLOY_USER:$DEPLOY_USER" "$DEPLOY_DIR/static"
     chown "$DEPLOY_USER:$DEPLOY_USER" \
         "$DEPLOY_DIR/docker-compose.yml" \
         "$DEPLOY_DIR/Caddyfile" \
