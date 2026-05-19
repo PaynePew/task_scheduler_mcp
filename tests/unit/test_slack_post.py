@@ -40,6 +40,22 @@ def _patch_http(status_code: int = 200, body: str = "ok"):
     return patch("app.actions.slack_post.httpx.AsyncClient", return_value=ctx)
 
 
+def _capture_http_post(status_code: int = 200) -> tuple[MagicMock, list[dict]]:
+    """Return (AsyncClient ctx, captured_payloads list) — appends each POST JSON body."""
+    captured: list[dict] = []
+
+    async def fake_post(url: str, **kwargs: object) -> httpx.Response:
+        captured.append(kwargs.get("json", {}))
+        return httpx.Response(status_code, content=b"ok")
+
+    mock_client = AsyncMock()
+    mock_client.post = fake_post
+    ctx = MagicMock()
+    ctx.__aenter__ = AsyncMock(return_value=mock_client)
+    ctx.__aexit__ = AsyncMock(return_value=None)
+    return ctx, captured
+
+
 # ---------------------------------------------------------------------------
 # Template formatter unit tests
 # ---------------------------------------------------------------------------
@@ -384,17 +400,7 @@ async def test_from_run_id_invalid_json_interview_brief():
 async def test_digest_v1_ok_path_formats_data():
     data = {"PRs": 3, "Issues": 7}
     mock_factory = _make_mock_session_factory()
-    posted_payloads: list[dict] = []
-
-    async def capture_post(url: str, **kwargs: object) -> httpx.Response:
-        posted_payloads.append(kwargs.get("json", {}))
-        return httpx.Response(200, content=b"ok")
-
-    mock_client = AsyncMock()
-    mock_client.post = capture_post
-    ctx = MagicMock()
-    ctx.__aenter__ = AsyncMock(return_value=mock_client)
-    ctx.__aexit__ = AsyncMock(return_value=None)
+    ctx, posted_payloads = _capture_http_post()
 
     with patch("app.actions.slack_post.read_upstream", AsyncMock(return_value=Ok(data=data))):
         with patch.dict("os.environ", {"SLACK_WEBHOOK_URL": "https://hooks.slack.com/test"}):
@@ -416,17 +422,7 @@ async def test_digest_v1_ok_path_formats_data():
 async def test_digest_v1_error_path_shows_warning():
     payload = UpstreamError(error_msg="github rate limited")
     mock_factory = _make_mock_session_factory()
-    posted_payloads: list[dict] = []
-
-    async def capture_post(url: str, **kwargs: object) -> httpx.Response:
-        posted_payloads.append(kwargs.get("json", {}))
-        return httpx.Response(200, content=b"ok")
-
-    mock_client = AsyncMock()
-    mock_client.post = capture_post
-    ctx = MagicMock()
-    ctx.__aenter__ = AsyncMock(return_value=mock_client)
-    ctx.__aexit__ = AsyncMock(return_value=None)
+    ctx, posted_payloads = _capture_http_post()
 
     with patch("app.actions.slack_post.read_upstream", AsyncMock(return_value=payload)):
         with patch.dict("os.environ", {"SLACK_WEBHOOK_URL": "https://hooks.slack.com/test"}):
@@ -447,17 +443,7 @@ async def test_digest_v1_error_path_shows_warning():
 async def test_interview_brief_ok_path_formats_data():
     data = {"Candidate": "Alice", "Role": "SWE"}
     mock_factory = _make_mock_session_factory()
-    posted_payloads: list[dict] = []
-
-    async def capture_post(url: str, **kwargs: object) -> httpx.Response:
-        posted_payloads.append(kwargs.get("json", {}))
-        return httpx.Response(200, content=b"ok")
-
-    mock_client = AsyncMock()
-    mock_client.post = capture_post
-    ctx = MagicMock()
-    ctx.__aenter__ = AsyncMock(return_value=mock_client)
-    ctx.__aexit__ = AsyncMock(return_value=None)
+    ctx, posted_payloads = _capture_http_post()
 
     with patch("app.actions.slack_post.read_upstream", AsyncMock(return_value=Ok(data=data))):
         with patch.dict("os.environ", {"SLACK_WEBHOOK_URL": "https://hooks.slack.com/test"}):
@@ -478,17 +464,7 @@ async def test_interview_brief_ok_path_formats_data():
 async def test_interview_brief_error_path_shows_warning():
     payload = UpstreamError(error_msg="calendar unavailable")
     mock_factory = _make_mock_session_factory()
-    posted_payloads: list[dict] = []
-
-    async def capture_post(url: str, **kwargs: object) -> httpx.Response:
-        posted_payloads.append(kwargs.get("json", {}))
-        return httpx.Response(200, content=b"ok")
-
-    mock_client = AsyncMock()
-    mock_client.post = capture_post
-    ctx = MagicMock()
-    ctx.__aenter__ = AsyncMock(return_value=mock_client)
-    ctx.__aexit__ = AsyncMock(return_value=None)
+    ctx, posted_payloads = _capture_http_post()
 
     with patch("app.actions.slack_post.read_upstream", AsyncMock(return_value=payload)):
         with patch.dict("os.environ", {"SLACK_WEBHOOK_URL": "https://hooks.slack.com/test"}):
@@ -509,17 +485,7 @@ async def test_interview_brief_error_path_shows_warning():
 async def test_raw_ok_path():
     data = "raw upstream text"
     mock_factory = _make_mock_session_factory()
-    posted_payloads: list[dict] = []
-
-    async def capture_post(url: str, **kwargs: object) -> httpx.Response:
-        posted_payloads.append(kwargs.get("json", {}))
-        return httpx.Response(200, content=b"ok")
-
-    mock_client = AsyncMock()
-    mock_client.post = capture_post
-    ctx = MagicMock()
-    ctx.__aenter__ = AsyncMock(return_value=mock_client)
-    ctx.__aexit__ = AsyncMock(return_value=None)
+    ctx, posted_payloads = _capture_http_post()
 
     with patch("app.actions.slack_post.read_upstream", AsyncMock(return_value=Ok(data=data))):
         with patch.dict("os.environ", {"SLACK_WEBHOOK_URL": "https://hooks.slack.com/test"}):
@@ -537,17 +503,7 @@ async def test_raw_ok_path():
 async def test_raw_error_path():
     payload = UpstreamError(error_msg="timeout error")
     mock_factory = _make_mock_session_factory()
-    posted_payloads: list[dict] = []
-
-    async def capture_post(url: str, **kwargs: object) -> httpx.Response:
-        posted_payloads.append(kwargs.get("json", {}))
-        return httpx.Response(200, content=b"ok")
-
-    mock_client = AsyncMock()
-    mock_client.post = capture_post
-    ctx = MagicMock()
-    ctx.__aenter__ = AsyncMock(return_value=mock_client)
-    ctx.__aexit__ = AsyncMock(return_value=None)
+    ctx, posted_payloads = _capture_http_post()
 
     with patch("app.actions.slack_post.read_upstream", AsyncMock(return_value=payload)):
         with patch.dict("os.environ", {"SLACK_WEBHOOK_URL": "https://hooks.slack.com/test"}):
