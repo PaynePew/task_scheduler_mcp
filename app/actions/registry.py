@@ -3,6 +3,7 @@
 from app.actions.base import ActionHandler
 from app.actions.calendar_digest_ics import CalendarDigestICSHandler
 from app.actions.echo import EchoHandler
+from app.actions.github_digest import GitHubDigestHandler
 from app.actions.http_call import HttpCallHandler
 from app.actions.slack_post import SlackPostHandler
 
@@ -11,4 +12,5 @@ ACTION_REGISTRY: dict[str, ActionHandler] = {
     HttpCallHandler.name: HttpCallHandler(),
     CalendarDigestICSHandler.name: CalendarDigestICSHandler(),
     SlackPostHandler.name: SlackPostHandler(),
+    GitHubDigestHandler.name: GitHubDigestHandler(),
 }
