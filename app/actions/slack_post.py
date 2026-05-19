@@ -78,8 +78,6 @@ class SlackPostParams(BaseModel):
 def _format_raw(data: Any, *, is_error: bool = False) -> str:
     if is_error:
         return f"⚠ Upstream error: {data}"
-    if isinstance(data, (dict, list)):
-        return str(data)
     return str(data)
 
 
