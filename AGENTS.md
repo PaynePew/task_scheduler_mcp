@@ -1,4 +1,4 @@
-# ChatGPT Task Scheduler
+# Task Scheduler MCP
 
 MCP-based job scheduler exposing `task.create / list / status / cancel / list_actions` tools backed by Postgres + SQS (ElasticMQ locally). See `docs/PRD/prototype-w1.md` for the W1 prototype spec.
 
@@ -6,7 +6,7 @@ MCP-based job scheduler exposing `task.create / list / status / cancel / list_ac
 
 ### Issue tracker
 
-GitHub Issues via the `gh` CLI. Repo: `PaynePew/chatgpt_task`. See `docs/agents/issue-tracker.md`.
+GitHub Issues via the `gh` CLI. Repo: `PaynePew/task_scheduler_mcp`. See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 

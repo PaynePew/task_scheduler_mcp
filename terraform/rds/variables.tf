@@ -7,7 +7,7 @@ variable "aws_region" {
 variable "project" {
   description = "Project name prefix used for resource naming and tagging."
   type        = string
-  default     = "chatgpt-task"
+  default     = "task-scheduler-mcp"
 }
 
 variable "vpc_id" {
@@ -28,13 +28,13 @@ variable "ecs_tasks_sg_id" {
 variable "db_name" {
   description = "Initial database name."
   type        = string
-  default     = "chatgpt_task"
+  default     = "task_scheduler_mcp"
 }
 
 variable "db_username" {
   description = "Master DB username."
   type        = string
-  default     = "chatgpt_task"
+  default     = "task_scheduler_mcp"
 }
 
 variable "rds_multi_az" {

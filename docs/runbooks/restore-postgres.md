@@ -15,7 +15,7 @@
 ## 1. List available backups
 
 ```bash
-rclone ls r2:chatgpt-task-backups/
+rclone ls r2:task-scheduler-mcp-backups/
 ```
 
 Backups are named `scheduler-YYYYMMDD-HHMMSS.sql.gz`. Retention is 7 days.
@@ -25,7 +25,7 @@ Backups are named `scheduler-YYYYMMDD-HHMMSS.sql.gz`. Retention is 7 days.
 ## 2. Pull the snapshot from R2
 
 ```bash
-rclone copy r2:chatgpt-task-backups/scheduler-YYYYMMDD-HHMMSS.sql.gz /tmp/
+rclone copy r2:task-scheduler-mcp-backups/scheduler-YYYYMMDD-HHMMSS.sql.gz /tmp/
 ```
 
 Replace `YYYYMMDD-HHMMSS` with the timestamp of the snapshot you want to restore.
@@ -38,7 +38,7 @@ Replace `YYYYMMDD-HHMMSS` with the timestamp of the snapshot you want to restore
 
 ```bash
 # Stop app services to avoid writes during restore
-cd /opt/chatgpt_task
+cd /opt/task_scheduler_mcp
 docker compose stop mcp-server watcher worker recurring-watcher chain-watcher
 
 # Drop and recreate the database
@@ -83,7 +83,7 @@ docker compose run --rm migrate
 docker compose exec -T postgres psql -U app app -c "\dt"
 
 # 3. Pull a recent backup (requires rclone configured locally)
-rclone copy r2:chatgpt-task-backups/scheduler-YYYYMMDD-HHMMSS.sql.gz /tmp/
+rclone copy r2:task-scheduler-mcp-backups/scheduler-YYYYMMDD-HHMMSS.sql.gz /tmp/
 
 # 4. Restore (note: local DB is named 'app', not 'scheduler' — adapt as needed)
 #    For drill purposes, restore into a separate 'scheduler_restore' database:
@@ -121,5 +121,5 @@ Drill passes when row counts match the R2 snapshot and no errors appear.
 ## References
 
 - Backup script: `/etc/cron.daily/pg-backup.sh`
-- R2 bucket: `chatgpt-task-backups`
+- R2 bucket: `task-scheduler-mcp-backups`
 - ADR-030: Operational concerns — backup rationale and retention policy

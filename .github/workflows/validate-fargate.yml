@@ -6,6 +6,14 @@ name: Validate Fargate (apply → smoke → evidence → destroy)
 on:
   workflow_dispatch:
     inputs:
+      dry_mode:
+        description: >
+          When true: runs init + plan + captures tfplan artifact only.
+          Skips apply, sanity gates, smoke, sleep, and destroy. Cost: $0.
+          Use during W4 development to validate Terraform changes for free.
+        required: false
+        type: boolean
+        default: false
       duration_minutes:
         description: >
           Minutes to keep the stack alive after the smoke test
@@ -14,10 +22,14 @@ on:
         required: true
         type: string
 
+concurrency:
+  group: validate-fargate
+  cancel-in-progress: false
+
 env:
   AWS_REGION: ap-northeast-1
-  PROJECT: chatgpt-task
-  TF_LOCK_TABLE: chatgpt-task-terraform-locks
+  PROJECT: task-scheduler-mcp
+  TF_LOCK_TABLE: task-scheduler-mcp-terraform-locks
 
 permissions:
   id-token: write  # Required for OIDC token exchange
@@ -39,6 +51,7 @@ jobs:
       # 0. Guard rails
       # ------------------------------------------------------------------
       - name: Validate duration_minutes (1–120)
+        if: ${{ !inputs.dry_mode }}
         run: |
           d="${{ inputs.duration_minutes }}"
           if ! [[ "$d" =~ ^[0-9]+$ ]] || [ "$d" -lt 1 ] || [ "$d" -gt 120 ]; then
@@ -59,6 +72,14 @@ jobs:
           terraform_version: "~1.9"
           # Keep raw stdout for terraform output parsing later
           terraform_wrapper: false
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Install Python deps
+        run: uv sync
 
       # ------------------------------------------------------------------
       # 2. AWS auth (OIDC — no long-lived credentials stored)
@@ -186,30 +207,37 @@ jobs:
       # 5. Apply phase — apply in dependency order (~10 min for full stack)
       # ------------------------------------------------------------------
       - name: Apply — vpc
+        if: ${{ !inputs.dry_mode }}
         working-directory: terraform/vpc
         run: terraform apply -auto-approve tfplan
 
       - name: Apply — iam
+        if: ${{ !inputs.dry_mode }}
         working-directory: terraform/iam
         run: terraform apply -auto-approve tfplan
 
       - name: Apply — ecr
+        if: ${{ !inputs.dry_mode }}
         working-directory: terraform/ecr
         run: terraform apply -auto-approve tfplan
 
       - name: Apply — cw_logs
+        if: ${{ !inputs.dry_mode }}
         working-directory: terraform/cw_logs
         run: terraform apply -auto-approve tfplan
 
       - name: Apply — rds
+        if: ${{ !inputs.dry_mode }}
         working-directory: terraform/rds
         run: terraform apply -auto-approve tfplan
 
       - name: Apply — sqs
+        if: ${{ !inputs.dry_mode }}
         working-directory: terraform/sqs
         run: terraform apply -auto-approve tfplan
 
       - name: Apply — compute (ECS + ALB)
+        if: ${{ !inputs.dry_mode }}
         working-directory: terraform/compute
         run: terraform apply -auto-approve tfplan
 
@@ -217,6 +245,7 @@ jobs:
       # 6. Poll ALB target group HealthyHostCount (timeout 5 min)
       # ------------------------------------------------------------------
       - name: Get ALB target group ARN from terraform output
+        if: ${{ !inputs.dry_mode }}
         id: tf-outputs
         working-directory: terraform/compute
         run: |
@@ -228,6 +257,7 @@ jobs:
           echo "cluster=${cluster}" >> "$GITHUB_OUTPUT"
 
       - name: Wait for ALB healthy host (5-min timeout)
+        if: ${{ !inputs.dry_mode }}
         env:
           TG_ARN: ${{ steps.tf-outputs.outputs.tg_arn }}
         run: |
@@ -248,28 +278,88 @@ jobs:
           exit 1
 
       # ------------------------------------------------------------------
-      # 7. Smoke test — /healthz must return HTTP 200
+      # 6b. Post-apply sanity gates (ECS / ALB / RDS)
       # ------------------------------------------------------------------
-      - name: Smoke test — curl /healthz
+      - name: Sanity gate — ECS services running
+        if: ${{ !inputs.dry_mode }}
+        env:
+          CLUSTER: ${{ steps.tf-outputs.outputs.cluster }}
+        run: |
+          service_arns=$(aws ecs list-services \
+            --cluster "$CLUSTER" \
+            --query 'serviceArns[]' \
+            --output text)
+          if [ -z "$service_arns" ]; then
+            echo "::error::ECS sanity gate — no services found in cluster $CLUSTER"
+            exit 1
+          fi
+          # shellcheck disable=SC2086
+          desc=$(aws ecs describe-services \
+            --cluster "$CLUSTER" \
+            --services $service_arns \
+            --query 'services[*].{name:serviceName,running:runningCount,desired:desiredCount}' \
+            --output json)
+          failed=$(echo "$desc" | jq -r '.[] | select(.running != .desired) | "\(.name): running=\(.running) desired=\(.desired)"')
+          if [ -n "$failed" ]; then
+            echo "::error::ECS sanity gate failed — runningCount != desiredCount:"
+            echo "$failed"
+            exit 1
+          fi
+          echo "ECS sanity gate passed — all services have runningCount == desiredCount."
+
+      - name: Sanity gate — ALB targets healthy
+        if: ${{ !inputs.dry_mode }}
+        env:
+          TG_ARN: ${{ steps.tf-outputs.outputs.tg_arn }}
+        run: |
+          unhealthy=$(aws elbv2 describe-target-health \
+            --target-group-arn "$TG_ARN" \
+            --query 'TargetHealthDescriptions[?TargetHealth.State!=`healthy`]' \
+            --output json | jq -r '.[] | "\(.Target.Id): \(.TargetHealth.State) (\(.TargetHealth.Reason // "n/a"))"')
+          if [ -n "$unhealthy" ]; then
+            echo "::error::ALB sanity gate failed — unhealthy targets detected:"
+            echo "$unhealthy"
+            exit 1
+          fi
+          echo "ALB sanity gate passed — all targets are healthy."
+
+      - name: Sanity gate — RDS available
+        if: ${{ !inputs.dry_mode }}
+        run: |
+          bad=$(aws rds describe-db-instances \
+            --filters "Name=tag:Project,Values=${{ env.PROJECT }}" \
+            --query 'DBInstances[*].{id:DBInstanceIdentifier,status:DBInstanceStatus}' \
+            --output json | jq -r '.[] | select(.status != "available") | "\(.id): \(.status)"')
+          if [ -n "$bad" ]; then
+            echo "::error::RDS sanity gate failed — instance(s) not in 'available' state:"
+            echo "$bad"
+            exit 1
+          fi
+          echo "RDS sanity gate passed — all DB instances are 'available'."
+
+      # ------------------------------------------------------------------
+      # 7. Smoke test — w3-smoke.py exercises L4a + L4b against the ALB
+      # ------------------------------------------------------------------
+      - name: Smoke test — w3-smoke.py
+        if: ${{ !inputs.dry_mode }}
         env:
           ALB_DNS: ${{ steps.tf-outputs.outputs.alb_dns }}
-        run: |
-          echo "Smoke-testing https://${ALB_DNS}/healthz"
-          curl --fail --silent --show-error --max-time 10 \
-            "https://${ALB_DNS}/healthz"
-          echo "Smoke test passed."
+        run: uv run python bin/w3-smoke.py --url="https://${ALB_DNS}"
 
       # ------------------------------------------------------------------
       # 8. Evidence capture + artifact upload (90-day retention)
       # ------------------------------------------------------------------
       - name: Create artifacts directory
+        if: ${{ !inputs.dry_mode }}
         run: mkdir -p artifacts
 
       - name: Capture Terraform outputs
+        if: ${{ !inputs.dry_mode }}
         working-directory: terraform/compute
         run: terraform output -json > ../../artifacts/tf-outputs.json
 
       - name: Capture ECS service descriptions
+        if: ${{ !inputs.dry_mode }}
         env:
           CLUSTER: ${{ steps.tf-outputs.outputs.cluster }}
         run: |
@@ -285,12 +375,14 @@ jobs:
             > artifacts/ecs-services.json
 
       - name: Capture RDS instance descriptions
+        if: ${{ !inputs.dry_mode }}
         run: |
           aws rds describe-db-instances \
             --filters "Name=tag:Project,Values=${{ env.PROJECT }}" \
             > artifacts/rds.json
 
       - name: Upload evidence artifacts (90-day retention)
+        if: ${{ !inputs.dry_mode }}
         uses: actions/upload-artifact@v4
         with:
           name: fargate-validation-evidence
@@ -301,6 +393,7 @@ jobs:
       # 9. Keep stack alive for demo recording / manual inspection
       # ------------------------------------------------------------------
       - name: Keep stack alive — sleep ${{ inputs.duration_minutes }} min
+        if: ${{ !inputs.dry_mode }}
         run: |
           d="${{ inputs.duration_minutes }}"
           echo "Stack is live. Sleeping ${d} minute(s) before destroy."
@@ -311,34 +404,34 @@ jobs:
       # 10. Destroy — reverse apply order
       # ------------------------------------------------------------------
       - name: Destroy — compute (ECS + ALB)
-        if: always()
+        if: always() && !inputs.dry_mode
         working-directory: terraform/compute
         run: terraform destroy -auto-approve -var="aws_region=${{ env.AWS_REGION }}"
 
       - name: Destroy — sqs
-        if: always()
+        if: always() && !inputs.dry_mode
         working-directory: terraform/sqs
         run: terraform destroy -auto-approve -var="aws_region=${{ env.AWS_REGION }}"
 
       - name: Destroy — rds
-        if: always()
+        if: always() && !inputs.dry_mode
         working-directory: terraform/rds
         run: |
           terraform destroy -auto-approve \
             -var="aws_region=${{ env.AWS_REGION }}"
 
       - name: Destroy — cw_logs
-        if: always()
+        if: always() && !inputs.dry_mode
         working-directory: terraform/cw_logs
         run: terraform destroy -auto-approve -var="aws_region=${{ env.AWS_REGION }}"
 
       - name: Destroy — ecr
-        if: always()
+        if: always() && !inputs.dry_mode
         working-directory: terraform/ecr
         run: terraform destroy -auto-approve -var="aws_region=${{ env.AWS_REGION }}"
 
       - name: Destroy — iam
-        if: always()
+        if: always() && !inputs.dry_mode
         working-directory: terraform/iam
         run: |
           terraform destroy -auto-approve \
@@ -346,7 +439,7 @@ jobs:
             -var="budget_alert_email=${{ secrets.BUDGET_ALERT_EMAIL }}"
 
       - name: Destroy — vpc
-        if: always()
+        if: always() && !inputs.dry_mode
         working-directory: terraform/vpc
         run: terraform destroy -auto-approve -var="aws_region=${{ env.AWS_REGION }}"
 
@@ -354,7 +447,7 @@ jobs:
       # 11. Final sanity — verify VPC is gone
       # ------------------------------------------------------------------
       - name: Final sanity — assert VPC is fully destroyed
-        if: always()
+        if: always() && !inputs.dry_mode
         run: |
           remaining=$(aws ec2 describe-vpcs \
             --filters "Name=tag:Project,Values=${{ env.PROJECT }}" \
@@ -366,3 +459,25 @@ jobs:
             exit 1
           fi
           echo "All VPCs with tag Project=${PROJECT} are gone. Stack is clean."
+
+      # ------------------------------------------------------------------
+      # 12. Orphan check — Resource Groups Tagging API (after 60 s grace)
+      # ------------------------------------------------------------------
+      - name: Wait 60 s for resource deregistration
+        if: always() && !inputs.dry_mode
+        run: sleep 60
+
+      - name: Orphan check — Resource Groups Tagging API
+        if: always() && !inputs.dry_mode
+        run: |
+          remaining=$(aws resourcegroupstaggingapi get-resources \
+            --tag-filters Key=Project,Values=task-scheduler-mcp \
+            --query 'ResourceTagMappingList[*].ResourceARN' \
+            --output json)
+          count=$(echo "$remaining" | jq 'length')
+          if [ "$count" -gt 0 ]; then
+            echo "::error::Orphan check failed — ${count} tagged resource(s) still present after destroy:"
+            echo "$remaining" | jq -r '.[]'
+            exit 1
+          fi
+          echo "Orphan check passed — no resources with tag Project=task-scheduler-mcp remain."

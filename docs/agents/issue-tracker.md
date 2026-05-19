@@ -5,7 +5,7 @@ Issues for this repo live in GitHub Issues. Skills that read or write issues
 
 ## Repo
 
-`PaynePew/chatgpt_task` on GitHub. The `origin` remote is configured.
+`PaynePew/task_scheduler_mcp` on GitHub. The `origin` remote is configured.
 
 ## Creating issues
 

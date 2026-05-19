@@ -29,6 +29,7 @@ from app.mcp.resources.actions_resource import read_tasks_actions
 from app.mcp.resources.job_resource import read_tasks_job
 from app.mcp.resources.list_resource import read_tasks_list
 from app.mcp.resources.recent_results import read_tasks_recent_results
+from app.secrets.literal_detection import detect_literal_secret
 
 logger = logging.getLogger(__name__)
 
@@ -299,6 +300,21 @@ async def _handle_task_create(
 ) -> dict[str, Any]:
     action = arguments.get("action")
     action_params = arguments.get("action_params", {})
+
+    matched_prefix = detect_literal_secret(action_params)
+    if matched_prefix is not None:
+        return error(
+            "USER_INPUT",
+            (
+                f"action_params appears to contain a literal credential"
+                f" (matched prefix: {matched_prefix!r})."
+                " Use ${VAR_NAME} form instead (e.g. ${ANTHROPIC_API_KEY})"
+                " so the value is read from the server environment at execution time."
+            ),
+            field="action_params",
+            expected="${VAR_NAME} reference instead of a literal credential",
+        )
+
     schedule_type = arguments.get("schedule_type", "immediate")
     scheduled_at = arguments.get("scheduled_at")
     idempotency_key = arguments.get("idempotency_key")
