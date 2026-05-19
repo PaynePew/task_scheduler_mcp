@@ -14,7 +14,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 import pytest_asyncio
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.chain.upstream_reader import (
     InvalidJson,
@@ -32,7 +32,7 @@ from app.db.models import Job, JobRun
 
 
 @pytest_asyncio.fixture
-async def session_factory():
+async def session_factory() -> async_sessionmaker[AsyncSession]:
     """Fresh engine per test; cleans all job data on teardown."""
     engine = create_async_engine()
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -46,13 +46,13 @@ async def session_factory():
 
 
 async def _insert_run(
-    factory: async_sessionmaker,
+    factory: async_sessionmaker[AsyncSession],
     *,
     result: str | None = None,
     error_message: str | None = None,
     status: str = "SUCCEEDED",
-) -> JobRun:
-    """Insert a minimal Job + JobRun and return the persisted JobRun."""
+) -> int:
+    """Insert a minimal Job + JobRun and return the new run_id."""
     scheduled = datetime.now(tz=UTC) - timedelta(hours=1)
     bucket = scheduled.replace(minute=0, second=0, microsecond=0).isoformat()
 
@@ -79,17 +79,7 @@ async def _insert_run(
             )
             session.add(run)
             await session.flush()
-            run_id = run.run_id
-
-    # Return a plain object with the run_id for lookups
-    async with factory() as session:
-        from sqlalchemy import select
-
-        async with session.begin():
-            refreshed = (
-                await session.execute(select(JobRun).where(JobRun.run_id == run_id))
-            ).scalar_one()
-            return refreshed
+            return run.run_id
 
 
 # ---------------------------------------------------------------------------
@@ -101,11 +91,11 @@ async def _insert_run(
 async def test_ok_when_upstream_run_has_json_result(session_factory):
     """Completed upstream JobRun with valid JSON result → Ok(parsed_json)."""
     payload_data = {"summary": "5 issues closed", "count": 5}
-    run = await _insert_run(factory=session_factory, result=json.dumps(payload_data))
+    run_id = await _insert_run(factory=session_factory, result=json.dumps(payload_data))
 
     async with session_factory() as session:
         async with session.begin():
-            payload = await read_upstream(run.run_id, session)
+            payload = await read_upstream(run_id, session)
 
     assert isinstance(payload, Ok)
     assert payload.data == payload_data
@@ -119,11 +109,11 @@ async def test_ok_when_upstream_run_has_json_result(session_factory):
 @pytest.mark.integration
 async def test_no_result_when_upstream_result_null(session_factory):
     """Upstream JobRun with result=NULL → NoResult."""
-    run = await _insert_run(factory=session_factory, result=None, error_message=None)
+    run_id = await _insert_run(factory=session_factory, result=None, error_message=None)
 
     async with session_factory() as session:
         async with session.begin():
-            payload = await read_upstream(run.run_id, session)
+            payload = await read_upstream(run_id, session)
 
     assert isinstance(payload, NoResult)
 
@@ -137,11 +127,11 @@ async def test_no_result_when_upstream_result_null(session_factory):
 async def test_invalid_json_when_upstream_result_is_malformed(session_factory):
     """Upstream JobRun with invalid JSON in result → InvalidJson."""
     raw = "not-valid-json{{"
-    run = await _insert_run(factory=session_factory, result=raw)
+    run_id = await _insert_run(factory=session_factory, result=raw)
 
     async with session_factory() as session:
         async with session.begin():
-            payload = await read_upstream(run.run_id, session)
+            payload = await read_upstream(run_id, session)
 
     assert isinstance(payload, InvalidJson)
     assert payload.raw == raw
@@ -171,7 +161,7 @@ async def test_no_result_when_run_id_missing(session_factory):
 async def test_upstream_error_when_result_null_error_message_set(session_factory):
     """Upstream JobRun with result=NULL and error_message set → UpstreamError."""
     msg = "http 500 from downstream API"
-    run = await _insert_run(
+    run_id = await _insert_run(
         factory=session_factory,
         result=None,
         error_message=msg,
@@ -180,7 +170,7 @@ async def test_upstream_error_when_result_null_error_message_set(session_factory
 
     async with session_factory() as session:
         async with session.begin():
-            payload = await read_upstream(run.run_id, session)
+            payload = await read_upstream(run_id, session)
 
     assert isinstance(payload, UpstreamError)
     assert payload.error_msg == msg
