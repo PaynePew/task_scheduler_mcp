@@ -17,6 +17,7 @@ dependencies = [
     "boto3",
     "httpx",
     "croniter>=6.2.2",
+    "icalendar>=6.0",
 ]
 
 [dependency-groups]

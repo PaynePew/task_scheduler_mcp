@@ -22,6 +22,7 @@ DEFAULT_WHITELIST: frozenset[str] = frozenset(
         "GOOGLE_API_KEY",
         "SLACK_WEBHOOK_URL",
         "GITHUB_TOKEN",
+        "GCAL_ICS_URL",
     }
 )
 
