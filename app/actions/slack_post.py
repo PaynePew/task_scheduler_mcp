@@ -223,7 +223,7 @@ class SlackPostHandler:
             return formatter(f"(invalid JSON: {upstream.raw[:100]})", is_error=True)
         return ActionResult(
             ok=False, result=None, error="unknown upstream payload", retryable=False
-        )  # noqa: E501
+        )
 
     @staticmethod
     def _classify_response(response: httpx.Response) -> ActionResult:
