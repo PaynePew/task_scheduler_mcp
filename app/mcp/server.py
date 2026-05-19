@@ -28,6 +28,7 @@ from app.mcp.prompts import setup_summary as _setup_summary
 from app.mcp.resources.actions_resource import read_tasks_actions
 from app.mcp.resources.job_resource import read_tasks_job
 from app.mcp.resources.list_resource import read_tasks_list
+from app.mcp.resources.recent_results import read_tasks_recent_results
 from app.secrets.literal_detection import detect_literal_secret
 
 logger = logging.getLogger(__name__)
@@ -147,6 +148,17 @@ _RESOURCE_TEMPLATE_JOB = types.ResourceTemplate(
     mimeType="application/json",
 )
 
+_RESOURCE_RECENT_RESULTS = types.Resource(
+    uri=types.AnyUrl("tasks://recent-results"),
+    name="Recent Results",
+    description=(
+        "Last 24h of completed/failed/cancelled runs for the calling user. "
+        "Capped at 50 rows newest-first. Use this on connect to brief the user "
+        "on overnight activity (ADR-037)."
+    ),
+    mimeType="application/json",
+)
+
 
 def _build_action_list() -> list[dict[str, Any]]:
     return [
@@ -245,7 +257,7 @@ def create_server(
 
     @server.list_resources()
     async def list_resources() -> list[types.Resource]:
-        return [_RESOURCE_LIST, _RESOURCE_ACTIONS]
+        return [_RESOURCE_LIST, _RESOURCE_ACTIONS, _RESOURCE_RECENT_RESULTS]
 
     @server.read_resource()
     async def read_resource(uri: AnyUrl):
@@ -256,6 +268,8 @@ def create_server(
                 return read_tasks_actions()
             if uri.host == "job":
                 return await read_tasks_job(uri, user_id, session_factory=factory)
+            if uri.host == "recent-results":
+                return await read_tasks_recent_results(user_id, session_factory=factory)
         raise McpError(ErrorData(code=INVALID_PARAMS, message=f"Unknown resource URI: {uri}"))
 
     @server.call_tool()

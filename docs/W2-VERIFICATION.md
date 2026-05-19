@@ -143,10 +143,11 @@ Wait for job A to complete (~10 s with the full stack running). Then wait anothe
 
 Click **Resources** in the inspector sidebar.
 
-**Expected:** 3 entries total:
+**Expected:** 4 entries total (3 → 4 after W4-S09 added `tasks://recent-results`):
 1. `tasks://list` — "Task List" (static resource)
 2. `tasks://actions` — "Action Registry" (static resource)
 3. `tasks://job/{job_id}` — "Job Detail" (URI template)
+4. `tasks://recent-results` — "Recent Results" (static resource, added in W4-S09 / issue #95)
 
 Click **tasks://list** → **Read**.
 
@@ -187,5 +188,5 @@ Click **Get Prompt**.
 | 7 | Recurring create | `ok: true`; next occurrence scheduled after first completes |
 | 8 | Cancel recurring | `status: "cancelled"`; no further runs |
 | 9 | Chain A→B | B completes after A succeeds |
-| 10 | Resources | 3 entries; `tasks://list` filters by user |
+| 10 | Resources | 4 entries (3 → 4 after W4-S09); `tasks://list` filters by user |
 | 11 | Prompts | 2 prompts; `setup_summary` substitutes args |
