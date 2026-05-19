@@ -112,3 +112,76 @@ def test_http_call_registered_in_registry():
 def test_list_actions_exposes_both_echo_and_http_call():
     assert "echo" in ACTION_REGISTRY
     assert "http_call" in ACTION_REGISTRY
+
+
+# ---------------------------------------------------------------------------
+# ${VAR} substitution via secrets resolver
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_http_call_var_substituted_in_header():
+    """${ANTHROPIC_API_KEY} in headers is resolved to the env value before the request."""
+    handler = HttpCallHandler()
+    params = HttpCallParams(
+        method="GET",
+        url="https://example.com",
+        headers={"Authorization": "Bearer ${ANTHROPIC_API_KEY}"},
+    )
+    response = httpx.Response(200, content=b"ok")
+
+    captured: dict = {}
+
+    async def _fake_request(**kwargs):
+        captured["headers"] = kwargs.get("headers", {})
+        return response
+
+    mock_client = AsyncMock()
+    mock_client.request = _fake_request
+    ctx = MagicMock()
+    ctx.__aenter__ = AsyncMock(return_value=mock_client)
+    ctx.__aexit__ = AsyncMock(return_value=None)
+
+    with (
+        patch("app.actions.http_call.httpx.AsyncClient", return_value=ctx),
+        patch.dict("os.environ", {"ANTHROPIC_API_KEY": "sk-ant-real-key"}),
+    ):
+        result = await handler.execute(run=None, params=params)
+
+    assert result.ok is True
+    assert captured["headers"].get("Authorization") == "Bearer sk-ant-real-key"
+
+
+@pytest.mark.asyncio
+async def test_http_call_non_whitelisted_var_rejected():
+    """A ${VAR} not in the whitelist causes a permanent failure (retryable=False)."""
+    handler = HttpCallHandler()
+    params = HttpCallParams(
+        method="GET",
+        url="https://example.com",
+        headers={"X-Secret": "${DATABASE_PASSWORD}"},
+    )
+
+    with patch.dict("os.environ", {"DATABASE_PASSWORD": "hunter2"}):
+        result = await handler.execute(run=None, params=params)
+
+    assert result.ok is False
+    assert result.retryable is False
+    assert "DATABASE_PASSWORD" in (result.error or "")
+
+
+@pytest.mark.asyncio
+async def test_http_call_no_var_syntax_unchanged():
+    """Plain headers without ${...} are passed through without modification."""
+    handler = HttpCallHandler()
+    params = HttpCallParams(
+        method="GET",
+        url="https://example.com",
+        headers={"Content-Type": "application/json"},
+    )
+    response = httpx.Response(200, content=b"ok")
+
+    with _patch_client(response):
+        result = await handler.execute(run=None, params=params)
+
+    assert result.ok is True
