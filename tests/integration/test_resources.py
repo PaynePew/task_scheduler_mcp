@@ -455,12 +455,16 @@ async def test_recent_results_cap_at_50(session_factory):
 
 
 # ---------------------------------------------------------------------------
-# R4: resources/list now shows 4 entries
+# R4: resources/list handler registration
+#
+# The actual entry-count assertion (resources/list + templates/list = 4)
+# lives in test_e2e_inspector_flow.test_w2_bonuses step 10, which exercises
+# the handler end-to-end. This test only confirms the handler is wired up.
 # ---------------------------------------------------------------------------
 
 
-def test_resources_list_has_four_entries():
-    """resources/list returns 4 entries after adding tasks://recent-results."""
+def test_list_resources_handler_registered():
+    """create_server registers a list_resources handler (regression check)."""
     import mcp.types as mcp_types
 
     from app.mcp.server import create_server
