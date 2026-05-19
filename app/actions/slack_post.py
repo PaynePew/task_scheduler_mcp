@@ -52,9 +52,9 @@ from app.chain.upstream_reader import (
 from app.secrets.resolver import SecretResolutionError, build_effective_whitelist, resolve
 
 # 429: rate-limited → retry.  401/403/404/410: permanent auth/channel error → DLQ.
-# 5xx: Slack-side error → retry.
+# 5xx: Slack-side error → retry. DLQ statuses fall through to retryable=False
+# since they are not in this set; no explicit DLQ set is needed.
 _RETRYABLE_STATUSES: frozenset[int] = frozenset([429, *range(500, 600)])
-_DLQ_STATUSES: frozenset[int] = frozenset([401, 403, 404, 410])
 
 
 class SlackTemplate(StrEnum):
