@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 import pytest_asyncio
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.actions.slack_post import SlackPostHandler, SlackPostParams, SlackTemplate
@@ -85,8 +85,6 @@ async def _insert_run(
     async with factory() as session:
         async with session.begin():
             fetched_job = await session.get(Job, job_id)
-            from sqlalchemy import select
-
             fetched_run = (
                 await session.execute(select(JobRun).where(JobRun.run_id == run_id))
             ).scalar_one()
