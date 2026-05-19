@@ -5,8 +5,6 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
-
 from app.ratelimit.checker import Allow, RateLimits, Reject, check_rate_limit
 
 
@@ -35,7 +33,6 @@ _DAILY_OLDEST = _NOW - timedelta(hours=12)  # 12h ago — inside 24h daily windo
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
 async def test_allow_when_under_both_limits():
     limits = RateLimits(daily=1000, burst=10)
     session = _make_session((5, _BURST_OLDEST), (100, _DAILY_OLDEST))
@@ -43,7 +40,6 @@ async def test_allow_when_under_both_limits():
     assert isinstance(decision, Allow)
 
 
-@pytest.mark.asyncio
 async def test_allow_at_one_under_burst_limit():
     limits = RateLimits(daily=1000, burst=10)
     session = _make_session((9, _BURST_OLDEST), (9, _DAILY_OLDEST))
@@ -51,7 +47,6 @@ async def test_allow_at_one_under_burst_limit():
     assert isinstance(decision, Allow)
 
 
-@pytest.mark.asyncio
 async def test_allow_at_one_under_daily_limit():
     limits = RateLimits(daily=1000, burst=10)
     session = _make_session((0, None), (999, _DAILY_OLDEST))
@@ -64,7 +59,6 @@ async def test_allow_at_one_under_daily_limit():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
 async def test_reject_at_burst_limit():
     """count == burst limit → Reject."""
     limits = RateLimits(daily=1000, burst=10)
@@ -74,7 +68,6 @@ async def test_reject_at_burst_limit():
     assert decision.reason == "burst"
 
 
-@pytest.mark.asyncio
 async def test_reject_over_burst_limit():
     limits = RateLimits(daily=1000, burst=10)
     session = _make_session((15, _BURST_OLDEST), (15, _DAILY_OLDEST))
@@ -83,7 +76,6 @@ async def test_reject_over_burst_limit():
     assert decision.reason == "burst"
 
 
-@pytest.mark.asyncio
 async def test_burst_retry_after_seconds_correct():
     """retry_after = ceil(oldest + 60s - now)."""
     limits = RateLimits(daily=1000, burst=10)
@@ -94,7 +86,6 @@ async def test_burst_retry_after_seconds_correct():
     assert decision.retry_after_seconds == 30  # 60 - 30 = 30
 
 
-@pytest.mark.asyncio
 async def test_burst_retry_after_minimum_one():
     """retry_after is at least 1 even if the window has just expired."""
     limits = RateLimits(daily=1000, burst=10)
@@ -110,7 +101,6 @@ async def test_burst_retry_after_minimum_one():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
 async def test_reject_at_daily_limit():
     """count == daily limit → Reject daily."""
     limits = RateLimits(daily=1000, burst=10)
@@ -120,7 +110,6 @@ async def test_reject_at_daily_limit():
     assert decision.reason == "daily"
 
 
-@pytest.mark.asyncio
 async def test_daily_retry_after_seconds_correct():
     """retry_after = ceil(oldest + 24h - now)."""
     limits = RateLimits(daily=1000, burst=10)
@@ -136,7 +125,6 @@ async def test_daily_retry_after_seconds_correct():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
 async def test_burst_checked_before_daily():
     """When both limits are exceeded, burst is returned (checked first)."""
     limits = RateLimits(daily=1000, burst=10)
@@ -151,7 +139,6 @@ async def test_burst_checked_before_daily():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
 async def test_window_boundary_burst_under_via_injected_now():
     """Simulating time 61s later makes the 'oldest' job fall outside the window.
 
@@ -172,7 +159,6 @@ async def test_window_boundary_burst_under_via_injected_now():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
 async def test_multiple_users_isolated():
     """User A at daily limit does not block user B."""
     limits = RateLimits(daily=1000, burst=10)
@@ -194,7 +180,6 @@ async def test_multiple_users_isolated():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
 async def test_rate_limit_daily_env_var_override(monkeypatch):
     """RATE_LIMIT_DAILY=5 reduces the daily cap; Settings picks it up."""
     monkeypatch.setenv("RATE_LIMIT_DAILY", "5")
@@ -214,7 +199,6 @@ async def test_rate_limit_daily_env_var_override(monkeypatch):
     importlib.reload(_settings_mod)
 
 
-@pytest.mark.asyncio
 async def test_rate_limit_burst_env_var_override(monkeypatch):
     """RATE_LIMIT_BURST_PER_MINUTE=3 reduces the burst cap."""
     monkeypatch.setenv("RATE_LIMIT_BURST_PER_MINUTE", "3")
@@ -237,7 +221,6 @@ async def test_rate_limit_burst_env_var_override(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
 async def test_limits_reset_after_daily_window():
     """25h after seeding 1000 jobs, the daily window is empty → Allow."""
     limits = RateLimits(daily=1000, burst=10)
@@ -249,7 +232,6 @@ async def test_limits_reset_after_daily_window():
     assert isinstance(decision, Allow)
 
 
-@pytest.mark.asyncio
 async def test_limits_reset_after_burst_window():
     """2 minutes after a burst of 10, the burst window is empty → Allow."""
     limits = RateLimits(daily=1000, burst=10)
