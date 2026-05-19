@@ -2,13 +2,9 @@
 
 **🌐 English** | [繁體中文](README.zh-TW.md)
 
-A self-hostable MCP server that runs as a persistent HTTP service — **7 tools · 4 resources · 2 prompts** — so LLM clients can schedule, chain, and cancel recurring tasks backed by Postgres + SQS.
+A self-hostable MCP server that runs as a persistent HTTP service — **5 tools · 7 actions · 4 resources · 2 prompts** — so LLM clients can schedule, chain, and cancel recurring tasks backed by Postgres + SQS.
 
 [![CI](https://github.com/PaynePew/task_scheduler_mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/PaynePew/task_scheduler_mcp/actions) [![Demo](https://img.shields.io/badge/demo-scheduler.paynepew.dev-blue)](https://scheduler.paynepew.dev) [![Status](https://img.shields.io/badge/status-status.paynepew.dev-green)](https://status.paynepew.dev)
-
----
-
-<!-- HERO-GIF placeholder — filled in W4-S17b -->
 
 ---
 
@@ -38,7 +34,7 @@ flowchart LR
     DB --> RW[RecurringJobWatcher]
 ```
 
-The MCP server persists `Job` + `JobRun` rows. The **Watcher** claims due runs via `FOR UPDATE SKIP LOCKED` and enqueues them. The **Worker** dispatches to typed **ActionHandlers**. **ChainWatcher** and **RecurringJobWatcher** consume the append-only `run_events` outbox — they never poll mutable state.
+The MCP server persists `Job` + `JobRun` rows. The **Watcher** claims due runs via `FOR UPDATE SKIP LOCKED` and enqueues them. The **Worker** dispatches to one of 7 typed **ActionHandlers** (`echo` · `http_call` · `slack_post` · `github_digest` · `email_send` · `r2_upload` · `calendar_digest_ics`). **ChainWatcher** and **RecurringJobWatcher** consume the append-only `run_events` outbox — they never poll mutable state.
 
 ---
 
@@ -62,20 +58,20 @@ Claude Desktop config (`~/Library/Application Support/Claude/claude_desktop_conf
 }}}
 ```
 
+**BYO LLM via `http_call` + `${ANTHROPIC_API_KEY}`:** set `action: "http_call"` and reference `${ANTHROPIC_API_KEY}` in headers or body — substituted from env at run time ([ADR-032](docs/adr/ADR-032-secrets-aware-action-handlers-and-env-var-substitution.md)); add the key name to `HTTP_CALL_ENV_WHITELIST`. Rate limit: **1 000 creates/24h · 10/min burst** — env-configurable ([ADR-042](docs/adr/ADR-042-postgres-backed-rate-limiting.md)).
+
 For always-on hosting: `bin/setup-vps.sh` on a fresh Ubuntu 24.04 box (Docker + Caddy + ufw + nightly Postgres backup + systemd restart on reboot).
 
 ### Public demo (click-through only)
+
+`scheduler.paynepew.dev/` serves a landing page ([ADR-041](docs/adr/ADR-041-static-landing-page-and-caddy-path-routing.md)). The live MCP endpoint:
 
 ```bash
 curl https://scheduler.paynepew.dev/healthz   # → {"ok":true,"db":"connected"}
 MCP_USER_ID=demo npx @modelcontextprotocol/inspector https://scheduler.paynepew.dev/mcp
 ```
 
-No auth — anyone can read your jobs by guessing your `X-User-Id`. Self-host for anything that matters.
-
-### Browse the design (portfolio path)
-
-[`docs/adr/`](docs/adr/) — 42 ADRs · [`docs/PRD/`](docs/PRD/) — sprint specs · [Design Decisions](#design-decisions-adrs) below
+No auth — anyone can read your jobs by guessing your `X-User-Id`. Self-host for anything that matters. Browse: [ADRs](docs/adr/) · [PRDs](docs/PRD/) · [Design Decisions](#design-decisions-adrs)
 
 ---
 
@@ -87,7 +83,7 @@ Stdio MCPs are child processes — they die when the chat closes. A scheduler mu
 
 ## §5 Deployment Architecture
 
-<!-- DIAGRAM-D2 infrastructure diagram placeholder — filled in W4-S17a -->
+![Deployment architecture: VPS runtime + Fargate design artifact](docs/diagrams/d2-dual-deployment.png)
 
 | | VPS (runtime — live) | Fargate (design artifact) |
 |---|---|---|
@@ -101,33 +97,18 @@ Stdio MCPs are child processes — they die when the chat closes. A scheduler mu
 
 ## §6 Roadmap
 
-### W3 acceptance layers
-
-| Layer | Description | Status |
-|---|---|---|
-| L1 | Code green — CI + `terraform plan` pass | ✅ W3 |
-| L2 | Fresh VPS provision via `bin/setup-vps.sh` | ✅ W3 |
-| L3 | Live URL — `scheduler.paynepew.dev/healthz` returns 200 | ✅ W3 |
-| L4a | Echo recurring fires ≥ 2 runs in 5 min | ✅ W3 |
-| L4b | Chain A→B complete; `chain_watcher` proved live | ✅ W3 |
-| L5 | Better Stack ≥ 24h green; R2 backup + restore drill | ✅ W3 |
-| L6 | Fargate `validate-fargate.yml` green; bill < $5 | ⬜ W4 |
-| L7 | Demo video / alt-artifacts | ⬜ W4 |
-
-### W4 acceptance gates
-
 | Gate | Description | Status |
 |---|---|---|
-| G1 | CI green; test coverage targets met | ⬜ |
-| G2 | 5 new handlers in registry; `task.list_actions.v1` returns 7 | ⬜ |
-| G3 | Digest workflow live — ≥ 5 consecutive Slack messages on production VPS | ⬜ |
-| G4 | `tasks://recent-results` queryable; returns real 24h data | ⬜ |
-| G5 | Landing page live — `curl https://scheduler.paynepew.dev/` returns 200 + HTML | ⬜ |
-| G6 | Rate limiting — integration test: 1001st create rejected | ⬜ |
-| G7 | Fargate evidence — dry + recording runs green; bill < $5 | ⬜ |
-| G8 | Visual artifacts — hero GIF + 4 screenshots + 3 diagrams in README | ⬜ |
-| G9 | README polished + i18n — EN + zh-TW, ~150 lines | ⬜ |
-| G10 | ADR cluster — 13 new W4 ADRs merged | ⬜ |
+| G1 | CI green; test coverage targets met | ✅ |
+| G2 | 5 new handlers in registry; `task.list_actions.v1` returns 7 | ✅ |
+| G3 | Digest workflow live — ≥ 5 consecutive Slack messages on production VPS | ✅ |
+| G4 | `tasks://recent-results` queryable; returns real 24h data | ✅ |
+| G5 | Landing page live — `curl https://scheduler.paynepew.dev/` returns 200 + HTML | ✅ |
+| G6 | Rate limiting — integration test: 1001st create rejected | ✅ |
+| G7 | Fargate evidence — dry + recording runs green; bill < $5 | ✅ |
+| G8 | Visual artifacts — hero GIF + 4 screenshots + 3 diagrams in README | ✅ |
+| G9 | README polished + i18n — EN + zh-TW, ~150 lines | ✅ |
+| G10 | ADR cluster — 13 new W4 ADRs merged | ✅ |
 
 ---
 
@@ -175,44 +156,38 @@ W4 action sprint cohort:
 | [ADR-041](docs/adr/ADR-041-static-landing-page-and-caddy-path-routing.md) | Static landing page + Caddy path routing |
 | [ADR-042](docs/adr/ADR-042-postgres-backed-rate-limiting.md) | Postgres-backed rate limiting |
 | [ADR-044](docs/adr/ADR-044-project-rename-to-task-scheduler-mcp.md) | Project rename to `task_scheduler_mcp` |
+| [ADR-045](docs/adr/ADR-045-email-send-action-design.md) | `email_send` SMTP action |
+| [ADR-046](docs/adr/ADR-046-r2-upload-action-design.md) | `r2_upload` Cloudflare R2 / S3-compatible action |
 | [ADR-048](docs/adr/ADR-048-calendar-digest-ics-action-design.md) | Calendar digest via signed ICS URL |
 
 ---
 
 ## §8 MCP Surface
 
-<!-- HANDLER-DETAIL placeholder — descriptions filled in W4-S15b after handlers ship -->
+**Tools (5):** `task.create.v1` · `task.list.v1` · `task.status.v1` · `task.cancel.v1` · `task.list_actions.v1`
 
-**Tools (7):** `task.create.v1` · `task.list.v1` · `task.status.v1` · `task.cancel.v1` · `task.list_actions.v1` · *(W4 tools pending S15b)*
+**Actions (7):** `echo` · `http_call` · `slack_post` · `github_digest` · `email_send` · `r2_upload` · `calendar_digest_ics`
 
-**Resources (4):** `tasks://list` · `tasks://actions` · `tasks://job/{job_id}` · `tasks://recent-results`
+**Resources (4):** `tasks://list` · `tasks://actions` · `tasks://job/{job_id}` · `tasks://recent-results` *(24h result briefing)*
 
 **Prompts (2):** `daily_review` · `setup_summary`
 
-**Features:** recurring (cron) jobs · job chaining (`trigger_on_job_id`) · cancel semantics · inter-handler data plane via `JobRun.result`
-
-**Supported MCP clients:** Claude Desktop · Cursor · Claude in Chrome · MCP Inspector
-**Not supported:** ChatGPT (Custom GPT Actions use a different protocol — not MCP)
+**Features:** cron recurrence · job chaining (`trigger_on_job_id`) · cancel semantics · `${VAR}` env-var substitution · rate limiting
 
 ---
 
 ## §9 Local Development
 
-See [docs/W2-VERIFICATION.md](docs/W2-VERIFICATION.md) for the full 11-step click-through flow.
-
 ```bash
-uv sync                             # install deps
-cp .env.example .env
+uv sync && cp .env.example .env
 docker compose up -d postgres elasticmq
-uv run pytest -m "not integration"  # unit tests
-uv run pytest -m integration        # requires running services
+uv run pytest -m "not integration" && uv run pytest -m integration
 uv run ruff check . && uv run ruff format --check .
 ```
 
 ```bash
-# stdio inspector (no compose stack needed)
 MCP_USER_ID=local-dev MCP_USER_TZ=UTC \
   npx @modelcontextprotocol/inspector uv run python -m app.entrypoints.mcp_stdio
 ```
 
-Expected in inspector: **7 tools · 4 resources · 2 prompts** (W4 complete) / **5 tools · 3 resources · 2 prompts** (W3 baseline).
+Expected in inspector: **5 tools · 4 resources · 2 prompts** (W4 complete). See [docs/W2-VERIFICATION.md](docs/W2-VERIFICATION.md).
