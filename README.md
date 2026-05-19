@@ -35,10 +35,10 @@ flowchart LR
     AH -->|outbound API call| Ext[External Service\nSlack · GitHub · SMTP · R2 · ICS]
     Worker --> DB
     DB --> CW[ChainWatcher]
-    DB --> RW[RecurringWatcher]
+    DB --> RW[RecurringJobWatcher]
 ```
 
-The MCP server persists `Job` + `JobRun` rows. The **Watcher** claims due runs via `FOR UPDATE SKIP LOCKED` and enqueues them. The **Worker** dispatches to typed **ActionHandlers**. **ChainWatcher** and **RecurringWatcher** consume the append-only `run_events` outbox — they never poll mutable state.
+The MCP server persists `Job` + `JobRun` rows. The **Watcher** claims due runs via `FOR UPDATE SKIP LOCKED` and enqueues them. The **Worker** dispatches to typed **ActionHandlers**. **ChainWatcher** and **RecurringJobWatcher** consume the append-only `run_events` outbox — they never poll mutable state.
 
 ---
 
