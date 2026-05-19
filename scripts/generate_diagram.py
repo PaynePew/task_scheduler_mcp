@@ -701,7 +701,7 @@ def px(v):
     return int(v * SCALE)
 
 
-def load_font(size, bold=False):
+def load_font(size):
     # Pillow default font; no TTF needed
     return ImageFont.load_default(size=size)
 
@@ -715,7 +715,7 @@ def draw_rrect(x, y, w, h, fill, outline, lw=2, radius=8):
 
 
 def draw_text_centered(cx, cy, text, size=15, bold=False, color="#000000"):
-    font = load_font(size, bold)
+    font = load_font(size)
     lines = text.split("\n")
     line_h = size + 4
     total_h = len(lines) * line_h
