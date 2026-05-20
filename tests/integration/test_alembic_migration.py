@@ -114,14 +114,243 @@ def test_0004_unique_index_roundtrip():
     url = os.environ["ALEMBIC_DATABASE_URL"]
     index_name = "uq_job_runs_job_scheduled_nonterminal"
 
-    # Ensure we start at head (0004 applied).
-    _run_alembic("upgrade", "head")
-    assert _index_exists(url, index_name), "Index must exist after upgrade to 0004"
+    # Upgrade to exactly 0004 so the test targets the right revision boundary
+    # regardless of how many later migrations exist.
+    _run_alembic("upgrade", "0004")
+    assert _index_exists(url, index_name), "Index must exist at revision 0004"
 
-    # Downgrade one step (0004 → 0003): index must be gone.
-    _run_alembic("downgrade", "-1")
-    assert not _index_exists(url, index_name), "Index must be absent after downgrade from 0004"
+    # Downgrade to 0003 explicitly — removes the index added in 0004.
+    _run_alembic("downgrade", "0003")
+    assert not _index_exists(url, index_name), "Index must be absent after downgrade to 0003"
 
-    # Re-apply 0004.
+    # Re-apply head (includes 0004 and any later migrations).
     _run_alembic("upgrade", "head")
-    assert _index_exists(url, index_name), "Index must exist again after re-upgrade to 0004"
+    assert _index_exists(url, index_name), "Index must exist again after re-upgrade to head"
+
+
+# ---------------------------------------------------------------------------
+# Migration 0005: migrate default-user rows to OPERATOR_USER_ID
+# ---------------------------------------------------------------------------
+
+_OPERATOR_UID = "workos-test-sub-op-12345"
+
+
+def _run_alembic_with_operator(*args: str) -> subprocess.CompletedProcess:
+    """Run alembic with OPERATOR_USER_ID set to the test value."""
+    env = {**os.environ, "OPERATOR_USER_ID": _OPERATOR_UID}
+    result = subprocess.run(
+        [sys.executable, "-m", "alembic", *args],
+        capture_output=True,
+        text=True,
+        cwd=os.environ.get("ALEMBIC_CWD", _REPO_ROOT),
+        env=env,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"alembic {' '.join(args)} failed (exit {result.returncode}):\n"
+            f"stdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+    return result
+
+
+def _count_rows(url: str, table: str, where_clause: str, params: dict) -> int:
+    """Return count of rows matching a WHERE clause."""
+    engine = sa.create_engine(url, poolclass=sa.pool.NullPool)
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(f"SELECT COUNT(*) FROM {table} WHERE {where_clause}"),  # noqa: S608
+                params,
+            ).fetchone()
+            return row[0] if row else 0
+    finally:
+        engine.dispose()
+
+
+def _get_job_run_columns(url: str) -> set[str]:
+    """Return the set of column names in job_runs."""
+    engine = sa.create_engine(url, poolclass=sa.pool.NullPool)
+    try:
+        with engine.connect() as conn:
+            result = conn.execute(
+                text(
+                    "SELECT column_name FROM information_schema.columns"
+                    " WHERE table_schema = 'public' AND table_name = 'job_runs'"
+                )
+            )
+            return {row[0] for row in result}
+    finally:
+        engine.dispose()
+
+
+def _insert_default_user_job(url: str) -> int:
+    """Insert a job owned by default-user and return its job_id."""
+    engine = sa.create_engine(url, poolclass=sa.pool.NullPool)
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    "INSERT INTO jobs"
+                    " (user_id, description, action, action_params,"
+                    "  job_type, scheduled_at, active, created_at, updated_at)"
+                    " VALUES ('default-user', 'test', 'echo', '{}'::jsonb,"
+                    "  'one_shot', NOW(), TRUE, NOW(), NOW())"
+                    " RETURNING job_id"
+                )
+            ).fetchone()
+            conn.commit()
+            return row[0]
+    finally:
+        engine.dispose()
+
+
+def _insert_job_run(url: str, job_id: int) -> None:
+    """Insert a job_run for the given job_id."""
+    engine = sa.create_engine(url, poolclass=sa.pool.NullPool)
+    try:
+        with engine.connect() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO job_runs"
+                    " (time_bucket, job_id, scheduled_at, status, retry_count, max_retries,"
+                    "  created_at, updated_at)"
+                    " VALUES (TO_CHAR(NOW(), 'YYYY-MM-DD HH24:00:00'), :job_id,"
+                    "  NOW(), 'PENDING', 0, 3, NOW(), NOW())"
+                ),
+                {"job_id": job_id},
+            )
+            conn.commit()
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.integration
+def test_0005_migrates_default_user_in_jobs():
+    """After upgrade to 0005, no default-user rows remain in jobs."""
+    url = os.environ["ALEMBIC_DATABASE_URL"]
+
+    # Start at 0004 so we can insert data in the pre-migration state.
+    _run_alembic_with_operator("downgrade", "0004")
+
+    # Insert a default-user job.
+    job_id = _insert_default_user_job(url)
+
+    # Apply 0005 with OPERATOR_USER_ID set.
+    _run_alembic_with_operator("upgrade", "head")
+
+    # The job should now be owned by OPERATOR_USER_ID.
+    remaining_default = _count_rows(url, "jobs", "user_id = 'default-user'", {})
+    operator_owned = _count_rows(
+        url, "jobs", "job_id = :jid AND user_id = :uid", {"jid": job_id, "uid": _OPERATOR_UID}
+    )
+    assert remaining_default == 0, f"default-user rows still in jobs: {remaining_default}"
+    assert operator_owned == 1, f"job {job_id} not reassigned to operator"
+
+
+@pytest.mark.integration
+def test_0005_migrates_default_user_in_job_runs():
+    """After upgrade to 0005, no default-user rows remain in job_runs."""
+    url = os.environ["ALEMBIC_DATABASE_URL"]
+
+    # Ensure we start at 0004.
+    _run_alembic_with_operator("downgrade", "0004")
+
+    # Insert a default-user job + one job_run.
+    job_id = _insert_default_user_job(url)
+    _insert_job_run(url, job_id)
+
+    # Apply migration 0005.
+    _run_alembic_with_operator("upgrade", "head")
+
+    # job_runs.user_id column must now exist.
+    cols = _get_job_run_columns(url)
+    assert "user_id" in cols, "job_runs.user_id column must exist after 0005"
+
+    # No default-user rows remain in job_runs.
+    remaining = _count_rows(url, "job_runs", "user_id = 'default-user'", {})
+    assert remaining == 0, f"default-user rows still in job_runs: {remaining}"
+
+    # The run is now owned by OPERATOR_USER_ID.
+    operator_runs = _count_rows(
+        url, "job_runs", "job_id = :jid AND user_id = :uid", {"jid": job_id, "uid": _OPERATOR_UID}
+    )
+    assert operator_runs == 1, f"job_run for job {job_id} not reassigned to operator"
+
+
+@pytest.mark.integration
+def test_0005_migration_is_idempotent():
+    """Re-running upgrade to 0005 is a no-op (no rows change on second run)."""
+    url = os.environ["ALEMBIC_DATABASE_URL"]
+
+    # Start from 0004, insert data, apply migration.
+    _run_alembic_with_operator("downgrade", "0004")
+    _insert_default_user_job(url)
+    _run_alembic_with_operator("upgrade", "head")
+
+    count_before = _count_rows(url, "jobs", "user_id = :uid", {"uid": _OPERATOR_UID})
+
+    # Downgrade then re-upgrade should be a no-op on already-migrated data.
+    _run_alembic_with_operator("downgrade", "0004")
+    _run_alembic_with_operator("upgrade", "head")
+
+    # After the round-trip the OPERATOR_USER_ID row count should be the same.
+    count_after = _count_rows(url, "jobs", "user_id = :uid", {"uid": _OPERATOR_UID})
+    # The downgrade reverts to default-user; re-upgrade migrates again. Counts match.
+    assert count_after == count_before
+
+
+@pytest.mark.integration
+def test_0005_task_list_returns_migrated_jobs():
+    """Post-migration, handle_task_list with OPERATOR_USER_ID returns pre-migration jobs."""
+    import asyncio
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from app.db.engine import create_async_engine
+    from app.mcp.handlers.list import handle_task_list
+
+    url = os.environ["ALEMBIC_DATABASE_URL"]
+
+    # Start at 0004 and insert a default-user job.
+    _run_alembic_with_operator("downgrade", "0004")
+    job_id = _insert_default_user_job(url)
+
+    # Apply migration 0005 — job is now owned by OPERATOR_USER_ID.
+    _run_alembic_with_operator("upgrade", "head")
+
+    async def _run():
+        engine = create_async_engine()
+        try:
+            factory = async_sessionmaker(engine, expire_on_commit=False)
+            result = await handle_task_list(
+                {"pageSize": 100},
+                user_id=_OPERATOR_UID,
+                session_factory=factory,
+            )
+            return result
+        finally:
+            await engine.dispose()
+
+    result = asyncio.run(_run())
+    assert result["ok"] is True, f"task.list failed: {result}"
+    job_ids = [j["job_id"] for j in result["data"]["jobs"]]
+    assert job_id in job_ids, f"job {job_id} not found in task.list result for operator"
+
+
+@pytest.mark.integration
+def test_0005_downgrade_removes_user_id_column():
+    """Downgrading from 0005 removes the user_id column from job_runs."""
+    url = os.environ["ALEMBIC_DATABASE_URL"]
+
+    # Ensure 0005 is applied.
+    _run_alembic_with_operator("upgrade", "head")
+    cols_before = _get_job_run_columns(url)
+    assert "user_id" in cols_before, "user_id must exist before downgrade"
+
+    # Downgrade one step.
+    _run_alembic_with_operator("downgrade", "-1")
+    cols_after = _get_job_run_columns(url)
+    assert "user_id" not in cols_after, "user_id must be removed after downgrade from 0005"
+
+    # Re-apply so the DB is back at head for subsequent tests.
+    _run_alembic_with_operator("upgrade", "head")

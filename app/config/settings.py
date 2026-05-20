@@ -28,6 +28,10 @@ class Settings(BaseSettings):
     queue_dlq_url: str = "http://localhost:9324/queue/task-dlq"
     # Default identity when stdio transport runs without MCP_USER_ID set (ADR-015).
     mcp_user_id: str = "default-user"
+    # Operator's verified WorkOS sub (ADR-059). Set to the operator's actual WorkOS
+    # sub before running migration 0005; defaults to "default-user" so the migration
+    # is a no-op in unset deployments.
+    operator_user_id: str = "default-user"
     # Optional user timezone forwarded from the client environment (ADR-017).
     # Falls back to the X-Timezone header, then "UTC". Set via MCP_USER_TZ.
     mcp_user_tz: str | None = None
