@@ -102,11 +102,16 @@ def _redact_value(key: str, value: Any) -> Any:
     return value
 
 
+# Built-in LogRecord attributes — never candidates for redaction.
+_BUILTIN_RECORD_FIELDS: frozenset[str] = frozenset(
+    logging.LogRecord("", 0, "", 0, "", (), None).__dict__
+)
+
+
 def _redact_record(record: logging.LogRecord) -> None:
     """Redact secret-shaped fields on the record's ``__dict__`` in place."""
-    skip = frozenset(logging.LogRecord("", 0, "", 0, "", (), None).__dict__)
     for key in list(record.__dict__):
-        if key in skip:
+        if key in _BUILTIN_RECORD_FIELDS:
             continue
         record.__dict__[key] = _redact_value(key, record.__dict__[key])
 
