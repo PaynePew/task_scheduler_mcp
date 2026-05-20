@@ -141,7 +141,31 @@ A single function determines `user_id`:
 2. `MCP_USER_ID` env var
 3. literal `"default-user"`
 
-Trust-only in W1. W3 swaps step 1 to read ALB OIDC's `x-amzn-oidc-identity` header.
+Trust-only in W1–W4 (local / single-operator only — never safe to expose publicly).
+
+**W5 public pivot (ADR-049):** the public deployment becomes multi-tenant via OAuth 2.1
+delegation. `user_id` is the verified token subject (`sub`), not a self-asserted header.
+The trust-only header path survives only for local stdio (Claude Desktop) and the
+operator's own access.
+
+### Credential model (dual-track, ADR-050)
+
+Two parallel, non-overlapping ways an action obtains a downstream credential:
+
+| Caller | Mechanism | Storage |
+|---|---|---|
+| Public (delegated) user | per-user OAuth connection (GitHub / Slack / Google) | encrypted token — scoped, revocable, auto-refreshed |
+| Operator (you) | `${VAR}` env substitution (ADR-032, unchanged) | VPS `.env`, operator's own keys only |
+
+The system never stores a public user's raw long-lived secret. `${VAR}`-from-env actions
+(SMTP, R2, arbitrary-key `http_call`) are **operator-only** (`requires_operator`,
+ADR-051) — rejected at `task.create` for delegated users.
+
+**Exception — operator-funded public LLM actions (ADR-052):** `llm_summarize` /
+`llm_polish` are *public-invokable but operator-funded*. They use the operator's LLM key
+internally for a fixed, cost-capped transform; users cannot reference `${VAR}` and cannot
+supply a free-form prompt. This is the only case where a public action touches an operator
+env secret.
 
 ## §7 Chaining & recurring
 
