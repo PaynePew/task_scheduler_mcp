@@ -6,7 +6,7 @@ import pytest
 
 from app.actions.base import CredentialMode
 from app.actions.registry import ACTION_REGISTRY
-from app.domain.jobs import OperatorOnlyActionError, UnknownActionError, create_job  # noqa: E501
+from app.domain.jobs import OperatorOnlyActionError, UnknownActionError, create_job
 
 # ---------------------------------------------------------------------------
 # Handler attribute tests
