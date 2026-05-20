@@ -9,7 +9,7 @@ from typing import Any, ClassVar
 import httpx
 from pydantic import BaseModel
 
-from app.actions.base import ActionResult
+from app.actions.base import ActionResult, CredentialMode
 from app.ics.parser import InvalidICSError, parse_events
 from app.secrets.resolver import SecretResolutionError, build_effective_whitelist, resolve
 
@@ -33,6 +33,8 @@ class CalendarDigestICSHandler:
     )
     params_model: ClassVar[type[BaseModel]] = CalendarDigestICSParams
     timeout_seconds: ClassVar[int] = 30
+    requires_operator: ClassVar[bool] = True
+    credential_mode: ClassVar[CredentialMode] = CredentialMode.operator_env
 
     async def execute(self, run: Any, params: CalendarDigestICSParams) -> ActionResult:
         # Resolve ${VAR} tokens in the URL before making any network calls

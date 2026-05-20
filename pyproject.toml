@@ -20,6 +20,8 @@ dependencies = [
     "icalendar>=6.0",
     "aiosmtplib>=3.0",
     "email-validator>=2.0",
+    "pyjwt[crypto]>=2.12.1",
+    "python-json-logger>=3.2",
 ]
 
 [dependency-groups]

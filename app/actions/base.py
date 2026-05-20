@@ -8,6 +8,7 @@ worker code changes needed.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any, ClassVar, Protocol
 
 from pydantic import BaseModel
@@ -36,6 +37,19 @@ class ActionResult:
     retryable: bool = True
 
 
+class CredentialMode(StrEnum):
+    """How an action resolves its credentials (ADR-051).
+
+    none            — no credentials needed (e.g. echo).
+    oauth_connection — per-user OAuth token from the connection store (future slices).
+    operator_env    — operator ${VAR}-env secrets (ADR-032); operator-only.
+    """
+
+    none = "none"
+    oauth_connection = "oauth_connection"
+    operator_env = "operator_env"
+
+
 class ActionHandler(Protocol):
     """Structural type implemented by every action class.
 
@@ -43,11 +57,16 @@ class ActionHandler(Protocol):
     handlers receive an already-validated Pydantic instance. ``timeout_seconds``
     is enforced via ``asyncio.wait_for`` — exceeding it is treated as a
     retryable failure (the message is left for SQS to redeliver).
+
+    ``requires_operator`` and ``credential_mode`` implement action-surface tiering
+    (ADR-051): ``task.create`` rejects operator-only actions for non-operator callers.
     """
 
     name: ClassVar[str]
     description: ClassVar[str]
     params_model: ClassVar[type[BaseModel]]
     timeout_seconds: ClassVar[int]
+    requires_operator: ClassVar[bool]
+    credential_mode: ClassVar[CredentialMode]
 
     async def execute(self, run: Any, params: BaseModel) -> ActionResult: ...
