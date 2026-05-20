@@ -27,9 +27,7 @@ from sqlalchemy import text
 _REPO_ROOT = str(Path(__file__).resolve().parents[2])
 
 
-def _run_alembic(
-    *args: str, env: dict[str, str] | None = None
-) -> subprocess.CompletedProcess:
+def _run_alembic(*args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
     """Run an alembic command and return the CompletedProcess (raises on failure).
 
     Pass ``env`` to override the subprocess environment (e.g. to set
