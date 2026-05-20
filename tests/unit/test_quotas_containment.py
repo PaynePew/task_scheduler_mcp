@@ -181,33 +181,20 @@ async def test_quota_env_var_overrides(monkeypatch):
     monkeypatch.setenv("QUOTA_GLOBAL_ACTIVE_RECURRING", "20")
     monkeypatch.setenv("OPERATOR_USER_ID", "sys-operator")
 
-    import importlib
-
-    import app.config.settings as _settings_mod
-
-    importlib.reload(_settings_mod)
     from app.config.settings import Settings
 
+    # pydantic-settings reads env on instantiation, so no module reload is needed.
     fresh = Settings()
     assert fresh.quota_active_recurring_per_user == 2
     assert fresh.quota_active_total_per_user == 10
     assert fresh.quota_global_active_recurring == 20
     assert fresh.operator_user_id == "sys-operator"
 
-    importlib.reload(_settings_mod)
-
 
 async def test_rate_limit_defaults_revised():
     """ADR-055 revised defaults: 100/day, 5/min."""
-    import importlib
-
-    import app.config.settings as _settings_mod
-
-    importlib.reload(_settings_mod)
     from app.config.settings import Settings
 
     fresh = Settings()
     assert fresh.rate_limit_daily == 100
     assert fresh.rate_limit_burst_per_minute == 5
-
-    importlib.reload(_settings_mod)
