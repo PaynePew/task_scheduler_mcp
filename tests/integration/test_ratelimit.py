@@ -167,7 +167,7 @@ MCP_HEADERS = {
 }
 
 
-def _create_call(user_id: str) -> dict:
+def _create_call() -> dict:
     return {
         "jsonrpc": "2.0",
         "id": 1,
@@ -196,7 +196,7 @@ async def test_http_1001st_job_returns_429(session_factory):
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         resp = await client.post(
             "/mcp",
-            json=_create_call(user_id),
+            json=_create_call(),
             headers={**MCP_HEADERS, "X-User-Id": user_id},
         )
 
@@ -227,7 +227,7 @@ async def test_http_11th_burst_job_returns_429(session_factory):
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         resp = await client.post(
             "/mcp",
-            json=_create_call(user_id),
+            json=_create_call(),
             headers={**MCP_HEADERS, "X-User-Id": user_id},
         )
 
@@ -253,7 +253,7 @@ async def test_http_under_limit_succeeds(session_factory):
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         resp = await client.post(
             "/mcp",
-            json=_create_call(user_id),
+            json=_create_call(),
             headers={**MCP_HEADERS, "X-User-Id": user_id},
         )
 
