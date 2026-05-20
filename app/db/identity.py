@@ -1,13 +1,22 @@
-"""User identity resolver — fallback chain per ADR-015."""
+"""User identity resolvers (ADR-015, ADR-049, ADR-053).
+
+HTTP path:  JWT sub claim via validate_token() in the HTTP middleware.
+            X-User-Id header is ignored on public HTTP (ADR-049).
+
+Stdio path: MCP_USER_ID env var (operator's WorkOS sub) → raises RuntimeError
+            if unset (no anonymous stdio on public deployments).
+"""
+
+from __future__ import annotations
 
 import os
 
 
-def resolve_user_id(x_user_id: str | None = None) -> str:
-    """Resolve user_id: X-User-Id header → MCP_USER_ID env → "default-user"."""
-    if x_user_id:
-        return x_user_id
-    env_val = os.environ.get("MCP_USER_ID")
-    if env_val:
-        return env_val
-    return "default-user"
+def resolve_user_id_stdio() -> str:
+    """Resolve user_id for the operator stdio transport.
+
+    Returns the value of MCP_USER_ID (operator's WorkOS sub).  Falls back to
+    "default-user" when MCP_USER_ID is absent so that local dev / legacy
+    stdio sessions continue to work unchanged.
+    """
+    return os.environ.get("MCP_USER_ID", "default-user")
