@@ -39,7 +39,7 @@ from typing import Any, ClassVar
 import aiosmtplib
 from pydantic import BaseModel, EmailStr
 
-from app.actions.base import ActionResult
+from app.actions.base import ActionResult, CredentialMode
 from app.chain.upstream_reader import (
     InvalidJson,
     NoResult,
@@ -114,6 +114,8 @@ class EmailSendHandler:
     )
     params_model: ClassVar[type[BaseModel]] = EmailSendParams
     timeout_seconds: ClassVar[int] = 30
+    requires_operator: ClassVar[bool] = True
+    credential_mode: ClassVar[CredentialMode] = CredentialMode.operator_env
 
     def __init__(self, session_factory: Any = None) -> None:
         self._session_factory = session_factory

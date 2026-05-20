@@ -30,6 +30,9 @@ from app.mcp.resources.job_resource import read_tasks_job
 from app.mcp.resources.list_resource import read_tasks_list
 from app.mcp.resources.recent_results import read_tasks_recent_results
 from app.overload.health import get_queue_depth
+from app.quotas.containment import Allow as ContainmentAllow
+from app.quotas.containment import ContainmentLimits, check_containment
+from app.ratelimit.checker import Allow, RateLimits, check_rate_limit
 from app.secrets.literal_detection import detect_literal_secret
 
 logger = logging.getLogger(__name__)
@@ -355,6 +358,38 @@ async def _handle_task_create(
             )
 
     try:
+        is_operator = bool(settings.operator_user_id) and user_id == settings.operator_user_id
+
+        if not is_operator:
+            limits = RateLimits(
+                daily=settings.rate_limit_daily,
+                burst=settings.rate_limit_burst_per_minute,
+            )
+            async with session_factory() as rl_session:
+                decision = await check_rate_limit(user_id, rl_session, limits)
+            if not isinstance(decision, Allow):
+                return error(
+                    "USER_INPUT",
+                    f"Rate limit exceeded: {decision.reason}",
+                    field="user_id",
+                    expected={"retry_after_seconds": decision.retry_after_seconds},
+                )
+
+            containment_limits = ContainmentLimits(
+                active_recurring_per_user=settings.quota_active_recurring_per_user,
+                active_total_per_user=settings.quota_active_total_per_user,
+                global_active_recurring=settings.quota_global_active_recurring,
+            )
+            async with session_factory() as ct_session:
+                ct_decision = await check_containment(user_id, ct_session, containment_limits)
+            if not isinstance(ct_decision, ContainmentAllow):
+                return error(
+                    "USER_INPUT",
+                    f"Quota exceeded: {ct_decision.reason}",
+                    field="user_id",
+                    expected={"retry_after_seconds": ct_decision.retry_after_seconds},
+                )
+
         async with session_factory() as session:
             job = await create_job(
                 session,
@@ -370,6 +405,7 @@ async def _handle_task_create(
                 tz_env=settings.mcp_user_tz,
                 trigger_on_job_id=trigger_on_job_id,
                 trigger_on_status=trigger_on_status,
+                operator_user_id=settings.operator_user_id,
             )
         return success({"job_id": job.job_id, "status": "scheduled"})
     except Exception as exc:
