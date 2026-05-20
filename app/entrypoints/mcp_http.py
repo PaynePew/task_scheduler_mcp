@@ -1,7 +1,14 @@
-"""HTTP entrypoint for the MCP server — Streamable HTTP transport per ADR-006/015.
+"""HTTP entrypoint for the MCP server — Streamable HTTP transport (ADR-006/049/053).
 
-X-User-Id header → MCP_USER_ID env → "default-user" resolver chain per ADR-015.
-Trust-only multi-tenancy; no JWT/signature validation (documented W1 limitation).
+OAuth 2.1 resource-server auth per ADR-053:
+  - Every /mcp request requires a valid WorkOS-issued Bearer token.
+  - Unauthenticated / invalid-token requests → 401 + WWW-Authenticate.
+  - X-User-Id header is ignored; user_id comes from the verified JWT sub.
+  - Protected Resource Metadata served at /.well-known/oauth-protected-resource.
+
+When WORKOS_JWKS_URI / WORKOS_ISSUER / WORKOS_AUDIENCE are all unset the server
+falls back to trust-only mode (MCP_USER_ID env → "default-user") for local dev
+and CI runs that don't have WorkOS credentials.
 """
 
 from __future__ import annotations
@@ -21,21 +28,98 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 from starlette.types import Receive, Scope, Send
 
+from app.auth.token_validation import TokenValidationError, validate_token
 from app.config.settings import settings
 from app.db.engine import async_session_factory as _default_session_factory
-from app.db.identity import resolve_user_id
+from app.db.identity import resolve_user_id_stdio
 from app.mcp.server import create_server
 from app.obs.logging import bind_user_id, configure_logging, unbind_user_id
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Auth helpers
+# ---------------------------------------------------------------------------
+
+_AUTH_ENABLED = bool(
+    settings.workos_jwks_uri and settings.workos_issuer and settings.workos_audience
+)
+
+
+def _www_authenticate_header() -> str:
+    """Build the WWW-Authenticate value pointing at WorkOS (RFC 6750 / RFC 9728)."""
+    parts = ['Bearer realm="task-scheduler-mcp"']
+    if settings.workos_issuer:
+        parts.append(
+            f'resource_metadata="{settings.workos_issuer}/.well-known/oauth-protected-resource"'
+        )
+    return ", ".join(parts)
+
+
+def _extract_bearer(request: Request) -> str | None:
+    """Return the raw Bearer token from the Authorization header, or None."""
+    auth = request.headers.get("authorization", "")
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip() or None
+    return None
+
+
+def _resolve_user_id(request: Request) -> tuple[str, None] | tuple[None, JSONResponse]:
+    """Return (user_id, None) on success or (None, error_response) on failure.
+
+    Resolution order per ADR-053 / ADR-049:
+      - Auth enabled (WorkOS configured): Bearer JWT → sub claim.
+        X-User-Id is explicitly ignored in this mode.
+      - Auth disabled (no WorkOS creds, local dev / CI): X-User-Id header →
+        MCP_USER_ID env → "default-user" (old trust-only chain, per ADR-015).
+    """
+    if not _AUTH_ENABLED:
+        x_user_id = request.headers.get("x-user-id") or None
+        if x_user_id:
+            return x_user_id, None
+        return resolve_user_id_stdio(), None
+
+    token = _extract_bearer(request)
+    if token is None:
+        resp = JSONResponse(
+            {"error": "unauthorized", "detail": "Bearer token required"},
+            status_code=401,
+            headers={"WWW-Authenticate": _www_authenticate_header()},
+        )
+        return None, resp
+
+    # _AUTH_ENABLED gates this branch on all three being non-None, but the
+    # checker can't narrow through the module-level constant — hence the
+    # explicit type: ignore on each argument.
+    try:
+        ctx = validate_token(
+            token,
+            issuer=settings.workos_issuer,  # type: ignore[arg-type]
+            audience=settings.workos_audience,  # type: ignore[arg-type]
+            jwks_uri=settings.workos_jwks_uri,  # type: ignore[arg-type]
+        )
+    except TokenValidationError as exc:
+        logger.debug("Token validation failed: %s", exc)
+        resp = JSONResponse(
+            {"error": "unauthorized", "detail": str(exc)},
+            status_code=401,
+            headers={"WWW-Authenticate": _www_authenticate_header()},
+        )
+        return None, resp
+
+    return ctx.user_id, None
+
+
+# ---------------------------------------------------------------------------
+# MCP handler
+# ---------------------------------------------------------------------------
+
 
 class _McpHttpEndpoint:
-    """Per-request stateless MCP handler.
+    """Per-request stateless MCP handler with OAuth 2.1 bearer-token auth.
 
-    Creates a fresh MCP server instance for each request so that the user_id
-    resolved from the X-User-Id header is bound for the lifetime of that request.
-    No shared state between requests → hard tenant isolation without sessions.
+    Creates a fresh MCP server instance per request with the verified user_id
+    bound for the lifetime of that request.  No shared state between requests.
     """
 
     def __init__(
@@ -51,8 +135,10 @@ class _McpHttpEndpoint:
             return
 
         request = Request(scope, receive)
-        x_user_id = request.headers.get("x-user-id")
-        user_id = resolve_user_id(x_user_id)
+        user_id, err_response = _resolve_user_id(request)
+        if err_response is not None:
+            await err_response(scope, receive, send)
+            return
 
         tok = bind_user_id(user_id)
         try:
@@ -87,15 +173,36 @@ class _McpHttpEndpoint:
             unbind_user_id(tok)
 
 
+# ---------------------------------------------------------------------------
+# Protected Resource Metadata (RFC 9728)
+# ---------------------------------------------------------------------------
+
+
+def _make_prm_endpoint() -> Route:
+    """Return the /.well-known/oauth-protected-resource route (RFC 9728)."""
+
+    async def _prm(_request: Request) -> JSONResponse:
+        authorization_servers = [settings.workos_issuer] if settings.workos_issuer else []
+        body: dict[str, object] = {
+            "resource": settings.workos_audience or "task-scheduler-mcp",
+            "authorization_servers": authorization_servers,
+            "bearer_methods_supported": ["header"],
+            "resource_documentation": "https://github.com/PaynePew/task_scheduler_mcp",
+        }
+        return JSONResponse(body)
+
+    return Route("/.well-known/oauth-protected-resource", endpoint=_prm, methods=["GET"])
+
+
+# ---------------------------------------------------------------------------
+# Health check
+# ---------------------------------------------------------------------------
+
+
 def _make_healthz_endpoint(
     session_factory: async_sessionmaker[AsyncSession] | None = None,
 ):
-    """Return a Starlette endpoint function for GET /healthz.
-
-    Probes Postgres with a cheap SELECT 1 (500 ms timeout) and returns:
-      - 200  {"ok": true, "version": "<git sha or 'unknown'>", "db": "connected"}
-      - 503  {"ok": false, "db": "<exception class name>"}
-    """
+    """Return a Starlette endpoint function for GET /healthz."""
     factory = session_factory or _default_session_factory
 
     async def _healthz(_request: Request) -> JSONResponse:
@@ -108,6 +215,11 @@ def _make_healthz_endpoint(
             return JSONResponse({"ok": False, "db": type(exc).__name__}, status_code=503)
 
     return _healthz
+
+
+# ---------------------------------------------------------------------------
+# App factory
+# ---------------------------------------------------------------------------
 
 
 def build_app(
@@ -129,6 +241,7 @@ def build_app(
         routes=[
             Route("/mcp", endpoint=handler, methods=["GET", "POST", "DELETE"]),
             Route("/healthz", endpoint=healthz, methods=["GET"]),
+            _make_prm_endpoint(),
         ],
     )
 

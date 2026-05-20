@@ -41,7 +41,7 @@ from typing import Any, ClassVar
 import httpx
 from pydantic import BaseModel
 
-from app.actions.base import ActionResult
+from app.actions.base import ActionResult, CredentialMode
 from app.chain.upstream_reader import (
     InvalidJson,
     NoResult,
@@ -132,6 +132,8 @@ class SlackPostHandler:
     )
     params_model: ClassVar[type[BaseModel]] = SlackPostParams
     timeout_seconds: ClassVar[int] = 30
+    requires_operator: ClassVar[bool] = False
+    credential_mode: ClassVar[CredentialMode] = CredentialMode.operator_env
 
     def __init__(self, session_factory: Any = None) -> None:
         self._session_factory = session_factory
