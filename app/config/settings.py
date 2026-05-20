@@ -55,5 +55,10 @@ class Settings(BaseSettings):
     rate_limit_daily: int = 1000
     rate_limit_burst_per_minute: int = 10
 
+    # Better Stack (Logtail) log ingestion token (ADR-056).
+    # When set, a LogtailHandler ships logs to Better Stack.
+    # Leave unset in local dev — logs go to stdout only.
+    better_stack_source_token: str | None = None
+
 
 settings = Settings()

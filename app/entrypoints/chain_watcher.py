@@ -11,9 +11,10 @@ import logging
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.db.engine import create_async_engine
+from app.obs.logging import configure_logging
 from app.workers.chain_watcher import run_chain_watcher
 
-logging.basicConfig(level="INFO", format="%(asctime)s %(name)s %(levelname)s %(message)s")
+configure_logging("chain-watcher")
 logger = logging.getLogger(__name__)
 
 

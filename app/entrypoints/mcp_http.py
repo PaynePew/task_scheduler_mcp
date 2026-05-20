@@ -25,6 +25,7 @@ from app.config.settings import settings
 from app.db.engine import async_session_factory as _default_session_factory
 from app.db.identity import resolve_user_id
 from app.mcp.server import create_server
+from app.obs.logging import bind_user_id, configure_logging, unbind_user_id
 
 logger = logging.getLogger(__name__)
 
@@ -53,31 +54,37 @@ class _McpHttpEndpoint:
         x_user_id = request.headers.get("x-user-id")
         user_id = resolve_user_id(x_user_id)
 
-        server = create_server(user_id, session_factory=self._session_factory)
-        transport = StreamableHTTPServerTransport(
-            mcp_session_id=None,
-            is_json_response_enabled=self._json_response,
-        )
+        tok = bind_user_id(user_id)
+        try:
+            server = create_server(user_id, session_factory=self._session_factory)
+            transport = StreamableHTTPServerTransport(
+                mcp_session_id=None,
+                is_json_response_enabled=self._json_response,
+            )
 
-        async def _run_server(*, task_status: TaskStatus[None] = anyio.TASK_STATUS_IGNORED) -> None:
-            async with transport.connect() as streams:
-                read_stream, write_stream = streams
-                task_status.started()
-                try:
-                    await server.run(
-                        read_stream,
-                        write_stream,
-                        server.create_initialization_options(),
-                        stateless=True,
-                    )
-                except Exception:
-                    logger.exception("Stateless MCP server crashed for user %s", user_id)
+            async def _run_server(
+                *, task_status: TaskStatus[None] = anyio.TASK_STATUS_IGNORED
+            ) -> None:
+                async with transport.connect() as streams:
+                    read_stream, write_stream = streams
+                    task_status.started()
+                    try:
+                        await server.run(
+                            read_stream,
+                            write_stream,
+                            server.create_initialization_options(),
+                            stateless=True,
+                        )
+                    except Exception:
+                        logger.exception("Stateless MCP server crashed for user %s", user_id)
 
-        async with anyio.create_task_group() as tg:
-            await tg.start(_run_server)
-            await transport.handle_request(scope, receive, send)
-            await transport.terminate()
-            tg.cancel_scope.cancel()
+            async with anyio.create_task_group() as tg:
+                await tg.start(_run_server)
+                await transport.handle_request(scope, receive, send)
+                await transport.terminate()
+                tg.cancel_scope.cancel()
+        finally:
+            unbind_user_id(tok)
 
 
 def _make_healthz_endpoint(
@@ -134,7 +141,7 @@ def build_app(
 def _run_http() -> None:
     import uvicorn
 
-    logging.basicConfig(level=getattr(logging, settings.log_level.upper()))
+    configure_logging("mcp-http")
     app = build_app()
     uvicorn.run(app, host="0.0.0.0", port=settings.port)
 
