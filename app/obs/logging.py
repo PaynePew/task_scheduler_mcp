@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import json
 import logging
-import logging.handlers
 import re
 import ssl
 import sys
@@ -230,19 +229,10 @@ def _add_better_stack_handler(
 ) -> None:
     """Attach an HTTPS log-shipping handler targeting Better Stack's ingest."""
 
-    class _BetterStackHandler(logging.handlers.HTTPHandler):
+    class _BetterStackHandler(logging.Handler):
         """Push each log record as JSON to the Better Stack ingest endpoint."""
 
-        def __init__(self) -> None:
-            super().__init__(
-                host="in.logs.betterstack.com",
-                url="/",
-                method="POST",
-                secure=True,
-            )
-            self._token = source_token
-
-        def mapLogRecord(self, record: logging.LogRecord) -> dict[str, Any]:  # noqa: N802
+        def _record_as_dict(self, record: logging.LogRecord) -> dict[str, Any]:
             # Re-use the JSON formatter to get the canonical dict.
             msg = formatter.format(record)
             try:
@@ -252,13 +242,13 @@ def _add_better_stack_handler(
 
         def emit(self, record: logging.LogRecord) -> None:
             try:
-                payload = json.dumps(self.mapLogRecord(record)).encode()
+                payload = json.dumps(self._record_as_dict(record)).encode()
                 req = urllib.request.Request(
                     "https://in.logs.betterstack.com/",
                     data=payload,
                     headers={
                         "Content-Type": "application/json",
-                        "Authorization": f"Bearer {self._token}",
+                        "Authorization": f"Bearer {source_token}",
                     },
                     method="POST",
                 )
