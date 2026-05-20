@@ -6,7 +6,7 @@ from typing import Any, ClassVar
 
 from pydantic import BaseModel
 
-from app.actions.base import ActionResult
+from app.actions.base import ActionResult, CredentialMode
 
 
 class EchoParams(BaseModel):
@@ -21,6 +21,8 @@ class EchoHandler:
     )
     params_model: ClassVar[type[BaseModel]] = EchoParams
     timeout_seconds: ClassVar[int] = 10
+    requires_operator: ClassVar[bool] = False
+    credential_mode: ClassVar[CredentialMode] = CredentialMode.none
 
     async def execute(self, run: Any, params: EchoParams) -> ActionResult:
         return ActionResult(ok=True, result={"echoed": params.message}, error=None)

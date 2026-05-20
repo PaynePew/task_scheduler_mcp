@@ -22,7 +22,7 @@ from typing import Any, ClassVar
 import httpx
 from pydantic import BaseModel
 
-from app.actions.base import ActionResult
+from app.actions.base import ActionResult, CredentialMode
 from app.secrets.resolver import SecretResolutionError, build_effective_whitelist, resolve
 
 GITHUB_API_BASE = "https://api.github.com"
@@ -63,6 +63,8 @@ class GitHubDigestHandler:
     )
     params_model: ClassVar[type[BaseModel]] = GitHubDigestParams
     timeout_seconds: ClassVar[int] = 30
+    requires_operator: ClassVar[bool] = False
+    credential_mode: ClassVar[CredentialMode] = CredentialMode.operator_env
 
     async def execute(self, run: Any, params: GitHubDigestParams) -> ActionResult:
         whitelist = build_effective_whitelist()

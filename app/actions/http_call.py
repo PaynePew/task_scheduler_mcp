@@ -8,7 +8,7 @@ from typing import Any, ClassVar
 import httpx
 from pydantic import BaseModel
 
-from app.actions.base import ActionResult
+from app.actions.base import ActionResult, CredentialMode
 from app.secrets.resolver import SecretResolutionError, build_effective_whitelist, resolve
 
 MAX_RESPONSE_BYTES = 2048  # 2 KB
@@ -30,6 +30,8 @@ class HttpCallHandler:
     )
     params_model: ClassVar[type[BaseModel]] = HttpCallParams
     timeout_seconds: ClassVar[int] = 30
+    requires_operator: ClassVar[bool] = True
+    credential_mode: ClassVar[CredentialMode] = CredentialMode.operator_env
 
     async def execute(self, run: Any, params: HttpCallParams) -> ActionResult:
         whitelist = build_effective_whitelist()
