@@ -27,13 +27,20 @@ from sqlalchemy import text
 _REPO_ROOT = str(Path(__file__).resolve().parents[2])
 
 
-def _run_alembic(*args: str) -> subprocess.CompletedProcess:
-    """Run an alembic command and return the CompletedProcess (raises on failure)."""
+def _run_alembic(
+    *args: str, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess:
+    """Run an alembic command and return the CompletedProcess (raises on failure).
+
+    Pass ``env`` to override the subprocess environment (e.g. to set
+    OPERATOR_USER_ID for 0005). ``None`` inherits the parent process env.
+    """
     result = subprocess.run(
         [sys.executable, "-m", "alembic", *args],
         capture_output=True,
         text=True,
         cwd=os.environ.get("ALEMBIC_CWD", _REPO_ROOT),
+        env=env,
     )
     if result.returncode != 0:
         raise RuntimeError(
@@ -137,20 +144,7 @@ _OPERATOR_UID = "workos-test-sub-op-12345"
 
 def _run_alembic_with_operator(*args: str) -> subprocess.CompletedProcess:
     """Run alembic with OPERATOR_USER_ID set to the test value."""
-    env = {**os.environ, "OPERATOR_USER_ID": _OPERATOR_UID}
-    result = subprocess.run(
-        [sys.executable, "-m", "alembic", *args],
-        capture_output=True,
-        text=True,
-        cwd=os.environ.get("ALEMBIC_CWD", _REPO_ROOT),
-        env=env,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"alembic {' '.join(args)} failed (exit {result.returncode}):\n"
-            f"stdout: {result.stdout}\nstderr: {result.stderr}"
-        )
-    return result
+    return _run_alembic(*args, env={**os.environ, "OPERATOR_USER_ID": _OPERATOR_UID})
 
 
 def _count_rows(url: str, table: str, where_clause: str, params: dict) -> int:
