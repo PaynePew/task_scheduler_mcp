@@ -7,13 +7,15 @@ current async context.
 
 Usage::
 
-    from app.obs.logging import configure_logging, bind_user_id
+    from app.obs.logging import bind_user_id, configure_logging, unbind_user_id
 
     configure_logging("mcp-http")
 
     token = bind_user_id("user-abc")
-    logger.info("request received", extra={"event": "request.start"})
-    _user_id_var.reset(token)
+    try:
+        logger.info("request received", extra={"event": "request.start"})
+    finally:
+        unbind_user_id(token)
 
 Redaction: any extra field whose name contains a known secret keyword
 (token, secret, password, key, credential, authorization, bearer) has its
