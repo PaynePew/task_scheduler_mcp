@@ -17,7 +17,7 @@ def test_shed_when_cpu_above_threshold():
     assert should_shed(cpu_threshold=0.80, _cpu_percent=85.0, _ram_percent=0.0, _queue_depth=0)
 
 
-def test_no_shed_when_cpu_at_threshold():
+def test_shed_when_cpu_at_threshold():
     """Threshold is inclusive: cpu == threshold → shed."""
     assert should_shed(cpu_threshold=0.80, _cpu_percent=80.0, _ram_percent=0.0, _queue_depth=0)
 
