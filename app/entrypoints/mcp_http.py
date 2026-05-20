@@ -175,14 +175,13 @@ def _make_prm_endpoint() -> Route:
     """Return the /.well-known/oauth-protected-resource route (RFC 9728)."""
 
     async def _prm(_request: Request) -> JSONResponse:
-        body: dict = {
+        authorization_servers = [settings.workos_issuer] if settings.workos_issuer else []
+        body: dict[str, object] = {
             "resource": settings.workos_audience or "task-scheduler-mcp",
-            "authorization_servers": [],
+            "authorization_servers": authorization_servers,
             "bearer_methods_supported": ["header"],
             "resource_documentation": "https://github.com/PaynePew/task_scheduler_mcp",
         }
-        if settings.workos_issuer:
-            body["authorization_servers"] = [settings.workos_issuer]
         return JSONResponse(body)
 
     return Route("/.well-known/oauth-protected-resource", endpoint=_prm, methods=["GET"])
