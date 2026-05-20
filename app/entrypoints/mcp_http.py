@@ -87,6 +87,9 @@ def _resolve_user_id(request: Request) -> tuple[str, None] | tuple[None, JSONRes
         )
         return None, resp
 
+    # _AUTH_ENABLED gates this branch on all three being non-None, but the
+    # checker can't narrow through the module-level constant — hence the
+    # explicit type: ignore on each argument.
     try:
         ctx = validate_token(
             token,
