@@ -29,8 +29,10 @@ class Settings(BaseSettings):
     # Default identity when stdio transport runs without MCP_USER_ID set (ADR-015).
     mcp_user_id: str = "default-user"
     # Verified operator identity — user_id that bypasses the requires_operator gate
-    # (ADR-051). Defaults to the same value as mcp_user_id so the single-operator
-    # setup works out of the box without extra config. Override via OPERATOR_USER_ID.
+    # (ADR-051) and is the migration target for default-user rows in 0005 (ADR-059).
+    # Defaults to "default-user" so the single-operator setup works out of the box
+    # and migration 0005 is a no-op in unset deployments. Set to the operator's
+    # actual WorkOS sub before running migration 0005. Override via OPERATOR_USER_ID.
     operator_user_id: str = "default-user"
     # Optional user timezone forwarded from the client environment (ADR-017).
     # Falls back to the X-Timezone header, then "UTC". Set via MCP_USER_TZ.

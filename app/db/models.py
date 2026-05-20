@@ -106,6 +106,9 @@ class JobRun(Base):
     time_bucket: Mapped[str] = mapped_column(Text, primary_key=True)
     run_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     job_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("jobs.job_id"), nullable=False)
+    # Denormalised from jobs.user_id (added by migration 0005). Nullable so existing
+    # code paths that don't set it continue to work; populated for pre-migration rows.
+    user_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     scheduled_at: Mapped[datetime] = mapped_column(TZ, nullable=False)
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default="PENDING")
     result: Mapped[str | None] = mapped_column(Text, nullable=True)
