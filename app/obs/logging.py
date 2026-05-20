@@ -22,9 +22,13 @@ value replaced with ``"[REDACTED]"`` before the record is serialised.
 
 from __future__ import annotations
 
+import json
 import logging
 import logging.handlers
 import re
+import ssl
+import sys
+import urllib.request
 from contextvars import ContextVar, Token
 from typing import Any
 
@@ -203,8 +207,6 @@ def configure_logging(service: str, level: str | None = None) -> None:
     correlation_filter = _CorrelationFilter(service=service, git_sha=settings.git_sha)
     formatter = _SchemaFormatter()
 
-    import sys
-
     stdout_handler = logging.StreamHandler(sys.stdout)
     stdout_handler.setFormatter(formatter)
     stdout_handler.addFilter(correlation_filter)
@@ -239,18 +241,12 @@ def _add_better_stack_handler(
         def mapLogRecord(self, record: logging.LogRecord) -> dict[str, Any]:  # noqa: N802
             # Re-use the JSON formatter to get the canonical dict.
             msg = formatter.format(record)
-            import json
-
             try:
                 return json.loads(msg)
             except Exception:
                 return {"event": msg, "level": record.levelname}
 
         def emit(self, record: logging.LogRecord) -> None:
-            import json
-            import ssl
-            import urllib.request
-
             try:
                 payload = json.dumps(self.mapLogRecord(record)).encode()
                 req = urllib.request.Request(
