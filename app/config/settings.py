@@ -101,5 +101,10 @@ class Settings(BaseSettings):
     # Retry-After header value (seconds) sent with 503/429 overload responses.
     overload_retry_after_seconds: int = 10
 
+    # Better Stack (Logtail) log ingestion token (ADR-056).
+    # When set, a LogtailHandler ships logs to Better Stack.
+    # Leave unset in local dev — logs go to stdout only.
+    better_stack_source_token: str | None = None
+
 
 settings = Settings()

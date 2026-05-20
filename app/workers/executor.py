@@ -30,6 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.actions.base import ActionHandler, ActionResult
 from app.actions.registry import ACTION_REGISTRY
 from app.db.models import Job, JobRun, RunEvent
+from app.obs.logging import bind_job_id, bind_run_id, unbind_job_id, unbind_run_id
 from app.queue.sqs import SQSClient
 
 logger = logging.getLogger(__name__)
@@ -244,7 +245,28 @@ async def process_one(
     job_id: int = body["job_id"]
     receipt: str = message["ReceiptHandle"]
 
-    # 一筆訊息的審計起點: DLQ入隊時可往回追
+    tok_job = bind_job_id(str(job_id))
+    tok_run = bind_run_id(str(run_id))
+    try:
+        await _dispatch(
+            session_factory, sqs, run_id, job_id, receipt, message, registry, heartbeat_interval
+        )
+    finally:
+        unbind_run_id(tok_run)
+        unbind_job_id(tok_job)
+
+
+async def _dispatch(
+    session_factory: async_sessionmaker[AsyncSession],
+    sqs: SQSClient,
+    run_id: int,
+    job_id: int,
+    receipt: str,
+    message: dict,
+    registry: dict[str, ActionHandler] | None,
+    heartbeat_interval: float,
+) -> None:
+    """Inner dispatch after correlation IDs are bound to the log context."""
     receive_count = message.get("Attributes", {}).get("ApproximateReceiveCount", "?")
     logger.info(
         "processing run_id=%s job_id=%s msg=%s receive_count=%s",

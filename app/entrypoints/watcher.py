@@ -11,10 +11,11 @@ import logging
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.db.engine import create_async_engine
+from app.obs.logging import configure_logging
 from app.queue.sqs import SQSClient
 from app.workers.watcher import run_watcher
 
-logging.basicConfig(level="INFO", format="%(asctime)s %(name)s %(levelname)s %(message)s")
+configure_logging("watcher")
 logger = logging.getLogger(__name__)
 
 

@@ -22,6 +22,7 @@ dependencies = [
     "email-validator>=2.0",
     "psutil>=7.2.2",
     "pyjwt[crypto]>=2.12.1",
+    "python-json-logger>=3.2",
 ]
 
 [dependency-groups]
