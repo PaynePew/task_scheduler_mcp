@@ -365,6 +365,7 @@ async def _handle_task_create(
                 tz_env=settings.mcp_user_tz,
                 trigger_on_job_id=trigger_on_job_id,
                 trigger_on_status=trigger_on_status,
+                operator_user_id=settings.operator_user_id,
             )
         return success({"job_id": job.job_id, "status": "scheduled"})
     except Exception as exc:

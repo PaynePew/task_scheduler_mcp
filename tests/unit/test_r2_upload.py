@@ -413,14 +413,14 @@ async def test_no_content_and_no_from_run_id_fails():
 # ---------------------------------------------------------------------------
 
 
-def test_r2_upload_registered_in_registry():
-    assert "r2_upload" in ACTION_REGISTRY
-    assert isinstance(ACTION_REGISTRY["r2_upload"], R2UploadHandler)
+def test_r2_upload_removed_from_registry():
+    """r2_upload was demoted to a cron/shell script in issue #132 (ADR-051)."""
+    assert "r2_upload" not in ACTION_REGISTRY
 
 
-def test_registry_has_seven_actions():
-    """task.list_actions.v1 now exposes 7 actions."""
-    assert len(ACTION_REGISTRY) == 7
+def test_registry_has_six_actions():
+    """task.list_actions.v1 exposes 6 actions (r2_upload removed in issue #132)."""
+    assert len(ACTION_REGISTRY) == 6
     expected = {
         "echo",
         "http_call",
@@ -428,6 +428,5 @@ def test_registry_has_seven_actions():
         "slack_post",
         "github_digest",
         "email_send",
-        "r2_upload",
     }
     assert set(ACTION_REGISTRY.keys()) == expected

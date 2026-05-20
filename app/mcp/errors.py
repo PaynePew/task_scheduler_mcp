@@ -16,6 +16,7 @@ from app.domain.jobs import (
     InvalidStateError,
     InvalidTimezoneError,
     JobNotFoundError,
+    OperatorOnlyActionError,
     UnknownActionError,
     UnsupportedScheduleTypeError,
 )
@@ -33,6 +34,12 @@ def map_domain_error(exc: Exception) -> dict[str, Any]:
             f"Unknown action: {exc}",
             field="action",
             expected="echo",
+        )
+    if isinstance(exc, OperatorOnlyActionError):
+        return error(
+            "OPERATOR_ONLY",
+            f"Action '{exc}' is restricted to the operator.",
+            field="action",
         )
     if isinstance(exc, UnsupportedScheduleTypeError):
         return error(

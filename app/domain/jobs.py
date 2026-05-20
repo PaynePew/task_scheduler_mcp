@@ -31,6 +31,13 @@ class UnknownActionError(Exception):
     """Raised when action is not registered in ACTION_REGISTRY (maps to UNKNOWN_ACTION)."""
 
 
+class OperatorOnlyActionError(Exception):
+    """Raised when a non-operator caller attempts to create a requires_operator action (ADR-051).
+
+    Carries the action name as its single arg.
+    """
+
+
 class JobNotFoundError(Exception):
     """Raised when job_id does not exist or belongs to another user (maps to NOT_FOUND)."""
 
@@ -131,6 +138,7 @@ async def create_job(
     tz_env: str | None = None,
     trigger_on_job_id: int | None = None,
     trigger_on_status: str | None = None,
+    operator_user_id: str | None = None,
 ) -> Job:
     """Insert Job + JobRun + RunEvent(CREATED) in one transaction.
 
@@ -140,6 +148,7 @@ async def create_job(
 
     Returns the existing Job on (user_id, idempotency_key) collision.
     Raises UnknownActionError if action is not in ACTION_REGISTRY.
+    Raises OperatorOnlyActionError if action requires_operator and caller is not the operator.
     Raises UnsupportedScheduleTypeError for unimplemented schedule_type values.
     Raises InvalidTimezoneError if timezone is not a valid IANA key.
     Raises InvalidScheduledAtError if scheduled_at is missing, unparseable, or past.
@@ -151,6 +160,9 @@ async def create_job(
         raise UnsupportedScheduleTypeError(schedule_type)
     if action not in ACTION_REGISTRY:
         raise UnknownActionError(action)
+    handler = ACTION_REGISTRY[action]
+    if handler.requires_operator and operator_user_id is not None and user_id != operator_user_id:
+        raise OperatorOnlyActionError(action)
 
     if trigger_on_status is not None and trigger_on_status not in _VALID_TRIGGER_ON_STATUS:
         raise ValueError(
