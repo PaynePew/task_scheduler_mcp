@@ -13,9 +13,8 @@ def test_default_user_fallback(monkeypatch):
     assert resolve_user_id_stdio() == "default-user"
 
 
-def test_empty_env_var_falls_back_to_default(monkeypatch):
+def test_empty_env_var_is_returned_as_is(monkeypatch):
+    # os.environ.get only applies its default when the key is absent, not when
+    # it is set to "". An empty MCP_USER_ID therefore propagates through.
     monkeypatch.setenv("MCP_USER_ID", "")
-    # empty string means not set → falls back via get(key, "default-user")
-    # os.environ.get("MCP_USER_ID", "default-user") returns "" when set to ""
-    # This is an edge-case: we keep "" as-is (empty string is technically a value).
     assert resolve_user_id_stdio() == ""
