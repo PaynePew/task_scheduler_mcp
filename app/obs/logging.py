@@ -90,18 +90,15 @@ _SECRET_KEY_RE = re.compile(
     re.IGNORECASE,
 )
 
-# A "token-shaped" value: 16+ chars of base64url / hex with no spaces
-_TOKEN_VALUE_RE = re.compile(r"^[A-Za-z0-9_\-+/=]{16,}$")
-
 
 def _redact_value(key: str, value: Any) -> Any:
-    """Return ``"[REDACTED]"`` if *key* or *value* looks like a secret."""
-    if isinstance(value, str):
-        if _SECRET_KEY_RE.search(key):
-            return "[REDACTED]"
-        # Catch token-shaped values stored under innocuous names only when
-        # the key itself already hints at sensitivity (above), so we don't
-        # accidentally redact UUIDs / git SHAs stored under neutral names.
+    """Return ``"[REDACTED]"`` if *key* looks like a secret name.
+
+    Only string values are touched; redaction is keyed off the field name to
+    avoid accidentally masking neutral-named values like UUIDs or git SHAs.
+    """
+    if isinstance(value, str) and _SECRET_KEY_RE.search(key):
+        return "[REDACTED]"
     return value
 
 
