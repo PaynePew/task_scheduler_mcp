@@ -55,5 +55,20 @@ class Settings(BaseSettings):
     rate_limit_daily: int = 1000
     rate_limit_burst_per_minute: int = 10
 
+    # WorkOS AuthKit / OAuth 2.1 resource-server settings (ADR-053).
+    # All three must be set together for HTTP auth to be enforced; when any
+    # is absent the server runs in trust-only mode (for local dev / CI without
+    # WorkOS credentials).  Set via environment variables:
+    #   WORKOS_ISSUER       — e.g. "https://api.workos.com"
+    #   WORKOS_JWKS_URI     — e.g. "https://api.workos.com/sso/jwks/<client_id>"
+    #   WORKOS_AUDIENCE     — resource identifier bound to our server (RFC 8707)
+    workos_issuer: str | None = None
+    workos_jwks_uri: str | None = None
+    workos_audience: str | None = None
+
+    # Operator's WorkOS sub — used to identify the operator in multi-tenant
+    # contexts (quota exemptions, action-tiering).  Set via OPERATOR_USER_ID.
+    operator_user_id: str | None = None
+
 
 settings = Settings()
