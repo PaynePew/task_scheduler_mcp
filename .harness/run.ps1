@@ -470,7 +470,18 @@ if ($StartPhase -ne 'implement' -and -not $Issue) {
 # ── Image cache check / rebuild ────────────────────────────────────────────────
 
 Step 'Image cache check'
-if (Test-ImageRebuildNeeded -DockerfilePath "$HarnessRoot/Dockerfile" -MarkerPath $markerPath -ImageName $imageName) {
+$rebuildNeeded = Test-ImageRebuildNeeded -DockerfilePath "$HarnessRoot/Dockerfile" -MarkerPath $markerPath -ImageName $imageName
+if (-not $rebuildNeeded) {
+    # Hash matches and image exists — but the image may still be a stale build
+    # where critical layers (uv copy, apt installs) silently no-op'd. Smoke-test
+    # the toolchain to catch this; if any required binary is missing, force a
+    # rebuild even though the marker says we're up-to-date.
+    if (-not (Test-ImageToolchain -ImageName $imageName)) {
+        Write-Host '  Hash matches but image toolchain incomplete — forcing rebuild.' -ForegroundColor Yellow
+        $rebuildNeeded = $true
+    }
+}
+if ($rebuildNeeded) {
     Write-Host "  Rebuilding image: $imageName" -ForegroundColor Yellow
     docker build -t $imageName -f "$HarnessRoot/Dockerfile" "$RepoRoot"
     if ($LASTEXITCODE -ne 0) { Fail 'docker build failed.' }

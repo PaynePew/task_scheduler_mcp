@@ -37,7 +37,22 @@ Run the test suite:
 {{TESTS_BLOCK}}
 ```
 
-If tests fail, abort with an explanation. Do not push a broken branch.
+Failure handling — distinguish lint/format from real test failures:
+
+- **`ruff format --check` fails (only lines reformatted, no logic errors):**
+  apply the fix and commit it, then re-run the verification chain:
+  ```bash
+  uv run ruff format .
+  git add -A && git commit -m "style: ruff format"
+  {{TESTS_BLOCK}}
+  ```
+  Adding a new commit is allowed (the hard rules below forbid rebase/squash, not new commits).
+
+- **`ruff check` fails with auto-fixable lints only (`--fix` would clear them):**
+  apply, commit as `style: ruff --fix`, re-run.
+
+- **`pytest` fails, or `ruff check` reports lints that aren't auto-fixable:**
+  abort with an explanation. Do not push a broken branch — these need human review or another implement pass.
 
 ## 2. Push the branch to origin
 

@@ -39,6 +39,12 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
 # Bump deliberately when the runtime image is bumped.
 COPY --from=ghcr.io/astral-sh/uv:0.5.20 /uv /uvx /usr/local/bin/
 
+# Fail the build loudly if the COPY above silently no-ops. Previously a stale
+# image survived `Test-ImageRebuildNeeded` because the marker matched the
+# current Dockerfile hash even though the image lacked uv (issue #131 merge
+# phase wasted a turn pip-installing uv before aborting on a lint failure).
+RUN uv --version && uvx --version
+
 # Rename the base image's `node` user (UID 1000) to `agent` and move its
 # home dir. Avoids a UID collision that would happen if we created a new
 # user with -u 1000.

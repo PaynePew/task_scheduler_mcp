@@ -37,3 +37,32 @@ function Test-ImageExists {
     $id = & docker images -q $ImageName 2>$null
     return [bool]$id
 }
+
+function Test-ImageToolchain {
+    <#
+    .SYNOPSIS
+        Smoke-check that a built image actually contains the tools the Dockerfile
+        is supposed to install. Returns $true if all checks pass, $false otherwise.
+    .DESCRIPTION
+        The Dockerfile hash check (Test-ImageRebuildNeeded) is not sufficient on
+        its own: a previous `docker build` may have failed partway, the marker
+        may have been hand-edited, or layers may have been pruned. This function
+        runs the image and asserts critical binaries respond.
+
+        Wired into run.ps1 so a corrupted/stale image triggers a rebuild even
+        when the Dockerfile hash hasn't changed.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$ImageName,
+        [string[]]$RequiredTools = @('uv', 'gh', 'claude', 'git')
+    )
+
+    foreach ($tool in $RequiredTools) {
+        & docker run --rm --entrypoint $tool $ImageName --version *> $null 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "  Image smoke check failed: '$tool --version' nonzero exit" -ForegroundColor Yellow
+            return $false
+        }
+    }
+    return $true
+}
