@@ -1,4 +1,8 @@
-"""Integration tests for Postgres-backed rate limiting (ADR-042).
+"""Integration tests for Postgres-backed rate limiting (ADR-042/ADR-057).
+
+Rate limiting now lives in the HTTP middleware (_McpHttpEndpoint) and returns
+HTTP 429 + Retry-After rather than a bare MCP envelope error.  Handler-level
+tests exercise the full HTTP stack via httpx.ASGITransport.
 
 Requires a live Postgres instance with schema applied.
 Run: uv run pytest -m integration tests/integration/test_ratelimit.py
@@ -8,12 +12,14 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import httpx
 import pytest
 import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.db.engine import create_async_engine
+from app.entrypoints.mcp_http import build_app
 from app.mcp.server import _handle_task_create
 from app.ratelimit.checker import Allow, RateLimits, Reject, check_rate_limit
 
@@ -152,63 +158,128 @@ async def test_checker_multi_user_isolation(session_factory):
 
 
 # ---------------------------------------------------------------------------
-# Handler-level tests (task.create.v1 end-to-end)
+# HTTP-level rate-limit tests (ADR-057: 429 + Retry-After from middleware)
 # ---------------------------------------------------------------------------
+
+MCP_HEADERS = {
+    "Content-Type": "application/json",
+    "Accept": "application/json",
+}
+
+
+def _create_call(user_id: str) -> dict:
+    return {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "task.create.v1",
+            "arguments": {"action": "echo", "action_params": {"message": "hi"}},
+        },
+    }
 
 
 @pytest.mark.integration
-async def test_handler_1001st_job_rejected(session_factory):
-    """1000 jobs in 24 h → 1001st task.create.v1 returns USER_INPUT with retry_after_seconds."""
-    user_id = "rl-handler-daily"
+async def test_http_1001st_job_returns_429(session_factory):
+    """1000 jobs in 24 h → 1001st POST /mcp returns HTTP 429 + Retry-After header."""
+    user_id = "rl-http-daily"
     now = datetime.now(UTC)
     within_window = now - timedelta(hours=1)
     await _bulk_insert_jobs(session_factory, user_id, 1000, within_window)
 
-    result = await _handle_task_create(
-        arguments={"action": "echo", "action_params": {"message": "hi"}},
-        user_id=user_id,
+    app = build_app(
+        json_response=True,
         session_factory=session_factory,
+        shed_fn=lambda: False,  # disable load shedding in test
     )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/mcp",
+            json=_create_call(user_id),
+            headers={**MCP_HEADERS, "X-User-Id": user_id},
+        )
 
-    assert result["ok"] is False
-    err = result["error"]
-    assert err["code"] == "USER_INPUT"
-    assert "daily" in err["message"]
-    assert err["field"] == "user_id"
-    assert isinstance(err["expected"], dict)
-    assert err["expected"]["retry_after_seconds"] > 0
+    assert resp.status_code == 429
+    assert "Retry-After" in resp.headers
+    assert int(resp.headers["Retry-After"]) > 0
+    body = resp.json()
+    assert body["ok"] is False
+    assert body["error"]["code"] == "RATE_LIMITED"
+    assert "daily" in body["error"]["message"]
+    assert body["error"]["retry_after_seconds"] > 0
 
 
 @pytest.mark.integration
-async def test_handler_11th_burst_job_rejected(session_factory):
-    """10 jobs within 1 minute → 11th task.create.v1 returns USER_INPUT burst rejection."""
-    user_id = "rl-handler-burst"
+async def test_http_11th_burst_job_returns_429(session_factory):
+    """10 jobs within 1 minute → 11th POST /mcp returns HTTP 429 + Retry-After header."""
+    user_id = "rl-http-burst"
     now = datetime.now(UTC)
     within_burst = now - timedelta(seconds=30)
     await _bulk_insert_jobs(session_factory, user_id, 10, within_burst)
 
-    result = await _handle_task_create(
-        arguments={"action": "echo", "action_params": {"message": "burst"}},
-        user_id=user_id,
+    app = build_app(
+        json_response=True,
         session_factory=session_factory,
+        shed_fn=lambda: False,
     )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/mcp",
+            json=_create_call(user_id),
+            headers={**MCP_HEADERS, "X-User-Id": user_id},
+        )
 
-    assert result["ok"] is False
-    err = result["error"]
-    assert err["code"] == "USER_INPUT"
-    assert "burst" in err["message"]
-    assert err["field"] == "user_id"
-    assert isinstance(err["expected"], dict)
-    assert err["expected"]["retry_after_seconds"] > 0
+    assert resp.status_code == 429
+    assert "Retry-After" in resp.headers
+    body = resp.json()
+    assert body["ok"] is False
+    assert body["error"]["code"] == "RATE_LIMITED"
+    assert "burst" in body["error"]["message"]
+
+
+@pytest.mark.integration
+async def test_http_under_limit_succeeds(session_factory):
+    """HTTP request under both rate limits returns 200 with job_id."""
+    user_id = "rl-http-ok"
+
+    app = build_app(
+        json_response=True,
+        session_factory=session_factory,
+        shed_fn=lambda: False,
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/mcp",
+            json=_create_call(user_id),
+            headers={**MCP_HEADERS, "X-User-Id": user_id},
+        )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    result_text = body["result"]["content"][0]["text"]
+    import json
+
+    result = json.loads(result_text)
+    assert result["ok"] is True
+    assert "job_id" in result["data"]
+
+
+# ---------------------------------------------------------------------------
+# Handler-level smoke test (no rate-limit check; verifies create_job still works)
+# ---------------------------------------------------------------------------
 
 
 @pytest.mark.integration
 async def test_handler_under_limit_succeeds(session_factory):
-    """Handler succeeds when user is under both limits."""
+    """_handle_task_create succeeds when user is under limits (no rate-limit in handler)."""
     result = await _handle_task_create(
         arguments={"action": "echo", "action_params": {"message": "ok"}},
         user_id="rl-handler-ok",
         session_factory=session_factory,
+        _queue_depth=0,
     )
 
     assert result["ok"] is True

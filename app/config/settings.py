@@ -55,5 +55,19 @@ class Settings(BaseSettings):
     rate_limit_daily: int = 1000
     rate_limit_burst_per_minute: int = 10
 
+    # Overload protection (ADR-057).
+    # CPU / RAM thresholds: fractions in [0, 1]; 0.90 = 90%.
+    overload_cpu_threshold: float = 0.90
+    overload_ram_threshold: float = 0.90
+    # Queue depth thresholds (absolute message count).
+    # overload_queue_depth_threshold: triggers load shedding (503).
+    # overload_backpressure_queue_depth: task.create returns 429.
+    overload_queue_depth_threshold: int = 1000
+    overload_backpressure_queue_depth: int = 500
+    # Max concurrent in-flight MCP requests before 503 is returned.
+    overload_concurrency_limit: int = 10
+    # Retry-After header value (seconds) sent with 503/429 overload responses.
+    overload_retry_after_seconds: int = 10
+
 
 settings = Settings()

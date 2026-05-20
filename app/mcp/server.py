@@ -29,7 +29,7 @@ from app.mcp.resources.actions_resource import read_tasks_actions
 from app.mcp.resources.job_resource import read_tasks_job
 from app.mcp.resources.list_resource import read_tasks_list
 from app.mcp.resources.recent_results import read_tasks_recent_results
-from app.ratelimit.checker import Allow, RateLimits, check_rate_limit
+from app.overload.health import get_queue_depth
 from app.secrets.literal_detection import detect_literal_secret
 
 logger = logging.getLogger(__name__)
@@ -298,6 +298,7 @@ async def _handle_task_create(
     *,
     session_factory: async_sessionmaker[AsyncSession],
     tz_header: str | None = None,
+    _queue_depth: int | None = None,
 ) -> dict[str, Any]:
     action = arguments.get("action")
     action_params = arguments.get("action_params", {})
@@ -314,6 +315,23 @@ async def _handle_task_create(
             ),
             field="action_params",
             expected="${VAR_NAME} reference instead of a literal credential",
+        )
+
+    # ------------------------------------------------------------------
+    # SQS backpressure: if the queue is deep, slow down task creation
+    # to avoid overwhelming the worker pool (ADR-057).
+    # _queue_depth is injectable for unit-test determinism.
+    # ------------------------------------------------------------------
+    backpressure_threshold = settings.overload_backpressure_queue_depth
+    depth = _queue_depth if _queue_depth is not None else get_queue_depth(settings.queue_url)
+    if depth >= backpressure_threshold:
+        retry_after = settings.overload_retry_after_seconds
+        return error(
+            "BACKPRESSURE",
+            f"Queue depth ({depth}) exceeds threshold ({backpressure_threshold}). "
+            f"The system is busy; please retry after {retry_after} seconds.",
+            field="queue_depth",
+            expected={"retry_after_seconds": retry_after},
         )
 
     schedule_type = arguments.get("schedule_type", "immediate")
@@ -337,19 +355,6 @@ async def _handle_task_create(
             )
 
     try:
-        limits = RateLimits(
-            daily=settings.rate_limit_daily,
-            burst=settings.rate_limit_burst_per_minute,
-        )
-        async with session_factory() as rl_session:
-            decision = await check_rate_limit(user_id, rl_session, limits)
-        if not isinstance(decision, Allow):
-            return error(
-                "USER_INPUT",
-                f"Rate limit exceeded: {decision.reason}",
-                field="user_id",
-                expected={"retry_after_seconds": decision.retry_after_seconds},
-            )
         async with session_factory() as session:
             job = await create_job(
                 session,
