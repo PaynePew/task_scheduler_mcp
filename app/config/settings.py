@@ -87,5 +87,10 @@ class Settings(BaseSettings):
     # contexts (quota exemptions, action-tiering).  Set via OPERATOR_USER_ID.
     operator_user_id: str | None = None
 
+    # Better Stack (Logtail) log ingestion token (ADR-056).
+    # When set, a LogtailHandler ships logs to Better Stack.
+    # Leave unset in local dev — logs go to stdout only.
+    better_stack_source_token: str | None = None
+
 
 settings = Settings()
