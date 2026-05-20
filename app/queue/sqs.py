@@ -91,3 +91,17 @@ class SQSClient:
             ReceiptHandle=receipt_handle,
             VisibilityTimeout=visibility_timeout,
         )
+
+    def get_queue_depth(self) -> int:
+        """Return the approximate number of visible messages in the queue.
+
+        Returns 0 on any error so callers can treat an unreachable queue as empty.
+        """
+        try:
+            resp = self._client.get_queue_attributes(
+                QueueUrl=self._queue_url,
+                AttributeNames=["ApproximateNumberOfMessages"],
+            )
+            return int(resp["Attributes"].get("ApproximateNumberOfMessages", 0))
+        except Exception:
+            return 0

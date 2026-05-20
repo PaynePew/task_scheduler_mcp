@@ -13,12 +13,22 @@ scheduler.paynepew.dev {
         output file /var/log/caddy/access.log
     }
 
-    handle /healthz {
+    handle /healthz* {
         reverse_proxy mcp-server:8000
     }
 
     handle /mcp* {
-        reverse_proxy mcp-server:8000
+        # ADR-057: shed at the Caddy edge before business logic.
+        # When /healthz/shed returns 503, Caddy marks the backend unhealthy
+        # and returns 503 + Retry-After directly (fail_duration keeps it
+        # unhealthy for 10 s to avoid hammering the health endpoint under load).
+        reverse_proxy mcp-server:8000 {
+            health_uri /healthz/shed
+            health_interval 5s
+            health_timeout 2s
+            fail_duration 10s
+            unhealthy_status 503
+        }
     }
 
     handle / {

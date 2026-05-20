@@ -87,6 +87,20 @@ class Settings(BaseSettings):
     # contexts (quota exemptions, action-tiering).  Set via OPERATOR_USER_ID.
     operator_user_id: str | None = None
 
+    # Overload protection (ADR-057).
+    # CPU / RAM thresholds: fractions in [0, 1]; 0.90 = 90%.
+    overload_cpu_threshold: float = 0.90
+    overload_ram_threshold: float = 0.90
+    # Queue depth thresholds (absolute message count).
+    # overload_queue_depth_threshold: triggers load shedding (503).
+    # overload_backpressure_queue_depth: task.create returns 429.
+    overload_queue_depth_threshold: int = 1000
+    overload_backpressure_queue_depth: int = 500
+    # Max concurrent in-flight MCP requests before 503 is returned.
+    overload_concurrency_limit: int = 10
+    # Retry-After header value (seconds) sent with 503/429 overload responses.
+    overload_retry_after_seconds: int = 10
+
     # Better Stack (Logtail) log ingestion token (ADR-056).
     # When set, a LogtailHandler ships logs to Better Stack.
     # Leave unset in local dev — logs go to stdout only.
