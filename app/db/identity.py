@@ -3,8 +3,8 @@
 HTTP path:  JWT sub claim via validate_token() in the HTTP middleware.
             X-User-Id header is ignored on public HTTP (ADR-049).
 
-Stdio path: MCP_USER_ID env var (operator's WorkOS sub) → raises RuntimeError
-            if unset (no anonymous stdio on public deployments).
+Stdio path: MCP_USER_ID env var (operator's WorkOS sub), falling back to
+            "default-user" so local dev / legacy stdio sessions keep working.
 """
 
 from __future__ import annotations
