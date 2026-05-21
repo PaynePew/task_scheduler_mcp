@@ -119,5 +119,26 @@ class Settings(BaseSettings):
     # this many seconds (default 5 minutes).
     connection_refresh_window_seconds: int = 300
 
+    # Operator-subsidized LLM actions (ADR-052).
+    # LLM_MODEL: pinned cheap model — callers cannot override this.
+    # LLM_API_KEY: operator's LLM provider API key (never user-supplied).
+    # LLM_API_BASE_URL: OpenAI-compatible endpoint base URL.
+    # LLM_MAX_OUTPUT_TOKENS: max_tokens sent to the provider on every call.
+    # LLM_MAX_INPUT_CHARS: character limit on user/fetched content; handler
+    #   truncates to this length before the provider call (no spend wasted).
+    #   ~16k chars ≈ 4k tokens at ~4 chars/token for Latin text.
+    # LLM_DAILY_TOKEN_BUDGET_PER_USER: per-user daily cap (in+out tokens).
+    #   Exhausted → typed error before the call; resets at UTC midnight.
+    # LLM_GLOBAL_MONTHLY_TOKEN_CEILING: optional app-side kill-switch (None
+    #   disables the app-side check; provider dashboard hard stop is always
+    #   the last-resort ceiling).
+    llm_model: str = "gpt-4o-mini"
+    llm_api_key: str | None = None
+    llm_api_base_url: str = "https://api.openai.com/v1"
+    llm_max_output_tokens: int = 1024
+    llm_max_input_chars: int = 16000
+    llm_daily_token_budget_per_user: int = 10000
+    llm_global_monthly_token_ceiling: int | None = None
+
 
 settings = Settings()

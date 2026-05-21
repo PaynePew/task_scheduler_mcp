@@ -418,9 +418,9 @@ def test_r2_upload_removed_from_registry():
     assert "r2_upload" not in ACTION_REGISTRY
 
 
-def test_registry_has_six_actions():
-    """task.list_actions.v1 exposes 6 actions (r2_upload removed in issue #132)."""
-    assert len(ACTION_REGISTRY) == 6
+def test_registry_has_eight_actions():
+    """task.list_actions.v1 exposes 8 actions (r2_upload removed #132; llm actions added #137)."""
+    assert len(ACTION_REGISTRY) == 8
     expected = {
         "echo",
         "http_call",
@@ -428,5 +428,7 @@ def test_registry_has_six_actions():
         "slack_post",
         "github_digest",
         "email_send",
+        "llm_summarize",
+        "llm_polish",
     }
     assert set(ACTION_REGISTRY.keys()) == expected
