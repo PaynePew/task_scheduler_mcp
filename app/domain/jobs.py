@@ -161,6 +161,8 @@ async def create_job(
     if action not in ACTION_REGISTRY:
         raise UnknownActionError(action)
     handler = ACTION_REGISTRY[action]
+    # Fail closed: a None operator_user_id means the operator identity is unknown,
+    # so requires_operator actions must be denied (never short-circuit on None).
     if handler.requires_operator and user_id != operator_user_id:
         raise OperatorOnlyActionError(action)
 
