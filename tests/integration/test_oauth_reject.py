@@ -1,8 +1,8 @@
 """Integration smoke test: unauthenticated HTTP /mcp is rejected (ADR-053).
 
 The app is started with WorkOS auth enabled by patching the module-level
-_AUTH_ENABLED flag so the test doesn't need real WorkOS credentials while
-still exercising the 401-response code path.
+POSTURE to a BearerVerified instance so the test doesn't need real WorkOS
+credentials while still exercising the 401-response code path.
 
 Run with:
     uv run pytest -m integration tests/integration/test_oauth_reject.py
