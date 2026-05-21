@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
-from app.web.connections import _create_session_token, _decode_session_token, _make_routes
+from app.web.connections import _create_session_token, _decode_session_token, make_routes
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -41,7 +41,7 @@ def _make_app(session_factory=None):
     from starlette.applications import Starlette
 
     factory = session_factory or _make_test_session_factory()[0]
-    routes = _make_routes(factory)
+    routes = make_routes(factory)
     return Starlette(routes=routes)
 
 

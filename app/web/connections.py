@@ -175,7 +175,7 @@ def _render_login_page(redirect_url: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _make_routes(
+def make_routes(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> list[Route]:
     """Return the list of Starlette Route objects for the connections web surface.
