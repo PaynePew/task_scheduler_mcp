@@ -151,6 +151,11 @@ class Settings(BaseSettings):
     github_client_id: str | None = None
     github_client_secret: str | None = None
 
+    # Google OAuth app credentials (ADR-058).
+    # Required for the Google "Connect" flow (Gmail send scope) on /connections.
+    google_client_id: str | None = None
+    google_client_secret: str | None = None
+
     # Base URL of this server — used to construct OAuth redirect URIs and the
     # connect_url hint in task.create error envelopes (ADR-058).
     # E.g. "https://scheduler.paynepew.dev" in production, "http://localhost:8000" locally.

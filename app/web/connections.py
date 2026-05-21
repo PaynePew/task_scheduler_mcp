@@ -44,6 +44,10 @@ _SESSION_COOKIE = "session"
 _STATE_COOKIE = "oauth_state"
 _SESSION_TTL = timedelta(hours=24)
 _GITHUB_OAUTH_SCOPE = "read:user repo"
+_GOOGLE_OAUTH_SCOPE = "https://www.googleapis.com/auth/gmail.send"
+_GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
+_GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+_GOOGLE_REVOKE_URL = "https://oauth2.googleapis.com/revoke"
 
 # ---------------------------------------------------------------------------
 # Session helpers
@@ -129,7 +133,7 @@ th { background: #f4f4f4; }
 def _render_dashboard(user_id: str, connections: list[str]) -> str:
     """Return a simple HTML string for the connections dashboard."""
     rows = []
-    providers = [("GitHub", "github")]
+    providers = [("GitHub", "github"), ("Google", "google")]
     for display_name, provider_slug in providers:
         connected = provider_slug in connections
         if connected:
@@ -389,6 +393,90 @@ def make_routes(
 
         return RedirectResponse("/connections", status_code=302)
 
+    async def _google_connect(request: Request) -> Response:
+        """Start Google OAuth flow (Gmail send scope)."""
+        user_id = _get_session_user(request)
+        if not user_id:
+            return RedirectResponse("/connections/login", status_code=302)
+
+        if not settings.google_client_id:
+            return HTMLResponse(
+                "Google OAuth not configured (GOOGLE_CLIENT_ID missing)", status_code=503
+            )
+
+        state = secrets.token_urlsafe(24)
+        redirect_uri = f"{settings.connections_base_url}/connections/google/callback"
+        params = {
+            "client_id": settings.google_client_id,
+            "redirect_uri": redirect_uri,
+            "response_type": "code",
+            "scope": _GOOGLE_OAUTH_SCOPE,
+            "access_type": "offline",
+            "prompt": "consent",
+            "state": state,
+        }
+        google_url = _GOOGLE_AUTH_URL + "?" + urllib.parse.urlencode(params)
+        resp = RedirectResponse(google_url, status_code=302)
+        resp.set_cookie(_STATE_COOKIE, state, httponly=True, samesite="lax", max_age=600)
+        return resp
+
+    async def _google_callback(request: Request) -> Response:
+        """Handle Google OAuth callback — exchange code for tokens and store them."""
+        user_id = _get_session_user(request)
+        if not user_id:
+            return RedirectResponse("/connections/login", status_code=302)
+
+        code = request.query_params.get("code")
+        state = request.query_params.get("state")
+        stored_state = request.cookies.get(_STATE_COOKIE)
+
+        if not code:
+            return HTMLResponse("Missing code parameter from Google", status_code=400)
+        if stored_state and state != stored_state:
+            return HTMLResponse("Invalid state — possible CSRF", status_code=400)
+
+        envelope = _make_kms_envelope()
+        if envelope is None:
+            return HTMLResponse(
+                "Google connection could not be stored (KMS not configured)",
+                status_code=503,
+            )
+
+        redirect_uri = f"{settings.connections_base_url}/connections/google/callback"
+        try:
+            token_data = await _exchange_google_code(code, redirect_uri)
+        except Exception as exc:
+            return HTMLResponse(f"Google token exchange failed: {exc}", status_code=502)
+
+        async with session_factory() as session:
+            store = ConnectionStore(session, envelope)
+            await store.upsert(user_id, "google", token_data)
+            await session.commit()
+
+        resp = RedirectResponse("/connections", status_code=302)
+        resp.delete_cookie(_STATE_COOKIE)
+        return resp
+
+    async def _google_disconnect(request: Request) -> Response:
+        """Remove Google connection and revoke upstream token."""
+        user_id = _get_session_user(request)
+        if not user_id:
+            return RedirectResponse("/connections/login", status_code=302)
+
+        envelope = _make_kms_envelope()
+        if envelope is not None:
+            async with session_factory() as session:
+                store = ConnectionStore(session, envelope)
+                try:
+                    token = await store.get_fresh_token(user_id, "google")
+                    await _revoke_google_token(token)
+                except ConnectionMiss:
+                    pass
+                await store.delete(user_id, "google")
+                await session.commit()
+
+        return RedirectResponse("/connections", status_code=302)
+
     return [
         Route("/connections", endpoint=_connections_dashboard, methods=["GET"]),
         Route("/connections/login", endpoint=_connections_login, methods=["GET"]),
@@ -397,6 +485,9 @@ def make_routes(
         Route("/connections/github/connect", endpoint=_github_connect, methods=["GET"]),
         Route("/connections/github/callback", endpoint=_github_callback, methods=["GET"]),
         Route("/connections/github/disconnect", endpoint=_github_disconnect, methods=["POST"]),
+        Route("/connections/google/connect", endpoint=_google_connect, methods=["GET"]),
+        Route("/connections/google/callback", endpoint=_google_callback, methods=["GET"]),
+        Route("/connections/google/disconnect", endpoint=_google_disconnect, methods=["POST"]),
     ]
 
 
@@ -444,5 +535,52 @@ async def _revoke_github_token(token: str) -> None:
                 auth=(settings.github_client_id, settings.github_client_secret),
                 json={"access_token": token},
             )
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Google OAuth helpers
+# ---------------------------------------------------------------------------
+
+
+async def _exchange_google_code(code: str, redirect_uri: str) -> dict[str, Any]:
+    """Exchange a Google authorization code for access + refresh tokens.
+
+    Computes ``expires_at`` from ``expires_in`` so the connection store can
+    check the refresh window without decrypting the blob.
+    """
+    from datetime import UTC, datetime, timedelta  # noqa: PLC0415
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.post(
+            _GOOGLE_TOKEN_URL,
+            data={
+                "client_id": settings.google_client_id,
+                "client_secret": settings.google_client_secret,
+                "code": code,
+                "redirect_uri": redirect_uri,
+                "grant_type": "authorization_code",
+            },
+        )
+    resp.raise_for_status()
+    data = resp.json()
+    if "access_token" not in data:
+        raise ValueError(f"Google OAuth error: {data.get('error_description', data)}")
+    if "expires_in" in data:
+        expires_at = datetime.now(UTC) + timedelta(seconds=int(data["expires_in"]))
+        data["expires_at"] = expires_at.isoformat()
+    return data
+
+
+async def _revoke_google_token(token: str) -> None:
+    """Attempt to revoke *token* via Google's token revocation endpoint.
+
+    Best-effort: errors are silently swallowed (the connection is deleted
+    from our store regardless, per ADR-058 revocation semantics).
+    """
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            await client.post(_GOOGLE_REVOKE_URL, params={"token": token})
     except Exception:
         pass
