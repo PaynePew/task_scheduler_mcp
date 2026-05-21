@@ -50,6 +50,22 @@ who is sending.
 - The "shed, don't crash" property: under 10× load the system serves a fraction
   with clear errors instead of total collapse — a portfolio/interview talking point.
 
+## Module-state exemption
+
+`app/overload/health.py` contains one piece of intentional module-level mutable
+state: `_queue_depth_cache: dict[str, tuple[int, float]]`.  This is an explicit
+exemption from the project's *no new module-level mutable state in long-running
+processes* rule.  Rationale:
+
+- **TTL-keyed and idempotent**: every entry is bounded by `_QUEUE_DEPTH_TTL`
+  (30 s).  A stale entry produces a conservative (safe) depth reading, not a
+  correctness error.
+- **Single-key in practice**: the cache maps `queue_url → (depth, ts)`.  The
+  deployed process has exactly one queue URL, so the dict stays a single entry.
+- **Moving state to an instance is more churn than value**: `get_queue_depth` is a
+  module-level helper; threading the cache through every call site would bloat the
+  call surface without improving safety.
+
 ## Alternatives considered
 
 - **Rate limiting alone** — rejected: bounds per-client arrival, not aggregate or
