@@ -164,3 +164,84 @@ async def test_login_trust_only_sets_session(mcp_app):
     assert resp.status_code == 302
     assert resp.headers["location"] == "/connections"
     assert "session" in resp.cookies
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_connections_dashboard_shows_slack(mcp_app):
+    """Dashboard renders a Slack row alongside GitHub."""
+    token = _create_session_token("test-user-integration")
+    transport = httpx.ASGITransport(app=mcp_app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://test",
+        cookies={"session": token},
+        follow_redirects=False,
+    ) as client:
+        from unittest.mock import patch
+
+        with patch("app.web.connections._make_kms_envelope", return_value=None):
+            resp = await client.get("/connections")
+
+    assert resp.status_code == 200
+    assert "Slack" in resp.text
+    assert "GitHub" in resp.text
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_fake_slack_oauth_callback_stores_connection(mcp_app, session_factory):
+    """A fake Slack OAuth callback stores a connection in the DB."""
+    with mock_aws():
+        kms_client = boto3.client("kms", region_name=_REGION)
+        key_id = kms_client.create_key(Description="test")["KeyMetadata"]["KeyId"]
+
+        from app.crypto.kms_envelope import KmsEnvelope
+
+        fake_envelope = KmsEnvelope(kms_client=kms_client, key_id=key_id)
+        fake_token_data = {
+            "ok": True,
+            "access_token": "xoxb-fake-slack-token",
+            "scope": "chat:write",
+            "token_type": "bot",
+        }
+
+        token = _create_session_token("test-user-integration")
+        transport = httpx.ASGITransport(app=mcp_app)
+
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+            cookies={"session": token},
+            follow_redirects=False,
+        ) as client:
+            from unittest.mock import AsyncMock, patch
+
+            with (
+                patch("app.web.connections._make_kms_envelope", return_value=fake_envelope),
+                patch(
+                    "app.web.connections._exchange_slack_code",
+                    new=AsyncMock(return_value=fake_token_data),
+                ),
+            ):
+                resp = await client.get(
+                    "/connections/slack/callback",
+                    params={"code": "fake-code", "state": ""},
+                )
+
+        assert resp.status_code == 302
+        assert resp.headers["location"] == "/connections"
+
+        from sqlalchemy import select
+
+        async with session_factory() as session:
+            result = await session.execute(
+                select(OAuthConnection).where(
+                    OAuthConnection.user_id == "test-user-integration",
+                    OAuthConnection.provider == "slack",
+                )
+            )
+            row = result.scalar_one_or_none()
+
+        assert row is not None, "Slack connection was not persisted to Postgres"
+        assert b"xoxb-fake-slack-token" not in row.encrypted_blob

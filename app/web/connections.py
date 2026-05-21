@@ -44,6 +44,7 @@ _SESSION_COOKIE = "session"
 _STATE_COOKIE = "oauth_state"
 _SESSION_TTL = timedelta(hours=24)
 _GITHUB_OAUTH_SCOPE = "read:user repo"
+_SLACK_OAUTH_SCOPE = "chat:write chat:write.public"
 
 # ---------------------------------------------------------------------------
 # Session helpers
@@ -129,7 +130,7 @@ th { background: #f4f4f4; }
 def _render_dashboard(user_id: str, connections: list[str]) -> str:
     """Return a simple HTML string for the connections dashboard."""
     rows = []
-    providers = [("GitHub", "github")]
+    providers = [("GitHub", "github"), ("Slack", "slack")]
     for display_name, provider_slug in providers:
         connected = provider_slug in connections
         if connected:
@@ -389,6 +390,87 @@ def make_routes(
 
         return RedirectResponse("/connections", status_code=302)
 
+    async def _slack_connect(request: Request) -> Response:
+        """Start Slack OAuth flow."""
+        user_id = _get_session_user(request)
+        if not user_id:
+            return RedirectResponse("/connections/login", status_code=302)
+
+        if not settings.slack_client_id:
+            return HTMLResponse(
+                "Slack OAuth not configured (SLACK_CLIENT_ID missing)", status_code=503
+            )
+
+        state = secrets.token_urlsafe(24)
+        redirect_uri = f"{settings.connections_base_url}/connections/slack/callback"
+        params = {
+            "client_id": settings.slack_client_id,
+            "redirect_uri": redirect_uri,
+            "scope": _SLACK_OAUTH_SCOPE,
+            "state": state,
+        }
+        slack_url = "https://slack.com/oauth/v2/authorize?" + urllib.parse.urlencode(params)
+        resp = RedirectResponse(slack_url, status_code=302)
+        resp.set_cookie(_STATE_COOKIE, state, httponly=True, samesite="lax", max_age=600)
+        return resp
+
+    async def _slack_callback(request: Request) -> Response:
+        """Handle Slack OAuth callback — exchange code for token and store it."""
+        user_id = _get_session_user(request)
+        if not user_id:
+            return RedirectResponse("/connections/login", status_code=302)
+
+        code = request.query_params.get("code")
+        state = request.query_params.get("state")
+        stored_state = request.cookies.get(_STATE_COOKIE)
+
+        if not code:
+            return HTMLResponse("Missing code parameter from Slack", status_code=400)
+        if stored_state and state != stored_state:
+            return HTMLResponse("Invalid state — possible CSRF", status_code=400)
+
+        envelope = _make_kms_envelope()
+        if envelope is None:
+            return HTMLResponse(
+                "Slack connection could not be stored (KMS not configured)",
+                status_code=503,
+            )
+
+        redirect_uri = f"{settings.connections_base_url}/connections/slack/callback"
+        try:
+            token_data = await _exchange_slack_code(code, redirect_uri)
+        except Exception as exc:
+            return HTMLResponse(f"Slack token exchange failed: {exc}", status_code=502)
+
+        async with session_factory() as session:
+            store = ConnectionStore(session, envelope)
+            await store.upsert(user_id, "slack", token_data)
+            await session.commit()
+
+        resp = RedirectResponse("/connections", status_code=302)
+        resp.delete_cookie(_STATE_COOKIE)
+        return resp
+
+    async def _slack_disconnect(request: Request) -> Response:
+        """Remove Slack connection and revoke upstream token."""
+        user_id = _get_session_user(request)
+        if not user_id:
+            return RedirectResponse("/connections/login", status_code=302)
+
+        envelope = _make_kms_envelope()
+        if envelope is not None:
+            async with session_factory() as session:
+                store = ConnectionStore(session, envelope)
+                try:
+                    token = await store.get_fresh_token(user_id, "slack")
+                    await _revoke_slack_token(token)
+                except ConnectionMiss:
+                    pass
+                await store.delete(user_id, "slack")
+                await session.commit()
+
+        return RedirectResponse("/connections", status_code=302)
+
     return [
         Route("/connections", endpoint=_connections_dashboard, methods=["GET"]),
         Route("/connections/login", endpoint=_connections_login, methods=["GET"]),
@@ -397,6 +479,9 @@ def make_routes(
         Route("/connections/github/connect", endpoint=_github_connect, methods=["GET"]),
         Route("/connections/github/callback", endpoint=_github_callback, methods=["GET"]),
         Route("/connections/github/disconnect", endpoint=_github_disconnect, methods=["POST"]),
+        Route("/connections/slack/connect", endpoint=_slack_connect, methods=["GET"]),
+        Route("/connections/slack/callback", endpoint=_slack_callback, methods=["GET"]),
+        Route("/connections/slack/disconnect", endpoint=_slack_disconnect, methods=["POST"]),
     ]
 
 
@@ -443,6 +528,50 @@ async def _revoke_github_token(token: str) -> None:
                 f"https://api.github.com/applications/{settings.github_client_id}/token",
                 auth=(settings.github_client_id, settings.github_client_secret),
                 json={"access_token": token},
+            )
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Slack OAuth helpers
+# ---------------------------------------------------------------------------
+
+
+async def _exchange_slack_code(code: str, redirect_uri: str) -> dict[str, Any]:
+    """Exchange a Slack authorization code for an access token.
+
+    Returns the parsed token response dict (contains access_token, scope, etc.).
+    Raises on any HTTP or parse error.
+    """
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.post(
+            "https://slack.com/api/oauth.v2.access",
+            data={
+                "code": code,
+                "client_id": settings.slack_client_id,
+                "client_secret": settings.slack_client_secret,
+                "redirect_uri": redirect_uri,
+            },
+        )
+    resp.raise_for_status()
+    data = resp.json()
+    if not data.get("ok"):
+        raise ValueError(f"Slack OAuth error: {data.get('error', data)}")
+    return data
+
+
+async def _revoke_slack_token(token: str) -> None:
+    """Attempt to revoke *token* via Slack's auth.revoke API.
+
+    Best-effort: errors are silently swallowed (the connection is deleted
+    from our store regardless, per ADR-058 revocation semantics).
+    """
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            await client.post(
+                "https://slack.com/api/auth.revoke",
+                headers={"Authorization": f"Bearer {token}"},
             )
     except Exception:
         pass
