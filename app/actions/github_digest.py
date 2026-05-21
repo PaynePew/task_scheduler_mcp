@@ -286,7 +286,10 @@ def _classify_error(response: httpx.Response) -> ActionResult | None:
         return ActionResult(
             ok=False,
             result=None,
-            error="GitHub API 401 Unauthorized — check GITHUB_TOKEN",
+            error=(
+                "GitHub API 401 Unauthorized — the stored GitHub connection is invalid "
+                "or revoked; reconnect at /connections"
+            ),
             retryable=False,
         )
 
