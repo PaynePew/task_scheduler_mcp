@@ -102,6 +102,7 @@ async def _check_oauth_connection(
         )
     except Exception:
         # Any other error (KMS unreachable, DB error) — don't block job creation.
+        logger.exception("oauth connection pre-flight failed for user %s", user_id)
         return None
 
     return None
