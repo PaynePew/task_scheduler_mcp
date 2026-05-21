@@ -1,12 +1,15 @@
 """Web routes for the /connections dashboard and OAuth flows (ADR-058).
 
 Routes:
-  GET  /connections                 — dashboard (requires session cookie)
-  GET  /connections/login           — initiate WorkOS login (or trust-only for dev)
-  GET  /connections/auth/callback   — WorkOS authorization code callback
-  GET  /connections/github/connect  — start GitHub OAuth
-  GET  /connections/github/callback — GitHub OAuth callback → store token
+  GET  /connections                  — dashboard (requires session cookie)
+  GET  /connections/login            — initiate WorkOS login (or trust-only for dev)
+  GET  /connections/auth/callback    — WorkOS authorization code callback
+  GET  /connections/github/connect   — start GitHub OAuth
+  GET  /connections/github/callback  — GitHub OAuth callback → store token
   POST /connections/github/disconnect — remove GitHub connection
+  GET  /connections/slack/connect    — start Slack OAuth
+  GET  /connections/slack/callback   — Slack OAuth callback → store token
+  POST /connections/slack/disconnect  — remove Slack connection
 
 Session mechanism:
   JWT HS256 cookie named ``session`` signed with ``settings.web_session_secret``.
