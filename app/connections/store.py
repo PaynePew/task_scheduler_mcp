@@ -209,6 +209,45 @@ class ConnectionStore:
 
 
 # ---------------------------------------------------------------------------
+# Module-level façade
+# ---------------------------------------------------------------------------
+
+
+async def get_token(
+    user_id: str,
+    provider: str,
+    refresher: TokenRefresher,
+    *,
+    session_factory: Any = None,
+    envelope: KmsEnvelope | None = None,
+) -> str:
+    """High-level facade: return a fresh access token for (user_id, provider).
+
+    Opens a session from *session_factory* (defaults to the module-level engine
+    pool), constructs a ConnectionStore, and delegates to get_fresh_token.
+
+    Pass *session_factory* and *envelope* to override the module-level defaults
+    — useful in tests that need to inject pre-seeded sessions without touching
+    the real DB pool or KMS.
+
+    Raises:
+        ConnectionMiss: if no connection exists for (user_id, provider).
+    """
+    if session_factory is None:
+        from app.db.engine import async_session_factory  # noqa: PLC0415
+
+        session_factory = async_session_factory
+    if envelope is None:
+        from app.crypto.envelope_factory import kms_envelope_from_settings  # noqa: PLC0415
+
+        envelope = kms_envelope_from_settings()
+
+    async with session_factory() as session:
+        store = ConnectionStore(session=session, envelope=envelope)
+        return await store.get_fresh_token(user_id, provider, refresher=refresher)
+
+
+# ---------------------------------------------------------------------------
 # Module-level helpers
 # ---------------------------------------------------------------------------
 
