@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from pydantic import ValidationError
 
-from app.actions.base import CredentialMode
+from app.actions.base import ActionResult, CredentialMode
 from app.actions.llm_polish import LlmPolishHandler, LlmPolishParams
 from app.actions.llm_polish import _build_system_prompt as polish_prompt
 from app.actions.llm_summarize import (
@@ -408,3 +408,104 @@ async def test_polish_happy_path_returns_polished():
     assert result.ok is True
     assert result.result["polished"] == "Polished text."
     assert result.result["tokens"]["total"] == 25
+
+
+# ---------------------------------------------------------------------------
+# Chain-fed mode — resolve_or_terminal integration
+# ---------------------------------------------------------------------------
+
+
+async def test_summarize_chain_fed_str_forwarded_to_llm():
+    """from_run_id path: resolve_or_terminal returns str → forwarded to LLM."""
+    captured = {}
+
+    async def _fake_complete(req):
+        captured["msg"] = req.user_message
+        return LLMResponse(content="summary", input_tokens=10, output_tokens=5)
+
+    fake_llm = MagicMock(spec=LLMClient)
+    fake_llm.complete = _fake_complete
+    factory = _make_mock_session_factory()
+
+    with patch(
+        "app.actions.llm_summarize.resolve_or_terminal",
+        AsyncMock(return_value="upstream text content"),
+    ):
+        with patch("app.actions.llm_summarize.check_token_budget", AsyncMock(return_value=Allow())):
+            with patch("app.actions.llm_summarize.record_token_usage", AsyncMock()):
+                handler = LlmSummarizeHandler(session_factory=factory, llm_client=fake_llm)
+                result = await handler.execute(
+                    run=_make_fake_run(),
+                    params=LlmSummarizeParams(from_run_id=5),
+                )
+
+    assert result.ok is True
+    assert "upstream text content" in captured["msg"]
+
+
+async def test_summarize_chain_fed_terminal_propagated():
+    """from_run_id path: resolve_or_terminal returns ActionResult → propagated immediately."""
+    fake_llm = _make_fake_llm_client("should not be called")
+    factory = _make_mock_session_factory()
+    terminal = ActionResult(
+        ok=False, result=None, error="Upstream run failed: boom", retryable=False
+    )
+
+    with patch("app.actions.llm_summarize.resolve_or_terminal", AsyncMock(return_value=terminal)):
+        handler = LlmSummarizeHandler(session_factory=factory, llm_client=fake_llm)
+        result = await handler.execute(
+            run=_make_fake_run(),
+            params=LlmSummarizeParams(from_run_id=5),
+        )
+
+    assert result.ok is False
+    assert result.retryable is False
+    fake_llm.complete.assert_not_called()
+
+
+async def test_polish_chain_fed_str_forwarded_to_llm():
+    """from_run_id path: resolve_or_terminal returns str → forwarded to LLM."""
+    captured = {}
+
+    async def _fake_complete(req):
+        captured["msg"] = req.user_message
+        return LLMResponse(content="polished", input_tokens=8, output_tokens=4)
+
+    fake_llm = MagicMock(spec=LLMClient)
+    fake_llm.complete = _fake_complete
+    factory = _make_mock_session_factory()
+
+    with patch(
+        "app.actions.llm_polish.resolve_or_terminal",
+        AsyncMock(return_value="raw upstream text"),
+    ):
+        with patch("app.actions.llm_polish.check_token_budget", AsyncMock(return_value=Allow())):
+            with patch("app.actions.llm_polish.record_token_usage", AsyncMock()):
+                handler = LlmPolishHandler(session_factory=factory, llm_client=fake_llm)
+                result = await handler.execute(
+                    run=_make_fake_run(),
+                    params=LlmPolishParams(from_run_id=3),
+                )
+
+    assert result.ok is True
+    assert "raw upstream text" in captured["msg"]
+
+
+async def test_polish_chain_fed_terminal_propagated():
+    """from_run_id path: resolve_or_terminal returns ActionResult → propagated immediately."""
+    fake_llm = _make_fake_llm_client("should not be called")
+    factory = _make_mock_session_factory()
+    terminal = ActionResult(
+        ok=False, result=None, error="Upstream run 3 has no result", retryable=False
+    )
+
+    with patch("app.actions.llm_polish.resolve_or_terminal", AsyncMock(return_value=terminal)):
+        handler = LlmPolishHandler(session_factory=factory, llm_client=fake_llm)
+        result = await handler.execute(
+            run=_make_fake_run(),
+            params=LlmPolishParams(from_run_id=3),
+        )
+
+    assert result.ok is False
+    assert result.retryable is False
+    fake_llm.complete.assert_not_called()
