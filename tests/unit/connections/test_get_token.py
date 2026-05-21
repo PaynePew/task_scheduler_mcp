@@ -25,7 +25,6 @@ from app.crypto.kms_envelope import KmsEnvelope
 from app.db.models import OAuthConnection
 
 _REGION = "ap-northeast-1"
-_NOW = datetime(2026, 5, 21, 12, 0, 0, tzinfo=UTC)
 
 
 # ---------------------------------------------------------------------------
