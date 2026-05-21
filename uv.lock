@@ -1412,6 +1412,7 @@ dependencies = [
     { name = "asyncpg" },
     { name = "boto3" },
     { name = "croniter" },
+    { name = "cryptography" },
     { name = "email-validator" },
     { name = "httpx" },
     { name = "icalendar" },
@@ -1442,6 +1443,7 @@ requires-dist = [
     { name = "asyncpg" },
     { name = "boto3" },
     { name = "croniter", specifier = ">=6.2.2" },
+    { name = "cryptography" },
     { name = "email-validator", specifier = ">=2.0" },
     { name = "httpx" },
     { name = "icalendar", specifier = ">=6.0" },
@@ -1458,7 +1460,7 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "aiosmtpd", specifier = ">=1.4" },
-    { name = "moto", extras = ["s3"] },
+    { name = "moto", extras = ["s3", "kms"] },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pytest-cov" },
