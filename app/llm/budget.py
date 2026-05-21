@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -61,8 +61,6 @@ BudgetDecision = Allow | DailyBudgetExceeded | GlobalCeilingExceeded
 
 def _seconds_until_utc_midnight(now: datetime) -> int:
     """Seconds from *now* until 00:00:00 UTC the next day."""
-    from datetime import timedelta
-
     tomorrow = now.date() + timedelta(days=1)
     midnight = datetime(tomorrow.year, tomorrow.month, tomorrow.day, tzinfo=UTC)
     return max(1, math.ceil((midnight - now).total_seconds()))
