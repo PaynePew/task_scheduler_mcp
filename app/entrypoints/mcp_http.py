@@ -54,6 +54,12 @@ logger = logging.getLogger(__name__)
 _AUTH_ENABLED = bool(
     settings.workos_jwks_uri and settings.workos_issuer and settings.workos_audience
 )
+if not _AUTH_ENABLED:
+    logger.info(
+        "WorkOS auth disabled: WORKOS_JWKS_URI / WORKOS_ISSUER / WORKOS_AUDIENCE not set. "
+        "Running in trust-only mode (X-User-Id header accepted as authoritative). "
+        "Set all three env vars for production auth."
+    )
 
 
 def _www_authenticate_header() -> str:
