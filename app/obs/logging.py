@@ -26,11 +26,14 @@ from __future__ import annotations
 
 import json
 import logging
+import queue
 import re
 import ssl
 import sys
+import threading
 import urllib.request
 from contextvars import ContextVar, Token
+from logging.handlers import QueueHandler, QueueListener
 from typing import Any
 
 from pythonjsonlogger.json import JsonFormatter
@@ -101,6 +104,57 @@ def _redact_value(key: str, value: Any) -> Any:
     if isinstance(value, str) and _SECRET_KEY_RE.search(key):
         return "[REDACTED]"
     return value
+
+
+# ---------------------------------------------------------------------------
+# BetterStack background queue (issue #161)
+# ---------------------------------------------------------------------------
+
+_BS_QUEUE_MAX: int = 10_000
+_bs_listener: QueueListener | None = None
+_bs_queue_full_warned: threading.Event = threading.Event()
+
+
+class _DroppingQueueHandler(QueueHandler):
+    """QueueHandler with drop-oldest overflow policy for the BetterStack queue.
+
+    When the queue is full a one-shot WARNING is written to stderr; the oldest
+    record is evicted to make room so the caller never blocks.
+    """
+
+    def enqueue(self, record: logging.LogRecord) -> None:
+        try:
+            self.queue.put_nowait(record)
+        except queue.Full:
+            # Evict the oldest record to make room.
+            try:
+                self.queue.get_nowait()
+            except queue.Empty:
+                pass
+            # Warn once so operators know records are being dropped.
+            if not _bs_queue_full_warned.is_set():
+                _bs_queue_full_warned.set()
+                sys.stderr.write(
+                    f"WARNING obs.logging: BetterStack log queue is full "
+                    f"(maxsize={_BS_QUEUE_MAX}); oldest records are being dropped. "
+                    f"This warning fires once.\n"
+                )
+            try:
+                self.queue.put_nowait(record)
+            except queue.Full:
+                pass  # Race condition — discard silently
+
+
+def stop_better_stack_listener() -> None:
+    """Stop the background QueueListener thread.
+
+    Call once during graceful shutdown so the listener thread exits cleanly.
+    On SIGKILL the thread leaks, which is acceptable for short-lived containers.
+    """
+    global _bs_listener
+    if _bs_listener is not None:
+        _bs_listener.stop()
+        _bs_listener = None
 
 
 # Built-in LogRecord attributes — never candidates for redaction.
@@ -204,6 +258,9 @@ def configure_logging(service: str, level: str | None = None) -> None:
     root = logging.getLogger()
     root.setLevel(effective_level)
 
+    # Stop any existing BetterStack listener before clearing handlers.
+    stop_better_stack_listener()
+
     # Remove any handlers added by earlier basicConfig / uvicorn / other calls.
     root.handlers.clear()
 
@@ -227,13 +284,19 @@ def _add_better_stack_handler(
     correlation_filter: logging.Filter,
     formatter: logging.Formatter,
 ) -> None:
-    """Attach an HTTPS log-shipping handler targeting Better Stack's ingest."""
+    """Attach an HTTPS log-shipping handler targeting Better Stack's ingest.
+
+    The blocking HTTPS POST runs on a background thread via QueueHandler +
+    QueueListener so that log emission never stalls the calling thread.
+    The correlation filter runs on the QueueHandler (calling thread) so that
+    async ContextVar values are captured before the record is enqueued.
+    """
+    global _bs_listener
 
     class _BetterStackHandler(logging.Handler):
         """Push each log record as JSON to the Better Stack ingest endpoint."""
 
         def _record_as_dict(self, record: logging.LogRecord) -> dict[str, Any]:
-            # Re-use the JSON formatter to get the canonical dict.
             msg = formatter.format(record)
             try:
                 return json.loads(msg)
@@ -257,6 +320,15 @@ def _add_better_stack_handler(
             except Exception:
                 self.handleError(record)
 
-    handler = _BetterStackHandler()
-    handler.addFilter(correlation_filter)
-    root.addHandler(handler)
+    bs_handler = _BetterStackHandler()
+
+    q: queue.Queue[logging.LogRecord] = queue.Queue(maxsize=_BS_QUEUE_MAX)
+    queue_handler = _DroppingQueueHandler(q)
+    # Correlation filter runs in the calling thread so ContextVar values are
+    # captured before the record is handed to the background listener thread.
+    queue_handler.addFilter(correlation_filter)
+
+    _bs_listener = QueueListener(q, bs_handler, respect_handler_level=True)
+    _bs_listener.start()
+
+    root.addHandler(queue_handler)
