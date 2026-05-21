@@ -8,17 +8,64 @@ Exercises:
   - GitHub OAuth callback stores a connection (via patched ConnectionStore)
   - GitHub disconnect removes connection
   - task.create with github_digest + no connection → MISSING_CONNECTION error with connect_url
+  - WorkOS id_token fallback: tampered signature rejected, valid signature accepted
 """
 
 from __future__ import annotations
 
+import time
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
+import jwt
 import pytest
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives.asymmetric import rsa
 
 from app.web.connections import _create_session_token, _decode_session_token, make_routes
+
+# ---------------------------------------------------------------------------
+# WorkOS id_token test fixtures (RSA key pair)
+# ---------------------------------------------------------------------------
+
+_WORKOS_PRIVATE_KEY = rsa.generate_private_key(
+    public_exponent=65537,
+    key_size=2048,
+    backend=default_backend(),
+)
+_WORKOS_PUBLIC_KEY = _WORKOS_PRIVATE_KEY.public_key()
+_WORKOS_ISSUER = "https://api.workos.test"
+_WORKOS_CLIENT_ID = "workos-client-test-123"
+_WORKOS_SUB = "user_workos_01HXYZ"
+
+
+def _make_workos_jwks_client(key=_WORKOS_PUBLIC_KEY) -> MagicMock:
+    signing_key = MagicMock()
+    signing_key.key = key
+    client = MagicMock()
+    client.get_signing_key_from_jwt.return_value = signing_key
+    return client
+
+
+def _make_workos_id_token(
+    *,
+    private_key=_WORKOS_PRIVATE_KEY,
+    sub: str = _WORKOS_SUB,
+    aud: str = _WORKOS_CLIENT_ID,
+    iss: str = _WORKOS_ISSUER,
+    exp_offset: int = 3600,
+) -> str:
+    now = int(time.time())
+    payload = {
+        "sub": sub,
+        "aud": aud,
+        "iss": iss,
+        "iat": now,
+        "exp": now + exp_offset,
+    }
+    return jwt.encode(payload, private_key, algorithm="RS256")
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -584,3 +631,162 @@ async def test_task_create_slack_post_no_connection_returns_connect_url():
     assert result["error"]["code"] == "MISSING_CONNECTION"
     assert "connect_url" in result["error"]
     assert "/connections" in result["error"]["connect_url"]
+
+
+# ---------------------------------------------------------------------------
+# WorkOS id_token fallback: signature verification (issue #160)
+# ---------------------------------------------------------------------------
+
+
+def test_verify_id_token_sub_valid_token_accepted():
+    """_verify_id_token_sub returns sub when token is properly signed."""
+    from app.web.connections import _verify_id_token_sub
+
+    id_token = _make_workos_id_token()
+    sub = _verify_id_token_sub(
+        id_token,
+        issuer=_WORKOS_ISSUER,
+        client_id=_WORKOS_CLIENT_ID,
+        jwks_uri="https://unused.test/jwks",
+        _jwks_client=_make_workos_jwks_client(),
+    )
+    assert sub == _WORKOS_SUB
+
+
+def test_verify_id_token_sub_tampered_signature_raises():
+    """_verify_id_token_sub raises TokenValidationError for wrong signature."""
+    from app.auth.token_validation import TokenValidationError
+    from app.web.connections import _verify_id_token_sub
+
+    other_private_key = rsa.generate_private_key(
+        public_exponent=65537,
+        key_size=2048,
+        backend=default_backend(),
+    )
+    # Token signed by a *different* key than what the mock JWKS client returns
+    id_token = _make_workos_id_token(private_key=other_private_key)
+
+    with pytest.raises(TokenValidationError):
+        _verify_id_token_sub(
+            id_token,
+            issuer=_WORKOS_ISSUER,
+            client_id=_WORKOS_CLIENT_ID,
+            jwks_uri="https://unused.test/jwks",
+            _jwks_client=_make_workos_jwks_client(key=_WORKOS_PUBLIC_KEY),
+        )
+
+
+@pytest.mark.asyncio
+async def test_workos_callback_valid_id_token_sets_session():
+    """When access_token validation fails but id_token is valid, callback sets session."""
+    from app.auth.token_validation import AuthContext, TokenValidationError
+
+    app = _make_app()
+    transport = httpx.ASGITransport(app=app)
+
+    fake_access_token = "fake.access.token"
+    id_token = _make_workos_id_token()
+    fake_token_response = {
+        "access_token": fake_access_token,
+        "id_token": id_token,
+    }
+
+    with patch("app.web.connections.settings") as mock_settings:
+        mock_settings.workos_client_id = _WORKOS_CLIENT_ID
+        mock_settings.workos_client_secret = "secret"
+        mock_settings.workos_issuer = _WORKOS_ISSUER
+        mock_settings.workos_jwks_uri = "https://api.workos.test/sso/jwks/client"
+        mock_settings.workos_audience = "https://scheduler.test"
+        mock_settings.connections_base_url = "http://localhost:8000"
+        mock_settings.web_session_secret = "dev-secret-32-bytes-long-exactly!"
+
+        # First validate_token (access_token) raises; second (id_token) succeeds
+        call_count = 0
+
+        def _fake_validate_token(token, *, issuer, audience, jwks_uri, _jwks_client=None):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise TokenValidationError("access_token not a sub-bearing token")
+            return AuthContext(user_id=_WORKOS_SUB)
+
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test", follow_redirects=False
+        ) as client:
+            with (
+                patch(
+                    "app.web.connections.validate_token",
+                    side_effect=_fake_validate_token,
+                ),
+                patch(
+                    "httpx.AsyncClient.post",
+                    new=AsyncMock(
+                        return_value=MagicMock(
+                            is_success=True, json=MagicMock(return_value=fake_token_response)
+                        )
+                    ),
+                ),
+            ):
+                resp = await client.get(
+                    "/connections/auth/callback",
+                    params={"code": "auth-code-123", "state": ""},
+                )
+
+    assert resp.status_code == 302
+    assert resp.headers["location"] == "/connections"
+    assert "session" in resp.cookies
+
+
+@pytest.mark.asyncio
+async def test_workos_callback_tampered_id_token_returns_502():
+    """When access_token fails and id_token has wrong signature, callback returns 502."""
+    from app.auth.token_validation import TokenValidationError
+
+    app = _make_app()
+    transport = httpx.ASGITransport(app=app)
+
+    other_private_key = rsa.generate_private_key(
+        public_exponent=65537,
+        key_size=2048,
+        backend=default_backend(),
+    )
+    tampered_id_token = _make_workos_id_token(private_key=other_private_key)
+    fake_token_response = {
+        "access_token": "fake.access.token",
+        "id_token": tampered_id_token,
+    }
+
+    with patch("app.web.connections.settings") as mock_settings:
+        mock_settings.workos_client_id = _WORKOS_CLIENT_ID
+        mock_settings.workos_client_secret = "secret"
+        mock_settings.workos_issuer = _WORKOS_ISSUER
+        mock_settings.workos_jwks_uri = "https://api.workos.test/sso/jwks/client"
+        mock_settings.workos_audience = "https://scheduler.test"
+        mock_settings.connections_base_url = "http://localhost:8000"
+        mock_settings.web_session_secret = "dev-secret-32-bytes-long-exactly!"
+
+        # Both validate_token calls raise TokenValidationError (wrong key)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test", follow_redirects=False
+        ) as client:
+            with (
+                patch(
+                    "app.web.connections.validate_token",
+                    side_effect=TokenValidationError("bad token"),
+                ),
+                patch(
+                    "httpx.AsyncClient.post",
+                    new=AsyncMock(
+                        return_value=MagicMock(
+                            is_success=True, json=MagicMock(return_value=fake_token_response)
+                        )
+                    ),
+                ),
+            ):
+                resp = await client.get(
+                    "/connections/auth/callback",
+                    params={"code": "auth-code-123", "state": ""},
+                )
+
+    assert resp.status_code == 502
+    assert "session" not in resp.cookies
