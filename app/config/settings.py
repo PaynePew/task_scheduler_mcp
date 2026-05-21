@@ -151,6 +151,11 @@ class Settings(BaseSettings):
     github_client_id: str | None = None
     github_client_secret: str | None = None
 
+    # Slack OAuth app credentials (ADR-058, issue #139).
+    # Required for the Slack "Connect" flow on the /connections dashboard.
+    slack_client_id: str | None = None
+    slack_client_secret: str | None = None
+
     # Base URL of this server — used to construct OAuth redirect URIs and the
     # connect_url hint in task.create error envelopes (ADR-058).
     # E.g. "https://scheduler.paynepew.dev" in production, "http://localhost:8000" locally.
