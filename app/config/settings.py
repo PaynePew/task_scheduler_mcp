@@ -83,21 +83,14 @@ class Settings(BaseSettings):
         Partial config (1 or 2 of 3 set) silently degrades to trust-only mode,
         which accepts any spoofed X-User-Id header. Fail fast instead.
         """
-        present = {
-            name: val
-            for name, val in (
-                ("WORKOS_JWKS_URI", self.workos_jwks_uri),
-                ("WORKOS_ISSUER", self.workos_issuer),
-                ("WORKOS_AUDIENCE", self.workos_audience),
-            )
-            if val is not None
-        }
-        missing = [
-            name
-            for name in ("WORKOS_JWKS_URI", "WORKOS_ISSUER", "WORKOS_AUDIENCE")
-            if name not in present
-        ]
-        if present and missing:
+        workos_vars = (
+            ("WORKOS_JWKS_URI", self.workos_jwks_uri),
+            ("WORKOS_ISSUER", self.workos_issuer),
+            ("WORKOS_AUDIENCE", self.workos_audience),
+        )
+        missing = [name for name, val in workos_vars if val is None]
+        # All set (missing=[]) and all unset (missing=all of them) are both legal.
+        if missing and len(missing) < len(workos_vars):
             raise ValueError(
                 f"Partial WorkOS configuration detected. "
                 f"Missing: {', '.join(missing)}. "
