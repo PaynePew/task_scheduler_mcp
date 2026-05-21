@@ -18,7 +18,7 @@ from app.actions.base import CredentialMode
 from app.actions.registry import ACTION_REGISTRY
 from app.config.settings import settings
 from app.connections.store import ConnectionMiss, ConnectionStore
-from app.crypto.kms_envelope import KmsEnvelope
+from app.crypto.envelope_factory import kms_envelope_from_settings as _make_server_kms_envelope
 from app.db.engine import async_session_factory as default_session_factory
 from app.domain.jobs import create_job
 from app.mcp.envelope import error, success
@@ -42,26 +42,6 @@ logger = logging.getLogger(__name__)
 
 _SYSTEM_INSTRUCTION_FILE = Path(__file__).parent / "system_instruction.md"
 SYSTEM_INSTRUCTION: str = _SYSTEM_INSTRUCTION_FILE.read_text(encoding="utf-8").strip()
-
-
-# ---------------------------------------------------------------------------
-# KMS envelope factory (server-level, lazy)
-# ---------------------------------------------------------------------------
-
-
-def _make_server_kms_envelope() -> KmsEnvelope | None:
-    """Build KmsEnvelope from settings, or None if KMS is not configured."""
-    if not settings.kms_key_id:
-        return None
-    import boto3  # noqa: PLC0415
-
-    client = boto3.client(
-        "kms",
-        region_name=settings.kms_region,
-        aws_access_key_id=settings.aws_access_key_id,
-        aws_secret_access_key=settings.aws_secret_access_key,
-    )
-    return KmsEnvelope(kms_client=client, key_id=settings.kms_key_id)
 
 
 async def _check_oauth_connection(

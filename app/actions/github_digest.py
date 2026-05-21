@@ -31,6 +31,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.actions.base import ActionResult, CredentialMode
 from app.connections.store import ConnectionMiss, ConnectionStore
+from app.crypto.envelope_factory import kms_envelope_from_settings as _make_default_kms_envelope
 from app.crypto.kms_envelope import KmsEnvelope
 
 GITHUB_API_BASE = "https://api.github.com"
@@ -60,23 +61,6 @@ class GitHubDigestResult(BaseModel):
     queried_at: str
     labels: dict[str, list[_IssueItem]]
     prs: dict[str, Any]
-
-
-def _make_default_kms_envelope() -> KmsEnvelope | None:
-    """Build KmsEnvelope from settings, or None if KMS is not configured."""
-    from app.config.settings import settings  # noqa: PLC0415
-
-    if not settings.kms_key_id:
-        return None
-    import boto3  # noqa: PLC0415
-
-    client = boto3.client(
-        "kms",
-        region_name=settings.kms_region,
-        aws_access_key_id=settings.aws_access_key_id,
-        aws_secret_access_key=settings.aws_secret_access_key,
-    )
-    return KmsEnvelope(kms_client=client, key_id=settings.kms_key_id)
 
 
 class GitHubDigestHandler:
