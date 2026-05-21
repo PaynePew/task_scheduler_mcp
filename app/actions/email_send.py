@@ -1,43 +1,47 @@
-"""email_send action handler — sends transactional email via SMTP.
+"""email_send action handler — dual-mode email delivery (ADR-050, ADR-051).
 
-Secrets convention (ADR-032): SMTP credentials (SMTP_HOST, SMTP_PORT,
-SMTP_USER, SMTP_PASSWORD, EMAIL_FROM) are read from environment variables.
-They are NEVER stored in action_params.
+Credential modes:
+  - Public users (oauth_connection): sends via Gmail API using the caller's
+    Google OAuth token from the connection store (provider="google").
+  - Operator (operator env): sends via SMTP using SMTP_HOST/PORT/USER/PASSWORD
+    and EMAIL_FROM env vars (ADR-032). No Google connection required.
+
+At run time the handler inspects ``run.user_id`` against
+``settings.operator_user_id`` to select the path:
+  - operator or operator_user_id unset → SMTP path
+  - everyone else → Gmail API path
 
 Chain-fed mode (ADR-033): set from_run_id to consume a prior handler's
 JobRun.result as the email body. Supports templates (raw, digest_v1).
 
-Error classification:
+SMTP error classification:
     SMTP 5.x.x (permanent failure)  → retryable=False → DLQ
     SMTP 4.x.x (temporary failure)  → retryable=True
     Auth failure (535 / 5.7.0)      → retryable=False → DLQ + operator action
     TLS / connection / timeout      → retryable=True
 
-SMTP transport uses STARTTLS by default (port 587). Set
-SMTP_USE_STARTTLS=false in env to disable (e.g. for plain-text test servers).
-
-Manual smoke test::
-
-    SMTP_HOST=smtp.gmail.com SMTP_PORT=587 SMTP_USER=you@gmail.com \\
-    SMTP_PASSWORD=<app-password> EMAIL_FROM=you@gmail.com \\
-    uv run python -c "
-    import asyncio
-    from app.actions.email_send import EmailSendHandler, EmailSendParams
-    p = EmailSendParams(to=['you@gmail.com'], subject='smoke test', body='hello from email_send')
-    r = asyncio.run(EmailSendHandler().execute(run=None, params=p))
-    print(r)"
+Gmail API error classification:
+    401 Unauthorized                → retryable=False (reconnect at /connections)
+    403 Forbidden                   → retryable=False (insufficient scope)
+    429 Rate limited                → retryable=True
+    5xx Server Error                → retryable=True
+    network / timeout               → retryable=True
 """
 
 from __future__ import annotations
 
+import base64
 import os
 from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from email.message import EmailMessage
 from enum import StrEnum
 from typing import Any, ClassVar
 
 import aiosmtplib
+import httpx
 from pydantic import BaseModel, EmailStr
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.actions.base import ActionResult, CredentialMode
 from app.chain.upstream_reader import (
@@ -47,7 +51,13 @@ from app.chain.upstream_reader import (
     UpstreamError,
     read_upstream,
 )
+from app.config.settings import settings
+from app.connections.store import ConnectionMiss, ConnectionStore
+from app.crypto.kms_envelope import KmsEnvelope
 from app.secrets.resolver import SecretResolutionError, build_effective_whitelist, resolve
+
+_GMAIL_SEND_URL = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send"
+_GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 
 
 class EmailTemplate(StrEnum):
@@ -96,39 +106,70 @@ _TEMPLATE_FORMATTERS: dict[EmailTemplate, Callable[..., str]] = {
 # ---------------------------------------------------------------------------
 
 
-class EmailSendHandler:
-    """Sends a transactional email via SMTP (STARTTLS by default).
+def _make_default_kms_envelope() -> KmsEnvelope | None:
+    """Build KmsEnvelope from settings, or None if KMS is not configured."""
+    if not settings.kms_key_id:
+        return None
+    import boto3  # noqa: PLC0415
 
-    Pass *session_factory* to override the default DB session factory — useful
-    in tests that need to inject a pre-seeded session without touching the real
-    engine pool.
+    client = boto3.client(
+        "kms",
+        region_name=settings.kms_region,
+        aws_access_key_id=settings.aws_access_key_id,
+        aws_secret_access_key=settings.aws_secret_access_key,
+    )
+    return KmsEnvelope(kms_client=client, key_id=settings.kms_key_id)
+
+
+class EmailSendHandler:
+    """Sends email via Gmail API (public users) or SMTP (operator).
+
+    Public users need a Google OAuth connection (provider="google") stored in
+    the connection store. The operator uses SMTP env vars (ADR-032).
+
+    Pass *session_factory* and *kms_envelope* to override the defaults — useful
+    in tests that need to inject pre-seeded state without touching the real DB
+    pool or KMS.
     """
 
     name: ClassVar[str] = "email_send"
     description: ClassVar[str] = (
-        "Sends a transactional email via SMTP. "
-        "Set SMTP_HOST, SMTP_PORT (default 587), SMTP_USER, SMTP_PASSWORD, "
-        "EMAIL_FROM in the server environment. "
+        "Sends a transactional email. "
+        "Public users: sends via Gmail using your connected Google account "
+        "(connect at /connections). "
+        "Operator: sends via SMTP using SMTP_HOST, SMTP_PORT, SMTP_USER, "
+        "SMTP_PASSWORD, EMAIL_FROM env vars. "
         "Use from_run_id to chain from a prior handler's output. "
         "Templates: raw (default), digest_v1."
     )
     params_model: ClassVar[type[BaseModel]] = EmailSendParams
     timeout_seconds: ClassVar[int] = 30
-    requires_operator: ClassVar[bool] = True
-    credential_mode: ClassVar[CredentialMode] = CredentialMode.operator_env
+    requires_operator: ClassVar[bool] = False
+    credential_mode: ClassVar[CredentialMode] = CredentialMode.oauth_connection
+    required_provider: ClassVar[str] = "google"
 
-    def __init__(self, session_factory: Any = None) -> None:
+    def __init__(
+        self,
+        session_factory: async_sessionmaker | None = None,
+        kms_envelope: KmsEnvelope | None = None,
+    ) -> None:
         self._session_factory = session_factory
+        self._kms_envelope = kms_envelope
 
     def _get_session_factory(self) -> Any:
         if self._session_factory is not None:
             return self._session_factory
-        from app.db.engine import async_session_factory
+        from app.db.engine import async_session_factory  # noqa: PLC0415
 
         return async_session_factory
 
+    def _get_kms_envelope(self) -> KmsEnvelope | None:
+        if self._kms_envelope is not None:
+            return self._kms_envelope
+        return _make_default_kms_envelope()
+
     async def execute(self, run: Any, params: EmailSendParams) -> ActionResult:
-        # Resolve any ${VAR} references (ADR-032).
+        # Resolve any ${VAR} references (ADR-032) in subject/body.
         whitelist = build_effective_whitelist()
         env = dict(os.environ)
         try:
@@ -139,7 +180,24 @@ class EmailSendHandler:
         except SecretResolutionError as exc:
             return ActionResult(ok=False, result=None, error=str(exc), retryable=False)
 
-        # Read SMTP config from environment — never from action_params.
+        # Build email body (direct or chain-fed).
+        body_text = await self._build_body(params, resolved_body)
+        if isinstance(body_text, ActionResult):
+            return body_text
+
+        # Route to SMTP (operator / no operator configured) or Gmail (public user).
+        user_id: str | None = getattr(run, "user_id", None)
+        operator_uid = settings.operator_user_id
+        if not operator_uid or user_id == operator_uid:
+            return await self._send_via_smtp(params, resolved_subject, body_text)
+        return await self._send_via_gmail(user_id, params, resolved_subject, body_text)
+
+    async def _send_via_smtp(
+        self,
+        params: EmailSendParams,
+        subject: str,
+        body_text: str,
+    ) -> ActionResult:
         smtp_host = os.environ.get("SMTP_HOST")
         smtp_port_raw = os.environ.get("SMTP_PORT", "587")
         smtp_user = os.environ.get("SMTP_USER") or None
@@ -171,19 +229,12 @@ class EmailSendHandler:
                 retryable=False,
             )
 
-        # Build email body (direct or chain-fed).
-        body_text = await self._build_body(params, resolved_body)
-        if isinstance(body_text, ActionResult):
-            return body_text
-
-        # Assemble MIME message.
         msg = EmailMessage()
         msg["From"] = email_from
         msg["To"] = ", ".join(str(addr) for addr in params.to)
-        msg["Subject"] = resolved_subject
+        msg["Subject"] = subject
         msg.set_content(body_text)
 
-        # Send via aiosmtplib.
         try:
             await aiosmtplib.send(
                 msg,
@@ -202,7 +253,6 @@ class EmailSendHandler:
                 retryable=False,
             )
         except aiosmtplib.SMTPRecipientsRefused as exc:
-            # retryable only when ALL refused codes are 4xx (temporary).
             codes = [r.code for r in exc.recipients]
             retryable = bool(codes) and all(400 <= c < 500 for c in codes)
             return ActionResult(
@@ -239,7 +289,6 @@ class EmailSendHandler:
                 retryable=True,
             )
         except aiosmtplib.SMTPException as exc:
-            # Catch-all: classify by code if available, else retryable.
             code = getattr(exc, "code", None)
             retryable = True if code is None else (400 <= code < 500)
             return ActionResult(
@@ -253,7 +302,121 @@ class EmailSendHandler:
             ok=True,
             result={
                 "recipients": [str(addr) for addr in params.to],
-                "subject": resolved_subject,
+                "subject": subject,
+                "provider": "smtp",
+            },
+            error=None,
+            retryable=False,
+        )
+
+    async def _send_via_gmail(
+        self,
+        user_id: str | None,
+        params: EmailSendParams,
+        subject: str,
+        body_text: str,
+    ) -> ActionResult:
+        if not user_id:
+            return ActionResult(
+                ok=False,
+                result=None,
+                error="email_send: no user_id on run — cannot resolve Google connection",
+                retryable=False,
+            )
+
+        envelope = self._get_kms_envelope()
+        if envelope is None:
+            return ActionResult(
+                ok=False,
+                result=None,
+                error=(
+                    "email_send: KMS not configured — cannot decrypt Google connection. "
+                    "Set KMS_KEY_ID in environment."
+                ),
+                retryable=False,
+            )
+
+        factory = self._get_session_factory()
+        try:
+            async with factory() as session:
+                store = ConnectionStore(session, envelope)
+                token = await store.get_fresh_token(
+                    user_id, "google", refresher=_make_google_refresher()
+                )
+        except ConnectionMiss:
+            connect_url = f"{settings.connections_base_url}/connections"
+            return ActionResult(
+                ok=False,
+                result=None,
+                error=(
+                    f"No Google connection for this user. "
+                    f"Connect your Google account at {connect_url}"
+                ),
+                retryable=False,
+            )
+
+        # Build RFC 2822 message and encode as base64url for the Gmail API.
+        msg = EmailMessage()
+        msg["To"] = ", ".join(str(addr) for addr in params.to)
+        msg["Subject"] = subject
+        msg.set_content(body_text)
+        raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+
+        try:
+            async with httpx.AsyncClient(timeout=float(self.timeout_seconds)) as client:
+                resp = await client.post(
+                    _GMAIL_SEND_URL,
+                    headers={"Authorization": f"Bearer {token}"},
+                    json={"raw": raw},
+                )
+        except (httpx.TimeoutException, httpx.RequestError) as exc:
+            return ActionResult(ok=False, result=None, error=str(exc), retryable=True)
+
+        if resp.status_code == 401:
+            return ActionResult(
+                ok=False,
+                result=None,
+                error=(
+                    "Gmail API 401 Unauthorized — the stored Google connection is invalid "
+                    "or revoked; reconnect at /connections"
+                ),
+                retryable=False,
+            )
+        if resp.status_code == 403:
+            return ActionResult(
+                ok=False,
+                result=None,
+                error="Gmail API 403 Forbidden — insufficient scope or quota exceeded",
+                retryable=False,
+            )
+        if resp.status_code == 429:
+            return ActionResult(
+                ok=False,
+                result=None,
+                error="Gmail API 429 rate limited",
+                retryable=True,
+            )
+        if resp.status_code >= 500:
+            return ActionResult(
+                ok=False,
+                result=None,
+                error=f"Gmail API {resp.status_code} Server Error",
+                retryable=True,
+            )
+        if not resp.is_success:
+            return ActionResult(
+                ok=False,
+                result=None,
+                error=f"Gmail API error {resp.status_code}: {resp.text[:200]}",
+                retryable=False,
+            )
+
+        return ActionResult(
+            ok=True,
+            result={
+                "recipients": [str(addr) for addr in params.to],
+                "subject": subject,
+                "provider": "gmail",
             },
             error=None,
             retryable=False,
@@ -299,3 +462,39 @@ class EmailSendHandler:
         return ActionResult(
             ok=False, result=None, error="unknown upstream payload", retryable=False
         )
+
+
+# ---------------------------------------------------------------------------
+# Google token refresh helper
+# ---------------------------------------------------------------------------
+
+
+def _make_google_refresher():
+    """Return an async TokenRefresher that refreshes a Google OAuth access token."""
+
+    async def _refresher(token_data: dict) -> dict:
+        refresh_token = token_data.get("refresh_token")
+        if not refresh_token:
+            return token_data
+
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(
+                _GOOGLE_TOKEN_URL,
+                data={
+                    "grant_type": "refresh_token",
+                    "refresh_token": refresh_token,
+                    "client_id": settings.google_client_id,
+                    "client_secret": settings.google_client_secret,
+                },
+            )
+        resp.raise_for_status()
+        new_data = resp.json()
+        if "expires_in" in new_data:
+            expires_at = datetime.now(UTC) + timedelta(seconds=int(new_data["expires_in"]))
+            new_data["expires_at"] = expires_at.isoformat()
+        # Preserve refresh_token if the new response omits it (Google sometimes does this).
+        if "refresh_token" not in new_data and refresh_token:
+            new_data["refresh_token"] = refresh_token
+        return {**token_data, **new_data}
+
+    return _refresher

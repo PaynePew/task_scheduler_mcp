@@ -25,10 +25,11 @@ def test_http_call_is_operator_only():
     assert handler.credential_mode == CredentialMode.operator_env
 
 
-def test_email_send_smtp_is_operator_only():
+def test_email_send_is_public_gmail_oauth():
     handler = ACTION_REGISTRY["email_send"]
-    assert handler.requires_operator is True
-    assert handler.credential_mode == CredentialMode.operator_env
+    assert handler.requires_operator is False
+    assert handler.credential_mode == CredentialMode.oauth_connection
+    assert getattr(handler, "required_provider", None) == "google"
 
 
 def test_r2_upload_removed_from_registry():
@@ -149,9 +150,9 @@ async def test_gate_skipped_when_operator_user_id_not_set():
 
 
 @pytest.mark.asyncio
-async def test_email_send_blocked_for_public_caller():
-    """email_send (SMTP) must be blocked for public callers."""
-    with pytest.raises(OperatorOnlyActionError):
+async def test_email_send_allowed_for_public_caller():
+    """email_send (Gmail OAuth) must NOT be blocked for public callers by the operator gate."""
+    try:
         await create_job(
             None,  # type: ignore[arg-type]
             user_id=PUBLIC_ID,
@@ -160,3 +161,7 @@ async def test_email_send_blocked_for_public_caller():
             schedule_type="immediate",
             operator_user_id=OPERATOR_ID,
         )
+    except OperatorOnlyActionError:
+        pytest.fail("email_send must not be blocked for public callers (Gmail path)")
+    except Exception:
+        pass  # DB errors expected after the gate passes
