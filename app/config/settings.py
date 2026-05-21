@@ -140,5 +140,25 @@ class Settings(BaseSettings):
     llm_daily_token_budget_per_user: int = 10000
     llm_global_monthly_token_ceiling: int | None = None
 
+    # WorkOS web OAuth client credentials (ADR-058, ADR-053).
+    # Required for the /connections web dashboard login flow.
+    # When absent, the web session uses trust-only mode (MCP_USER_ID / default-user).
+    workos_client_id: str | None = None
+    workos_client_secret: str | None = None
+
+    # GitHub OAuth app credentials (ADR-058).
+    # Required for the GitHub "Connect" flow on the /connections dashboard.
+    github_client_id: str | None = None
+    github_client_secret: str | None = None
+
+    # Base URL of this server — used to construct OAuth redirect URIs and the
+    # connect_url hint in task.create error envelopes (ADR-058).
+    # E.g. "https://scheduler.paynepew.dev" in production, "http://localhost:8000" locally.
+    connections_base_url: str = "http://localhost:8000"
+
+    # Secret key for signing the web session JWT cookie (ADR-058).
+    # Must be a strong random string in production.
+    web_session_secret: str = "dev-session-secret-change-in-production"
+
 
 settings = Settings()

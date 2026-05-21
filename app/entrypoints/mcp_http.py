@@ -43,6 +43,7 @@ from app.mcp.server import create_server
 from app.obs.logging import bind_user_id, configure_logging, unbind_user_id
 from app.overload.health import CapacityExceeded, ConcurrencyLimiter, should_shed
 from app.ratelimit.checker import Allow, RateLimits, check_rate_limit
+from app.web.connections import make_routes as make_connections_routes
 
 logger = logging.getLogger(__name__)
 
@@ -370,12 +371,15 @@ def build_app(
     )
     healthz = _make_healthz_endpoint(session_factory=session_factory)
     shed = _make_shed_endpoint(shed_fn=shed_fn)
+    factory = session_factory or _default_session_factory
+    connections_routes = make_connections_routes(factory)
     return Starlette(
         routes=[
             Route("/mcp", endpoint=handler, methods=["GET", "POST", "DELETE"]),
             Route("/healthz", endpoint=healthz, methods=["GET"]),
             Route("/healthz/shed", endpoint=shed, methods=["GET"]),
             _make_prm_endpoint(),
+            *connections_routes,
         ],
     )
 

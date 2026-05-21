@@ -14,8 +14,11 @@ from mcp.types import INVALID_PARAMS, ErrorData
 from pydantic import AnyUrl
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.actions.base import CredentialMode
 from app.actions.registry import ACTION_REGISTRY
 from app.config.settings import settings
+from app.connections.store import ConnectionMiss, ConnectionStore
+from app.crypto.kms_envelope import KmsEnvelope
 from app.db.engine import async_session_factory as default_session_factory
 from app.domain.jobs import create_job
 from app.mcp.envelope import error, success
@@ -39,6 +42,71 @@ logger = logging.getLogger(__name__)
 
 _SYSTEM_INSTRUCTION_FILE = Path(__file__).parent / "system_instruction.md"
 SYSTEM_INSTRUCTION: str = _SYSTEM_INSTRUCTION_FILE.read_text(encoding="utf-8").strip()
+
+
+# ---------------------------------------------------------------------------
+# KMS envelope factory (server-level, lazy)
+# ---------------------------------------------------------------------------
+
+
+def _make_server_kms_envelope() -> KmsEnvelope | None:
+    """Build KmsEnvelope from settings, or None if KMS is not configured."""
+    if not settings.kms_key_id:
+        return None
+    import boto3  # noqa: PLC0415
+
+    client = boto3.client(
+        "kms",
+        region_name=settings.kms_region,
+        aws_access_key_id=settings.aws_access_key_id,
+        aws_secret_access_key=settings.aws_secret_access_key,
+    )
+    return KmsEnvelope(kms_client=client, key_id=settings.kms_key_id)
+
+
+async def _check_oauth_connection(
+    action: str | None,
+    user_id: str,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> dict[str, Any] | None:
+    """Return an error envelope if the action requires an OAuth connection the user lacks.
+
+    Returns None if the action does not require a connection, or the user has one,
+    or KMS is not configured (skip the check in dev/test environments).
+    """
+    if action is None:
+        return None
+    handler = ACTION_REGISTRY.get(action)
+    if handler is None or handler.credential_mode != CredentialMode.oauth_connection:
+        return None
+    provider = getattr(handler, "required_provider", None)
+    if not provider:
+        return None
+
+    envelope = _make_server_kms_envelope()
+    if envelope is None:
+        # KMS not configured — skip the check (dev / CI mode).
+        return None
+
+    try:
+        async with session_factory() as session:
+            store = ConnectionStore(session, envelope)
+            await store.get_fresh_token(user_id, provider)
+    except ConnectionMiss:
+        connect_url = f"{settings.connections_base_url}/connections"
+        return error(
+            "MISSING_CONNECTION",
+            f"This action requires a {provider} connection that you haven't set up yet. "
+            f"Connect your {provider.capitalize()} account at {connect_url}",
+            connect_url=connect_url,
+        )
+    except Exception:
+        # Any other error (KMS unreachable, DB error) — don't block job creation.
+        logger.exception("oauth connection pre-flight failed for user %s", user_id)
+        return None
+
+    return None
+
 
 _TASK_CREATE_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -389,6 +457,17 @@ async def _handle_task_create(
                     field="user_id",
                     expected={"retry_after_seconds": ct_decision.retry_after_seconds},
                 )
+
+        # ------------------------------------------------------------------
+        # OAuth connection pre-flight (ADR-058): if the action requires an
+        # oauth_connection and the user hasn't set one up, surface connect_url
+        # so the LLM/client can hand the user a direct link to /connections.
+        # Only checked when KMS is configured; skipped in dev/test mode.
+        # ------------------------------------------------------------------
+        if not is_operator:
+            conn_check = await _check_oauth_connection(action, user_id, session_factory)
+            if conn_check is not None:
+                return conn_check
 
         async with session_factory() as session:
             job = await create_job(

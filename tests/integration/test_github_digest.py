@@ -1,5 +1,9 @@
 """Integration test for github_digest handler — uses httpx mock (no real GitHub API).
 
+The handler now uses CredentialMode.oauth_connection; tests inject a fake
+session_factory (with mocked ConnectionStore) so no real Postgres or KMS calls
+are made even though these are marked as integration tests.
+
 Run with:
     uv run pytest -m integration tests/integration/test_github_digest.py
 """
@@ -7,6 +11,8 @@ Run with:
 from __future__ import annotations
 
 import json
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -21,6 +27,11 @@ from app.actions.github_digest import (
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+@dataclass
+class FakeRun:
+    user_id: str = "user-integration"
 
 
 def _make_issue(number: int, title: str = "Issue title") -> dict:
@@ -61,6 +72,22 @@ def _build_mock_client(responses: list[httpx.Response]) -> MagicMock:
     return ctx
 
 
+def _make_handler(github_token: str = "fake-token") -> tuple[GitHubDigestHandler, AsyncMock]:
+    """Build a handler with a fake session_factory and mocked ConnectionStore."""
+    fake_session = MagicMock()
+
+    @asynccontextmanager
+    async def _factory():
+        yield fake_session
+
+    mock_envelope = MagicMock()
+    handler = GitHubDigestHandler(session_factory=_factory, kms_envelope=mock_envelope)
+
+    mock_store = AsyncMock()
+    mock_store.get_fresh_token = AsyncMock(return_value=github_token)
+    return handler, mock_store
+
+
 # ---------------------------------------------------------------------------
 # Integration: full query + JSON parse + schema validation
 # ---------------------------------------------------------------------------
@@ -70,12 +97,13 @@ def _build_mock_client(responses: list[httpx.Response]) -> MagicMock:
 @pytest.mark.asyncio
 async def test_full_query_json_parse_schema_validation():
     """Full query → JSON parse → result schema validation via Pydantic."""
-    handler = GitHubDigestHandler()
+    handler, mock_store = _make_handler()
     params = GitHubDigestParams(
         repo="owner/repo",
         labels=["bug", "enhancement"],
         pr_stale_days=5,
     )
+    run = FakeRun()
 
     issues_bug = httpx.Response(
         200,
@@ -98,24 +126,25 @@ async def test_full_query_json_parse_schema_validation():
         ],
     )
 
-    with patch(
-        "app.actions.github_digest.httpx.AsyncClient",
-        return_value=_build_mock_client([issues_bug, issues_enhancement, prs_resp]),
+    with (
+        patch("app.actions.github_digest.ConnectionStore", return_value=mock_store),
+        patch(
+            "app.actions.github_digest.httpx.AsyncClient",
+            return_value=_build_mock_client([issues_bug, issues_enhancement, prs_resp]),
+        ),
     ):
-        result = await handler.execute(run=None, params=params)
+        result = await handler.execute(run=run, params=params)
 
     assert result.ok is True
     assert result.error is None
     assert result.result is not None
 
-    # Validate against Pydantic model
     validated = GitHubDigestResult.model_validate(result.result)
 
     assert validated.repo == "owner/repo"
     assert "queried_at" in result.result
     assert isinstance(result.result["queried_at"], str)
 
-    # Label results
     assert "bug" in validated.labels
     assert "enhancement" in validated.labels
     assert len(validated.labels["bug"]) == 2
@@ -124,13 +153,11 @@ async def test_full_query_json_parse_schema_validation():
     assert validated.labels["bug"][1].number == 2
     assert validated.labels["enhancement"][0].number == 3
 
-    # PR results
     assert validated.prs["open"] == 2
     stuck_numbers = [p["number"] for p in validated.prs["stuck"]]
     assert 10 in stuck_numbers
     assert 11 not in stuck_numbers
 
-    # stale_days is positive for the stale PR
     stale = next(p for p in validated.prs["stuck"] if p["number"] == 10)
     assert stale["stale_days"] > 0
 
@@ -139,23 +166,26 @@ async def test_full_query_json_parse_schema_validation():
 @pytest.mark.asyncio
 async def test_result_is_json_serializable():
     """Result dict must be JSON-serializable (no datetime objects etc.)."""
-    handler = GitHubDigestHandler()
+    handler, mock_store = _make_handler()
     params = GitHubDigestParams(repo="owner/repo", labels=["bug"], pr_stale_days=3)
+    run = FakeRun()
 
     responses = [
         httpx.Response(200, json=[_make_issue(1, "A bug")]),
         httpx.Response(200, json=[]),
     ]
 
-    with patch(
-        "app.actions.github_digest.httpx.AsyncClient",
-        return_value=_build_mock_client(responses),
+    with (
+        patch("app.actions.github_digest.ConnectionStore", return_value=mock_store),
+        patch(
+            "app.actions.github_digest.httpx.AsyncClient",
+            return_value=_build_mock_client(responses),
+        ),
     ):
-        result = await handler.execute(run=None, params=params)
+        result = await handler.execute(run=run, params=params)
 
     assert result.ok is True
     assert result.result is not None
-    # This should not raise
     serialized = json.dumps(result.result)
     parsed = json.loads(serialized)
     assert parsed["repo"] == "owner/repo"
@@ -165,8 +195,9 @@ async def test_result_is_json_serializable():
 @pytest.mark.asyncio
 async def test_empty_labels_list_no_issues_call():
     """When labels=[] no issues calls are made; only PRs are queried."""
-    handler = GitHubDigestHandler()
+    handler, mock_store = _make_handler()
     params = GitHubDigestParams(repo="owner/repo", labels=[], pr_stale_days=7)
+    run = FakeRun()
 
     call_count = {"n": 0}
     prs_resp = httpx.Response(
@@ -183,8 +214,11 @@ async def test_empty_labels_list_no_issues_call():
     ctx.__aenter__ = AsyncMock(return_value=mock_client)
     ctx.__aexit__ = AsyncMock(return_value=None)
 
-    with patch("app.actions.github_digest.httpx.AsyncClient", return_value=ctx):
-        result = await handler.execute(run=None, params=params)
+    with (
+        patch("app.actions.github_digest.ConnectionStore", return_value=mock_store),
+        patch("app.actions.github_digest.httpx.AsyncClient", return_value=ctx),
+    ):
+        result = await handler.execute(run=run, params=params)
 
     assert result.ok is True
     assert result.result is not None

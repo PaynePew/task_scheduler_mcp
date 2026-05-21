@@ -17,6 +17,11 @@ scheduler.paynepew.dev {
         reverse_proxy mcp-server:8000
     }
 
+    # Connections dashboard + GitHub OAuth callback (ADR-058).
+    handle /connections* {
+        reverse_proxy mcp-server:8000
+    }
+
     handle /mcp* {
         # ADR-057: shed at the Caddy edge before business logic.
         # When /healthz/shed returns 503, Caddy marks the backend unhealthy

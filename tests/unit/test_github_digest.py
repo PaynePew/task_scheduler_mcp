@@ -1,7 +1,15 @@
-"""Unit tests for the github_digest action handler (no real network)."""
+"""Unit tests for the github_digest action handler (no real network).
+
+The handler now resolves its GitHub token from the connection store
+(CredentialMode.oauth_connection) rather than from env vars.  Tests inject a
+fake session_factory and kms_envelope so no real Postgres, KMS, or network
+calls are made.
+"""
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -9,10 +17,16 @@ import pytest
 
 from app.actions.github_digest import GitHubDigestHandler, GitHubDigestParams, GitHubDigestResult
 from app.actions.registry import ACTION_REGISTRY
+from app.connections.store import ConnectionMiss
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+@dataclass
+class FakeRun:
+    user_id: str = "user-abc"
 
 
 def _make_issue(number: int, title: str = "Issue title") -> dict:
@@ -60,6 +74,27 @@ def _build_mock_client(responses: list[httpx.Response]) -> MagicMock:
     return ctx
 
 
+def _make_handler(github_token: str = "fake-github-token") -> GitHubDigestHandler:
+    """Build a GitHubDigestHandler with fakes for session_factory and kms_envelope.
+
+    The fake session_factory returns a mock session; ConnectionStore.get_fresh_token
+    is patched via the kms_envelope mock to return *github_token*.
+    """
+    fake_session = MagicMock()
+
+    @asynccontextmanager
+    async def _fake_factory():
+        yield fake_session
+
+    mock_envelope = MagicMock()
+
+    handler = GitHubDigestHandler(
+        session_factory=_fake_factory,
+        kms_envelope=mock_envelope,
+    )
+    return handler
+
+
 # ---------------------------------------------------------------------------
 # Happy path
 # ---------------------------------------------------------------------------
@@ -67,17 +102,25 @@ def _build_mock_client(responses: list[httpx.Response]) -> MagicMock:
 
 @pytest.mark.asyncio
 async def test_happy_path_returns_structured_result():
-    handler = GitHubDigestHandler()
+    handler = _make_handler()
     params = GitHubDigestParams(repo="owner/repo", labels=["bug"], pr_stale_days=3)
+    run = FakeRun()
 
     issues_resp = httpx.Response(200, json=[_make_issue(1, "A bug")])
     prs_resp = httpx.Response(200, json=[])
 
-    with patch(
-        "app.actions.github_digest.httpx.AsyncClient",
-        return_value=_build_mock_client([issues_resp, prs_resp]),
+    with (
+        patch("app.actions.github_digest.ConnectionStore") as mock_store_class,
+        patch(
+            "app.actions.github_digest.httpx.AsyncClient",
+            return_value=_build_mock_client([issues_resp, prs_resp]),
+        ),
     ):
-        result = await handler.execute(run=None, params=params)
+        mock_store = AsyncMock()
+        mock_store.get_fresh_token = AsyncMock(return_value="fake-token")
+        mock_store_class.return_value = mock_store
+
+        result = await handler.execute(run=run, params=params)
 
     assert result.ok is True
     assert result.error is None
@@ -92,17 +135,25 @@ async def test_happy_path_returns_structured_result():
 
 @pytest.mark.asyncio
 async def test_result_validates_against_pydantic_model():
-    handler = GitHubDigestHandler()
+    handler = _make_handler()
     params = GitHubDigestParams(repo="owner/repo", labels=["enhancement"], pr_stale_days=5)
+    run = FakeRun()
 
     issues_resp = httpx.Response(200, json=[_make_issue(42, "Feature request")])
     prs_resp = httpx.Response(200, json=[])
 
-    with patch(
-        "app.actions.github_digest.httpx.AsyncClient",
-        return_value=_build_mock_client([issues_resp, prs_resp]),
+    with (
+        patch("app.actions.github_digest.ConnectionStore") as mock_store_class,
+        patch(
+            "app.actions.github_digest.httpx.AsyncClient",
+            return_value=_build_mock_client([issues_resp, prs_resp]),
+        ),
     ):
-        result = await handler.execute(run=None, params=params)
+        mock_store = AsyncMock()
+        mock_store.get_fresh_token = AsyncMock(return_value="fake-token")
+        mock_store_class.return_value = mock_store
+
+        result = await handler.execute(run=run, params=params)
 
     assert result.ok is True
     validated = GitHubDigestResult.model_validate(result.result)
@@ -119,8 +170,9 @@ async def test_result_validates_against_pydantic_model():
 @pytest.mark.asyncio
 async def test_empty_result_emits_all_requested_labels():
     """Empty result set still emits all requested labels with empty lists."""
-    handler = GitHubDigestHandler()
+    handler = _make_handler()
     params = GitHubDigestParams(repo="owner/repo", labels=["bug", "enhancement", "question"])
+    run = FakeRun()
 
     responses = [
         httpx.Response(200, json=[]),  # bug
@@ -129,11 +181,18 @@ async def test_empty_result_emits_all_requested_labels():
         httpx.Response(200, json=[]),  # PRs
     ]
 
-    with patch(
-        "app.actions.github_digest.httpx.AsyncClient",
-        return_value=_build_mock_client(responses),
+    with (
+        patch("app.actions.github_digest.ConnectionStore") as mock_store_class,
+        patch(
+            "app.actions.github_digest.httpx.AsyncClient",
+            return_value=_build_mock_client(responses),
+        ),
     ):
-        result = await handler.execute(run=None, params=params)
+        mock_store = AsyncMock()
+        mock_store.get_fresh_token = AsyncMock(return_value="fake-token")
+        mock_store_class.return_value = mock_store
+
+        result = await handler.execute(run=run, params=params)
 
     assert result.ok is True
     assert result.result is not None
@@ -153,20 +212,27 @@ async def test_empty_result_emits_all_requested_labels():
 @pytest.mark.asyncio
 async def test_pr_stale_days_filter_identifies_stale_prs():
     """PRs updated more than pr_stale_days ago appear in stuck list."""
-    handler = GitHubDigestHandler()
+    handler = _make_handler()
     params = GitHubDigestParams(repo="owner/repo", labels=[], pr_stale_days=3)
+    run = FakeRun()
 
     stale_pr = _make_pr(10, "Old PR", updated_at="2020-01-01T00:00:00Z")
     fresh_pr = _make_pr(11, "New PR", updated_at="2099-12-31T00:00:00Z")
 
-    # No labels → no issues calls; PRs response is first in the list
     prs_resp = httpx.Response(200, json=[stale_pr, fresh_pr])
 
-    with patch(
-        "app.actions.github_digest.httpx.AsyncClient",
-        return_value=_build_mock_client([prs_resp]),
+    with (
+        patch("app.actions.github_digest.ConnectionStore") as mock_store_class,
+        patch(
+            "app.actions.github_digest.httpx.AsyncClient",
+            return_value=_build_mock_client([prs_resp]),
+        ),
     ):
-        result = await handler.execute(run=None, params=params)
+        mock_store = AsyncMock()
+        mock_store.get_fresh_token = AsyncMock(return_value="fake-token")
+        mock_store_class.return_value = mock_store
+
+        result = await handler.execute(run=run, params=params)
 
     assert result.ok is True
     assert result.result is not None
@@ -180,18 +246,25 @@ async def test_pr_stale_days_filter_identifies_stale_prs():
 @pytest.mark.asyncio
 async def test_pr_stale_days_boundary_zero_means_all_stuck():
     """pr_stale_days=0 marks every PR as stale (age >= 0 days)."""
-    handler = GitHubDigestHandler()
+    handler = _make_handler()
     params = GitHubDigestParams(repo="owner/repo", labels=[], pr_stale_days=0)
+    run = FakeRun()
 
     pr = _make_pr(5, "Any PR", updated_at="2020-01-01T00:00:00Z")
-    # No labels → no issues calls; PRs response is first
     prs_resp = httpx.Response(200, json=[pr])
 
-    with patch(
-        "app.actions.github_digest.httpx.AsyncClient",
-        return_value=_build_mock_client([prs_resp]),
+    with (
+        patch("app.actions.github_digest.ConnectionStore") as mock_store_class,
+        patch(
+            "app.actions.github_digest.httpx.AsyncClient",
+            return_value=_build_mock_client([prs_resp]),
+        ),
     ):
-        result = await handler.execute(run=None, params=params)
+        mock_store = AsyncMock()
+        mock_store.get_fresh_token = AsyncMock(return_value="fake-token")
+        mock_store_class.return_value = mock_store
+
+        result = await handler.execute(run=run, params=params)
 
     assert result.ok is True
     assert result.result is not None
@@ -206,8 +279,9 @@ async def test_pr_stale_days_boundary_zero_means_all_stuck():
 @pytest.mark.asyncio
 async def test_pr_items_in_issues_endpoint_are_filtered_out():
     """GitHub /issues endpoint returns PRs too; those must be excluded from label lists."""
-    handler = GitHubDigestHandler()
+    handler = _make_handler()
     params = GitHubDigestParams(repo="owner/repo", labels=["bug"])
+    run = FakeRun()
 
     responses = [
         httpx.Response(
@@ -217,11 +291,18 @@ async def test_pr_items_in_issues_endpoint_are_filtered_out():
         httpx.Response(200, json=[]),  # PRs
     ]
 
-    with patch(
-        "app.actions.github_digest.httpx.AsyncClient",
-        return_value=_build_mock_client(responses),
+    with (
+        patch("app.actions.github_digest.ConnectionStore") as mock_store_class,
+        patch(
+            "app.actions.github_digest.httpx.AsyncClient",
+            return_value=_build_mock_client(responses),
+        ),
     ):
-        result = await handler.execute(run=None, params=params)
+        mock_store = AsyncMock()
+        mock_store.get_fresh_token = AsyncMock(return_value="fake-token")
+        mock_store_class.return_value = mock_store
+
+        result = await handler.execute(run=run, params=params)
 
     assert result.ok is True
     assert result.result is not None
@@ -231,22 +312,67 @@ async def test_pr_items_in_issues_endpoint_are_filtered_out():
 
 
 # ---------------------------------------------------------------------------
+# Missing GitHub connection
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_no_run_user_id_returns_error():
+    """Handler returns a clear error when run has no user_id."""
+    handler = _make_handler()
+    params = GitHubDigestParams(repo="owner/repo", labels=["bug"])
+
+    result = await handler.execute(run=None, params=params)
+
+    assert result.ok is False
+    assert result.retryable is False
+    assert "user_id" in (result.error or "").lower()
+
+
+@pytest.mark.asyncio
+async def test_missing_connection_returns_non_retryable_error():
+    """When no GitHub connection exists, handler fails non-retryably."""
+    handler = _make_handler()
+    params = GitHubDigestParams(repo="owner/repo", labels=["bug"])
+    run = FakeRun()
+
+    with patch("app.actions.github_digest.ConnectionStore") as mock_store_class:
+        mock_store = AsyncMock()
+        mock_store.get_fresh_token = AsyncMock(side_effect=ConnectionMiss("user-abc", "github"))
+        mock_store_class.return_value = mock_store
+
+        result = await handler.execute(run=run, params=params)
+
+    assert result.ok is False
+    assert result.retryable is False
+    assert "github" in (result.error or "").lower()
+
+
+# ---------------------------------------------------------------------------
 # Error classifications
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_error_401_is_dlq():
-    handler = GitHubDigestHandler()
+    handler = _make_handler()
     params = GitHubDigestParams(repo="owner/repo", labels=["bug"])
+    run = FakeRun()
 
     resp = httpx.Response(401, json={"message": "Unauthorized"})
 
-    with patch(
-        "app.actions.github_digest.httpx.AsyncClient",
-        return_value=_build_mock_client([resp]),
+    with (
+        patch("app.actions.github_digest.ConnectionStore") as mock_store_class,
+        patch(
+            "app.actions.github_digest.httpx.AsyncClient",
+            return_value=_build_mock_client([resp]),
+        ),
     ):
-        result = await handler.execute(run=None, params=params)
+        mock_store = AsyncMock()
+        mock_store.get_fresh_token = AsyncMock(return_value="fake-token")
+        mock_store_class.return_value = mock_store
+
+        result = await handler.execute(run=run, params=params)
 
     assert result.ok is False
     assert result.retryable is False
@@ -255,8 +381,9 @@ async def test_error_401_is_dlq():
 
 @pytest.mark.asyncio
 async def test_error_403_rate_limited_is_retryable():
-    handler = GitHubDigestHandler()
+    handler = _make_handler()
     params = GitHubDigestParams(repo="owner/repo", labels=["bug"])
+    run = FakeRun()
 
     resp = httpx.Response(
         403,
@@ -264,11 +391,18 @@ async def test_error_403_rate_limited_is_retryable():
         headers={"x-ratelimit-remaining": "0"},
     )
 
-    with patch(
-        "app.actions.github_digest.httpx.AsyncClient",
-        return_value=_build_mock_client([resp]),
+    with (
+        patch("app.actions.github_digest.ConnectionStore") as mock_store_class,
+        patch(
+            "app.actions.github_digest.httpx.AsyncClient",
+            return_value=_build_mock_client([resp]),
+        ),
     ):
-        result = await handler.execute(run=None, params=params)
+        mock_store = AsyncMock()
+        mock_store.get_fresh_token = AsyncMock(return_value="fake-token")
+        mock_store_class.return_value = mock_store
+
+        result = await handler.execute(run=run, params=params)
 
     assert result.ok is False
     assert result.retryable is True
@@ -277,8 +411,9 @@ async def test_error_403_rate_limited_is_retryable():
 
 @pytest.mark.asyncio
 async def test_error_403_forbidden_not_rate_limited_is_dlq():
-    handler = GitHubDigestHandler()
+    handler = _make_handler()
     params = GitHubDigestParams(repo="owner/repo", labels=["bug"])
+    run = FakeRun()
 
     resp = httpx.Response(
         403,
@@ -286,11 +421,18 @@ async def test_error_403_forbidden_not_rate_limited_is_dlq():
         headers={"x-ratelimit-remaining": "5000"},
     )
 
-    with patch(
-        "app.actions.github_digest.httpx.AsyncClient",
-        return_value=_build_mock_client([resp]),
+    with (
+        patch("app.actions.github_digest.ConnectionStore") as mock_store_class,
+        patch(
+            "app.actions.github_digest.httpx.AsyncClient",
+            return_value=_build_mock_client([resp]),
+        ),
     ):
-        result = await handler.execute(run=None, params=params)
+        mock_store = AsyncMock()
+        mock_store.get_fresh_token = AsyncMock(return_value="fake-token")
+        mock_store_class.return_value = mock_store
+
+        result = await handler.execute(run=run, params=params)
 
     assert result.ok is False
     assert result.retryable is False
@@ -299,16 +441,24 @@ async def test_error_403_forbidden_not_rate_limited_is_dlq():
 
 @pytest.mark.asyncio
 async def test_error_404_is_dlq():
-    handler = GitHubDigestHandler()
+    handler = _make_handler()
     params = GitHubDigestParams(repo="owner/nonexistent", labels=["bug"])
+    run = FakeRun()
 
     resp = httpx.Response(404, json={"message": "Not Found"})
 
-    with patch(
-        "app.actions.github_digest.httpx.AsyncClient",
-        return_value=_build_mock_client([resp]),
+    with (
+        patch("app.actions.github_digest.ConnectionStore") as mock_store_class,
+        patch(
+            "app.actions.github_digest.httpx.AsyncClient",
+            return_value=_build_mock_client([resp]),
+        ),
     ):
-        result = await handler.execute(run=None, params=params)
+        mock_store = AsyncMock()
+        mock_store.get_fresh_token = AsyncMock(return_value="fake-token")
+        mock_store_class.return_value = mock_store
+
+        result = await handler.execute(run=run, params=params)
 
     assert result.ok is False
     assert result.retryable is False
@@ -317,16 +467,24 @@ async def test_error_404_is_dlq():
 
 @pytest.mark.asyncio
 async def test_error_422_is_dlq():
-    handler = GitHubDigestHandler()
+    handler = _make_handler()
     params = GitHubDigestParams(repo="owner/repo", labels=["bug"])
+    run = FakeRun()
 
     resp = httpx.Response(422, json={"message": "Validation Failed"})
 
-    with patch(
-        "app.actions.github_digest.httpx.AsyncClient",
-        return_value=_build_mock_client([resp]),
+    with (
+        patch("app.actions.github_digest.ConnectionStore") as mock_store_class,
+        patch(
+            "app.actions.github_digest.httpx.AsyncClient",
+            return_value=_build_mock_client([resp]),
+        ),
     ):
-        result = await handler.execute(run=None, params=params)
+        mock_store = AsyncMock()
+        mock_store.get_fresh_token = AsyncMock(return_value="fake-token")
+        mock_store_class.return_value = mock_store
+
+        result = await handler.execute(run=run, params=params)
 
     assert result.ok is False
     assert result.retryable is False
@@ -335,16 +493,24 @@ async def test_error_422_is_dlq():
 
 @pytest.mark.asyncio
 async def test_error_500_is_retryable():
-    handler = GitHubDigestHandler()
+    handler = _make_handler()
     params = GitHubDigestParams(repo="owner/repo", labels=["bug"])
+    run = FakeRun()
 
     resp = httpx.Response(500, json={"message": "Internal Server Error"})
 
-    with patch(
-        "app.actions.github_digest.httpx.AsyncClient",
-        return_value=_build_mock_client([resp]),
+    with (
+        patch("app.actions.github_digest.ConnectionStore") as mock_store_class,
+        patch(
+            "app.actions.github_digest.httpx.AsyncClient",
+            return_value=_build_mock_client([resp]),
+        ),
     ):
-        result = await handler.execute(run=None, params=params)
+        mock_store = AsyncMock()
+        mock_store.get_fresh_token = AsyncMock(return_value="fake-token")
+        mock_store_class.return_value = mock_store
+
+        result = await handler.execute(run=run, params=params)
 
     assert result.ok is False
     assert result.retryable is True
@@ -353,16 +519,24 @@ async def test_error_500_is_retryable():
 
 @pytest.mark.asyncio
 async def test_error_503_is_retryable():
-    handler = GitHubDigestHandler()
+    handler = _make_handler()
     params = GitHubDigestParams(repo="owner/repo", labels=["bug"])
+    run = FakeRun()
 
     resp = httpx.Response(503, json={"message": "Service Unavailable"})
 
-    with patch(
-        "app.actions.github_digest.httpx.AsyncClient",
-        return_value=_build_mock_client([resp]),
+    with (
+        patch("app.actions.github_digest.ConnectionStore") as mock_store_class,
+        patch(
+            "app.actions.github_digest.httpx.AsyncClient",
+            return_value=_build_mock_client([resp]),
+        ),
     ):
-        result = await handler.execute(run=None, params=params)
+        mock_store = AsyncMock()
+        mock_store.get_fresh_token = AsyncMock(return_value="fake-token")
+        mock_store_class.return_value = mock_store
+
+        result = await handler.execute(run=run, params=params)
 
     assert result.ok is False
     assert result.retryable is True
@@ -370,8 +544,9 @@ async def test_error_503_is_retryable():
 
 @pytest.mark.asyncio
 async def test_timeout_is_retryable():
-    handler = GitHubDigestHandler()
+    handler = _make_handler()
     params = GitHubDigestParams(repo="owner/repo", labels=["bug"])
+    run = FakeRun()
 
     mock_client = MagicMock()
     mock_client.get = AsyncMock(side_effect=httpx.TimeoutException("timed out"))
@@ -379,8 +554,15 @@ async def test_timeout_is_retryable():
     ctx.__aenter__ = AsyncMock(return_value=mock_client)
     ctx.__aexit__ = AsyncMock(return_value=None)
 
-    with patch("app.actions.github_digest.httpx.AsyncClient", return_value=ctx):
-        result = await handler.execute(run=None, params=params)
+    with (
+        patch("app.actions.github_digest.ConnectionStore") as mock_store_class,
+        patch("app.actions.github_digest.httpx.AsyncClient", return_value=ctx),
+    ):
+        mock_store = AsyncMock()
+        mock_store.get_fresh_token = AsyncMock(return_value="fake-token")
+        mock_store_class.return_value = mock_store
+
+        result = await handler.execute(run=run, params=params)
 
     assert result.ok is False
     assert result.retryable is True
@@ -388,8 +570,9 @@ async def test_timeout_is_retryable():
 
 @pytest.mark.asyncio
 async def test_network_error_is_retryable():
-    handler = GitHubDigestHandler()
+    handler = _make_handler()
     params = GitHubDigestParams(repo="owner/repo", labels=["bug"])
+    run = FakeRun()
 
     mock_client = MagicMock()
     mock_client.get = AsyncMock(side_effect=httpx.ConnectError("connection refused"))
@@ -397,8 +580,15 @@ async def test_network_error_is_retryable():
     ctx.__aenter__ = AsyncMock(return_value=mock_client)
     ctx.__aexit__ = AsyncMock(return_value=None)
 
-    with patch("app.actions.github_digest.httpx.AsyncClient", return_value=ctx):
-        result = await handler.execute(run=None, params=params)
+    with (
+        patch("app.actions.github_digest.ConnectionStore") as mock_store_class,
+        patch("app.actions.github_digest.httpx.AsyncClient", return_value=ctx),
+    ):
+        mock_store = AsyncMock()
+        mock_store.get_fresh_token = AsyncMock(return_value="fake-token")
+        mock_store_class.return_value = mock_store
+
+        result = await handler.execute(run=run, params=params)
 
     assert result.ok is False
     assert result.retryable is True
@@ -419,3 +609,12 @@ def test_registry_now_has_three_actions():
     assert "echo" in ACTION_REGISTRY
     assert "http_call" in ACTION_REGISTRY
     assert "github_digest" in ACTION_REGISTRY
+
+
+def test_github_digest_credential_mode_is_oauth_connection():
+    from app.actions.base import CredentialMode
+
+    handler = ACTION_REGISTRY["github_digest"]
+    assert handler.credential_mode == CredentialMode.oauth_connection
+    assert handler.required_provider == "github"
+    assert handler.requires_operator is False
