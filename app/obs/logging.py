@@ -24,6 +24,7 @@ value replaced with ``"[REDACTED]"`` before the record is serialised.
 
 from __future__ import annotations
 
+import atexit
 import json
 import logging
 import queue
@@ -113,6 +114,7 @@ def _redact_value(key: str, value: Any) -> Any:
 _BS_QUEUE_MAX: int = 10_000
 _bs_listener: QueueListener | None = None
 _bs_queue_full_warned: threading.Event = threading.Event()
+_bs_atexit_registered: bool = False
 
 
 class _DroppingQueueHandler(QueueHandler):
@@ -330,5 +332,15 @@ def _add_better_stack_handler(
 
     _bs_listener = QueueListener(q, bs_handler, respect_handler_level=True)
     _bs_listener.start()
+
+    # Ensure the listener thread is stopped on graceful interpreter exit so
+    # buffered records get flushed before the process dies. Fires on normal
+    # exit and SIGTERM-then-clean-shutdown; leaks on SIGKILL, which is fine for
+    # short-lived containers (ADR-056). Idempotent — only register once per
+    # process even across repeated configure_logging() calls.
+    global _bs_atexit_registered
+    if not _bs_atexit_registered:
+        atexit.register(stop_better_stack_listener)
+        _bs_atexit_registered = True
 
     root.addHandler(queue_handler)

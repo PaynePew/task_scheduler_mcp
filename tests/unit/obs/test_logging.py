@@ -400,3 +400,76 @@ class TestBetterStackQueue:
 
         kept = small_q.get_nowait()
         assert kept.msg == "new"
+
+    def test_atexit_hook_registered_for_listener_stop(self, monkeypatch):
+        """configure_logging must register stop_better_stack_listener via atexit.
+
+        Without this hook the QueueListener thread is never told to drain on
+        graceful shutdown, so buffered records are lost — closes the gap
+        flagged in PR #167.
+        """
+        import app.obs.logging as obs_logging
+
+        monkeypatch.setattr(settings, "better_stack_source_token", "tok-atexit")
+        monkeypatch.setattr(obs_logging, "_bs_atexit_registered", False)
+
+        registered: list[object] = []
+        monkeypatch.setattr(
+            obs_logging.atexit, "register", lambda fn, *a, **kw: registered.append(fn) or fn
+        )
+
+        configure_logging("test-atexit")
+
+        assert stop_better_stack_listener in registered, (
+            "stop_better_stack_listener must be atexit-registered when the BS handler is wired"
+        )
+
+    def test_atexit_hook_registered_only_once(self, monkeypatch):
+        """Repeated configure_logging() calls must not stack atexit registrations.
+
+        Idempotency matters: tests, hot-reload, and any code path that calls
+        configure_logging more than once would otherwise pile up duplicate
+        callbacks (harmless but ugly, and creates noise in atexit traces).
+        """
+        import app.obs.logging as obs_logging
+
+        monkeypatch.setattr(settings, "better_stack_source_token", "tok-atexit-once")
+        monkeypatch.setattr(obs_logging, "_bs_atexit_registered", False)
+
+        registered: list[object] = []
+        monkeypatch.setattr(
+            obs_logging.atexit, "register", lambda fn, *a, **kw: registered.append(fn) or fn
+        )
+
+        configure_logging("test-atexit-once-a")
+        configure_logging("test-atexit-once-b")
+        configure_logging("test-atexit-once-c")
+
+        assert registered.count(stop_better_stack_listener) == 1, (
+            f"atexit.register called {registered.count(stop_better_stack_listener)}x for stop hook "
+            f"— expected 1 across repeated configure_logging() calls"
+        )
+
+    def test_stop_better_stack_listener_terminates_thread(self, monkeypatch):
+        """stop_better_stack_listener() must end the background listener thread.
+
+        Regression for the actual mechanic the atexit hook depends on: if the
+        stop function doesn't really stop the thread, the atexit wiring is
+        cosmetic.
+        """
+        import app.obs.logging as obs_logging
+
+        monkeypatch.setattr(settings, "better_stack_source_token", "tok-stop")
+
+        # Avoid background thread doing real HTTPS on flush.
+        with patch("urllib.request.urlopen", MagicMock()):
+            configure_logging("test-stop")
+            assert obs_logging._bs_listener is not None
+            listener_thread = obs_logging._bs_listener._thread
+            assert listener_thread is not None and listener_thread.is_alive()
+
+            stop_better_stack_listener()
+
+            assert obs_logging._bs_listener is None
+            listener_thread.join(timeout=2.0)
+            assert not listener_thread.is_alive(), "listener thread still alive after stop"

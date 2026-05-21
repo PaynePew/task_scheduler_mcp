@@ -88,7 +88,11 @@ class Settings(BaseSettings):
             ("WORKOS_ISSUER", self.workos_issuer),
             ("WORKOS_AUDIENCE", self.workos_audience),
         )
-        missing = [name for name, val in workos_vars if val is None]
+        # "Missing" must match what mcp_http._AUTH_ENABLED treats as missing:
+        # a truthy check that rejects None, "", and whitespace-only. Without
+        # this, an empty-string env var passes the validator yet disables auth
+        # at runtime — the exact silent-downgrade this validator exists to stop.
+        missing = [name for name, val in workos_vars if not val or not val.strip()]
         # All set (missing=[]) and all unset (missing=all of them) are both legal.
         if missing and len(missing) < len(workos_vars):
             raise ValueError(

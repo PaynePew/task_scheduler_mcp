@@ -351,6 +351,127 @@ def test_0005_downgrade_removes_user_id_column():
     _run_alembic_with_operator("upgrade", "head")
 
 
+# ---------------------------------------------------------------------------
+# Migration 0008: back-fill NULL job_runs.user_id from parent job, then NOT NULL
+# ---------------------------------------------------------------------------
+
+
+def _insert_job(url: str, user_id: str) -> int:
+    """Insert a job with the given owner and return its job_id."""
+    engine = sa.create_engine(url, poolclass=sa.pool.NullPool)
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    "INSERT INTO jobs"
+                    " (user_id, description, action, action_params,"
+                    "  job_type, scheduled_at, active, created_at, updated_at)"
+                    " VALUES (:uid, 'test', 'echo', '{}'::jsonb,"
+                    "  'one_shot', NOW(), TRUE, NOW(), NOW())"
+                    " RETURNING job_id"
+                ),
+                {"uid": user_id},
+            ).fetchone()
+            conn.commit()
+            return row[0]
+    finally:
+        engine.dispose()
+
+
+def _insert_job_run_null_user(url: str, job_id: int) -> int:
+    """Insert a job_run with NULL user_id (only legal at revisions 0005–0007)."""
+    engine = sa.create_engine(url, poolclass=sa.pool.NullPool)
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    "INSERT INTO job_runs"
+                    " (time_bucket, job_id, scheduled_at, status,"
+                    "  retry_count, max_retries, created_at, updated_at, user_id)"
+                    " VALUES (TO_CHAR(NOW(), 'YYYY-MM-DD HH24:00:00'), :job_id,"
+                    "  NOW(), 'PENDING', 0, 3, NOW(), NOW(), NULL)"
+                    " RETURNING run_id"
+                ),
+                {"job_id": job_id},
+            ).fetchone()
+            conn.commit()
+            return row[0]
+    finally:
+        engine.dispose()
+
+
+def _get_run_user(url: str, run_id: int) -> str | None:
+    engine = sa.create_engine(url, poolclass=sa.pool.NullPool)
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text("SELECT user_id FROM job_runs WHERE run_id = :rid"),
+                {"rid": run_id},
+            ).fetchone()
+            return row[0] if row else None
+    finally:
+        engine.dispose()
+
+
+def _user_id_is_not_null(url: str) -> bool:
+    """Return True iff job_runs.user_id has a NOT NULL constraint."""
+    engine = sa.create_engine(url, poolclass=sa.pool.NullPool)
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    "SELECT is_nullable FROM information_schema.columns"
+                    " WHERE table_schema = 'public' AND table_name = 'job_runs'"
+                    " AND column_name = 'user_id'"
+                )
+            ).fetchone()
+            return row is not None and row[0] == "NO"
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.integration
+def test_0008_back_fills_user_id_from_parent_job():
+    """Back-fill copies each parent job's user_id into its child job_runs.
+
+    Closes the gap flagged in PR #168: the migration's correctness wasn't
+    asserted by any test — only the safety gate ("zero NULLs remain") was
+    indirectly exercised by the upgrade succeeding. A buggy back-fill that
+    mapped the wrong parent (e.g. wrong join key) would still pass the gate
+    and silently land cross-tenant user_ids on runs.
+    """
+    url = os.environ["ALEMBIC_DATABASE_URL"]
+
+    # Pre-state: revert to 0007 so user_id is nullable again and we can seed
+    # NULL rows the migration is supposed to fix up.
+    _run_alembic_with_operator("downgrade", "0007")
+
+    # Two parent jobs with distinct owners; one NULL-user run per parent.
+    job_a = _insert_job(url, "user-alpha")
+    job_b = _insert_job(url, "user-beta")
+    run_a = _insert_job_run_null_user(url, job_a)
+    run_b = _insert_job_run_null_user(url, job_b)
+
+    # Sanity: the seeded runs really are NULL pre-migration.
+    assert _get_run_user(url, run_a) is None
+    assert _get_run_user(url, run_b) is None
+
+    # Apply 0008 — back-fills, gates on zero NULLs remaining, then sets NOT NULL.
+    _run_alembic_with_operator("upgrade", "0008")
+
+    # Each run now carries its own parent's user_id — not swapped, not
+    # collapsed onto a single owner.
+    assert _get_run_user(url, run_a) == "user-alpha"
+    assert _get_run_user(url, run_b) == "user-beta"
+
+    # And the constraint actually tightened — without this assert, a no-op
+    # ALTER could fool the test.
+    assert _user_id_is_not_null(url), "user_id must be NOT NULL after 0008"
+
+    # Restore head for subsequent tests.
+    _run_alembic_with_operator("upgrade", "head")
+
+
 @pytest.mark.integration
 def test_0006_creates_and_drops_oauth_connections():
     """Migration 0006 creates oauth_connections; downgrade drops it."""
