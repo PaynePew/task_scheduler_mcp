@@ -108,5 +108,21 @@ class Settings(BaseSettings):
     # Leave unset in local dev — logs go to stdout only.
     better_stack_source_token: str | None = None
 
+    # AWS KMS envelope encryption for OAuth token storage (ADR-054).
+    # kms_key_id: CMK ARN or alias — required for connection-store encrypt/decrypt.
+    # kms_region: AWS region where the CMK lives (Lightsail is ap-northeast-1).
+    # aws_access_key_id / aws_secret_access_key: IAM user scoped to
+    #   kms:GenerateDataKey + kms:Decrypt on this one CMK (stored in .env 0600).
+    # All four are optional so local dev / CI without real KMS keeps working;
+    # connection-store operations raise at runtime if kms_key_id is unset.
+    kms_key_id: str | None = None
+    kms_region: str = "ap-northeast-1"
+    aws_access_key_id: str | None = None
+    aws_secret_access_key: str | None = None
+
+    # Refresh window: re-fetch a connection's access token when it expires within
+    # this many seconds (default 5 minutes).
+    connection_refresh_window_seconds: int = 300
+
 
 settings = Settings()
