@@ -130,6 +130,7 @@ async def poll_once(
                         new_run = JobRun(
                             time_bucket=time_bucket,
                             job_id=job.job_id,
+                            user_id=job.user_id,
                             scheduled_at=run_at,
                             status="PENDING",
                         )

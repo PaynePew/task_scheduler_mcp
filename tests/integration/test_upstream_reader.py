@@ -72,6 +72,7 @@ async def _insert_run(
             run = JobRun(
                 time_bucket=bucket,
                 job_id=job.job_id,
+                user_id=job.user_id,
                 scheduled_at=scheduled,
                 status=status,
                 result=result,

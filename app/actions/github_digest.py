@@ -114,15 +114,7 @@ class GitHubDigestHandler:
         return _make_default_kms_envelope()
 
     async def execute(self, run: Any, params: GitHubDigestParams) -> ActionResult:
-        # Resolve user_id from the JobRun (denormalized column, ADR-059).
-        user_id: str | None = getattr(run, "user_id", None)
-        if not user_id:
-            return ActionResult(
-                ok=False,
-                result=None,
-                error="github_digest: no user_id on run — cannot resolve GitHub connection",
-                retryable=False,
-            )
+        user_id: str = run.user_id
 
         # Look up the GitHub token from the connection store.
         envelope = self._get_kms_envelope()

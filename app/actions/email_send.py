@@ -186,7 +186,7 @@ class EmailSendHandler:
             return body_text
 
         # Route to SMTP (operator / no operator configured) or Gmail (public user).
-        user_id: str | None = getattr(run, "user_id", None)
+        user_id: str = run.user_id
         operator_uid = settings.operator_user_id
         if not operator_uid or user_id == operator_uid:
             return await self._send_via_smtp(params, resolved_subject, body_text)

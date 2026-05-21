@@ -69,6 +69,7 @@ async def _insert_chain(
             upstream_run = JobRun(
                 time_bucket=bucket,
                 job_id=upstream_job.job_id,
+                user_id=upstream_job.user_id,
                 scheduled_at=scheduled,
                 status=final_upstream_status,
                 finish_at=datetime.now(tz=UTC),
@@ -92,6 +93,7 @@ async def _insert_chain(
             downstream_run = JobRun(
                 time_bucket=bucket,
                 job_id=downstream_job.job_id,
+                user_id=downstream_job.user_id,
                 scheduled_at=scheduled + timedelta(seconds=1),
                 status="WAITING",
                 wait_for_run_id=upstream_run.run_id,
@@ -223,6 +225,7 @@ async def test_recurring_upstream_flips_downstream_once(session_factory):
             run_a1 = JobRun(
                 time_bucket=bucket,
                 job_id=job_a.job_id,
+                user_id=job_a.user_id,
                 scheduled_at=scheduled,
                 status="SUCCEEDED",
                 finish_at=datetime.now(tz=UTC),
@@ -247,6 +250,7 @@ async def test_recurring_upstream_flips_downstream_once(session_factory):
             run_b = JobRun(
                 time_bucket=bucket,
                 job_id=job_b.job_id,
+                user_id=job_b.user_id,
                 scheduled_at=scheduled + timedelta(seconds=1),
                 status="WAITING",
                 wait_for_run_id=run_a1.run_id,
@@ -283,6 +287,7 @@ async def test_recurring_upstream_flips_downstream_once(session_factory):
             run_a2 = JobRun(
                 time_bucket=bucket2,
                 job_id=job_a.job_id,
+                user_id=job_a.user_id,
                 scheduled_at=scheduled2,
                 status="SUCCEEDED",
                 finish_at=datetime.now(tz=UTC),
@@ -402,6 +407,7 @@ async def test_terminal_event_without_waiting_run_is_stamped(session_factory):
             run = JobRun(
                 time_bucket=bucket,
                 job_id=job.job_id,
+                user_id=job.user_id,
                 scheduled_at=scheduled,
                 status="SUCCEEDED",
                 finish_at=datetime.now(tz=UTC),

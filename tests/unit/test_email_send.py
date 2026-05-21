@@ -49,6 +49,13 @@ def _make_mock_session_factory() -> Any:
     return MagicMock(return_value=mock_factory_ctx)
 
 
+def _make_run(user_id: str = "operator-id") -> Any:
+    """Minimal run stub with a user_id attribute."""
+    run = MagicMock()
+    run.user_id = user_id
+    return run
+
+
 # ---------------------------------------------------------------------------
 # Happy path — single and multi-recipient
 # ---------------------------------------------------------------------------
@@ -61,7 +68,7 @@ async def test_email_send_single_recipient_ok():
 
     with patch.dict("os.environ", _SMTP_ENV):
         with _patch_smtp_send():
-            result = await handler.execute(run=None, params=params)
+            result = await handler.execute(run=_make_run(), params=params)
 
     assert result.ok is True
     assert result.error is None
@@ -81,7 +88,7 @@ async def test_email_send_multi_recipient_ok():
 
     with patch.dict("os.environ", _SMTP_ENV):
         with _patch_smtp_send():
-            result = await handler.execute(run=None, params=params)
+            result = await handler.execute(run=_make_run(), params=params)
 
     assert result.ok is True
     assert "alice@example.com" in result.result["recipients"]
@@ -104,7 +111,7 @@ async def test_smtp_4xx_recipient_is_retryable():
 
     with patch.dict("os.environ", _SMTP_ENV):
         with _patch_smtp_send(side_effect=exc):
-            result = await handler.execute(run=None, params=params)
+            result = await handler.execute(run=_make_run(), params=params)
 
     assert result.ok is False
     assert result.retryable is True
@@ -121,7 +128,7 @@ async def test_smtp_5xx_recipient_not_retryable():
 
     with patch.dict("os.environ", _SMTP_ENV):
         with _patch_smtp_send(side_effect=exc):
-            result = await handler.execute(run=None, params=params)
+            result = await handler.execute(run=_make_run(), params=params)
 
     assert result.ok is False
     assert result.retryable is False
@@ -137,7 +144,7 @@ async def test_smtp_auth_failure_not_retryable():
 
     with patch.dict("os.environ", _SMTP_ENV):
         with _patch_smtp_send(side_effect=exc):
-            result = await handler.execute(run=None, params=params)
+            result = await handler.execute(run=_make_run(), params=params)
 
     assert result.ok is False
     assert result.retryable is False
@@ -154,7 +161,7 @@ async def test_smtp_tls_handshake_failure_is_retryable():
 
     with patch.dict("os.environ", _SMTP_ENV):
         with _patch_smtp_send(side_effect=exc):
-            result = await handler.execute(run=None, params=params)
+            result = await handler.execute(run=_make_run(), params=params)
 
     assert result.ok is False
     assert result.retryable is True
@@ -170,7 +177,7 @@ async def test_smtp_connect_timeout_is_retryable():
 
     with patch.dict("os.environ", _SMTP_ENV):
         with _patch_smtp_send(side_effect=exc):
-            result = await handler.execute(run=None, params=params)
+            result = await handler.execute(run=_make_run(), params=params)
 
     assert result.ok is False
     assert result.retryable is True
@@ -186,7 +193,7 @@ async def test_smtp_server_disconnected_is_retryable():
 
     with patch.dict("os.environ", _SMTP_ENV):
         with _patch_smtp_send(side_effect=exc):
-            result = await handler.execute(run=None, params=params)
+            result = await handler.execute(run=_make_run(), params=params)
 
     assert result.ok is False
     assert result.retryable is True
@@ -204,7 +211,7 @@ async def test_missing_smtp_host_fails():
 
     env = {k: v for k, v in _SMTP_ENV.items() if k != "SMTP_HOST"}
     with patch.dict("os.environ", env, clear=True):
-        result = await handler.execute(run=None, params=params)
+        result = await handler.execute(run=_make_run(), params=params)
 
     assert result.ok is False
     assert result.retryable is False
@@ -218,7 +225,7 @@ async def test_missing_email_from_fails():
 
     env = {k: v for k, v in _SMTP_ENV.items() if k != "EMAIL_FROM"}
     with patch.dict("os.environ", env, clear=True):
-        result = await handler.execute(run=None, params=params)
+        result = await handler.execute(run=_make_run(), params=params)
 
     assert result.ok is False
     assert result.retryable is False
@@ -231,7 +238,7 @@ async def test_neither_body_nor_from_run_id_fails():
     params = EmailSendParams(to=["a@x.com"], subject="s")  # no body, no from_run_id
 
     with patch.dict("os.environ", _SMTP_ENV):
-        result = await handler.execute(run=None, params=params)
+        result = await handler.execute(run=_make_run(), params=params)
 
     assert result.ok is False
     assert result.retryable is False
@@ -264,7 +271,7 @@ async def test_from_run_id_ok_uses_upstream_json_as_body():
                     from_run_id=42,
                     template=EmailTemplate.digest_v1,
                 )
-                result = await handler.execute(run=None, params=params)
+                result = await handler.execute(run=_make_run(), params=params)
 
     assert result.ok is True
     assert captured
@@ -293,7 +300,7 @@ async def test_from_run_id_upstream_error_alerts_in_body():
                     subject="Alert",
                     from_run_id=99,
                 )
-                result = await handler.execute(run=None, params=params)
+                result = await handler.execute(run=_make_run(), params=params)
 
     assert result.ok is True
     assert captured
@@ -311,7 +318,7 @@ async def test_from_run_id_no_result():
             with _patch_smtp_send():
                 handler = EmailSendHandler(session_factory=mock_factory)
                 params = EmailSendParams(to=["user@example.com"], subject="Digest", from_run_id=1)
-                result = await handler.execute(run=None, params=params)
+                result = await handler.execute(run=_make_run(), params=params)
 
     assert result.ok is True
 
@@ -329,7 +336,7 @@ async def test_from_run_id_invalid_json():
             with _patch_smtp_send():
                 handler = EmailSendHandler(session_factory=mock_factory)
                 params = EmailSendParams(to=["user@example.com"], subject="Digest", from_run_id=1)
-                result = await handler.execute(run=None, params=params)
+                result = await handler.execute(run=_make_run(), params=params)
 
     assert result.ok is True
 

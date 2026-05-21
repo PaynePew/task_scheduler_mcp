@@ -245,7 +245,6 @@ class LlmPolishHandler:
 
     @staticmethod
     def _get_user_id(run: Any) -> str:
-        """Extract user_id from the JobRun; fall back to 'unknown'."""
         if run is None:
             return "unknown"
-        return getattr(run, "user_id", None) or "unknown"
+        return run.user_id
