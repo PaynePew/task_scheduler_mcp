@@ -17,6 +17,10 @@ from collections.abc import AsyncIterator
 
 import psutil
 
+# Prime psutil's CPU sampler so the first real call returns a valid percentage
+# instead of the 0.0 it returns when there is no prior sample to diff against.
+psutil.cpu_percent(interval=None)
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
