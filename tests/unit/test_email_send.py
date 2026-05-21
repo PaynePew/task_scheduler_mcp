@@ -10,7 +10,6 @@ import pytest
 
 from app.actions.email_send import EmailSendHandler, EmailSendParams, EmailTemplate
 from app.actions.registry import ACTION_REGISTRY
-from app.chain.upstream_reader import InvalidJson, NoResult, Ok, UpstreamError
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -23,6 +22,19 @@ _SMTP_ENV = {
     "SMTP_PASSWORD": "secret",
     "EMAIL_FROM": "noreply@example.com",
 }
+
+
+def _make_mock_session_factory():
+    mock_session = AsyncMock()
+    mock_session.begin = MagicMock(return_value=mock_session)
+    mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_session.__aexit__ = AsyncMock(return_value=None)
+
+    mock_factory_ctx = AsyncMock()
+    mock_factory_ctx.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_factory_ctx.__aexit__ = AsyncMock(return_value=None)
+
+    return MagicMock(return_value=mock_factory_ctx)
 
 
 def _patch_smtp_send(side_effect=None):
@@ -231,32 +243,36 @@ async def test_neither_body_nor_from_run_id_fails():
 
 
 # ---------------------------------------------------------------------------
-# from_run_id — upstream variants
+# from_run_id — upstream variants via mocked resolve_for_display
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_from_run_id_ok_uses_upstream_json_as_body():
-    """from_run_id with Ok variant → email body contains upstream JSON data."""
-    data = {"summary": "5 issues closed", "prs": 2}
+    """from_run_id with Ok → resolve_for_display returns formatted string used as body."""
+    with (
+        patch(
+            "app.actions.email_send.resolve_for_display",
+            AsyncMock(return_value="Daily Digest\n\n- summary: 5 issues closed\n- prs: 2"),
+        ),
+        patch("app.db.engine.async_session_factory", _make_mock_session_factory()),
+        patch.dict("os.environ", _SMTP_ENV),
+    ):
+        captured: list[Any] = []
 
-    with patch("app.actions.email_send.read_upstream", AsyncMock(return_value=Ok(data=data))):
-        with patch.dict("os.environ", _SMTP_ENV):
-            captured: list[Any] = []
+        async def fake_send(msg, **kwargs):
+            captured.append(msg)
+            return {}, "250 OK"
 
-            async def fake_send(msg, **kwargs):
-                captured.append(msg)
-                return {}, "250 OK"
-
-            with patch("app.actions.email_send.aiosmtplib.send", fake_send):
-                handler = EmailSendHandler()
-                params = EmailSendParams(
-                    to=["user@example.com"],
-                    subject="Digest",
-                    from_run_id=42,
-                    template=EmailTemplate.digest_v1,
-                )
-                result = await handler.execute(run=_make_run(), params=params)
+        with patch("app.actions.email_send.aiosmtplib.send", fake_send):
+            handler = EmailSendHandler()
+            params = EmailSendParams(
+                to=["user@example.com"],
+                subject="Digest",
+                from_run_id=42,
+                template=EmailTemplate.digest_v1,
+            )
+            result = await handler.execute(run=_make_run(), params=params)
 
     assert result.ok is True
     assert captured
@@ -266,25 +282,29 @@ async def test_from_run_id_ok_uses_upstream_json_as_body():
 
 @pytest.mark.asyncio
 async def test_from_run_id_upstream_error_alerts_in_body():
-    """from_run_id with UpstreamError variant → email body contains error alert."""
-    payload = UpstreamError(error_msg="github API rate limited")
+    """from_run_id with UpstreamError → resolve_for_display returns error string used as body."""
+    with (
+        patch(
+            "app.actions.email_send.resolve_for_display",
+            AsyncMock(return_value="Upstream error: github API rate limited"),
+        ),
+        patch("app.db.engine.async_session_factory", _make_mock_session_factory()),
+        patch.dict("os.environ", _SMTP_ENV),
+    ):
+        captured: list[Any] = []
 
-    with patch("app.actions.email_send.read_upstream", AsyncMock(return_value=payload)):
-        with patch.dict("os.environ", _SMTP_ENV):
-            captured: list[Any] = []
+        async def fake_send(msg, **kwargs):
+            captured.append(msg)
+            return {}, "250 OK"
 
-            async def fake_send(msg, **kwargs):
-                captured.append(msg)
-                return {}, "250 OK"
-
-            with patch("app.actions.email_send.aiosmtplib.send", fake_send):
-                handler = EmailSendHandler()
-                params = EmailSendParams(
-                    to=["user@example.com"],
-                    subject="Alert",
-                    from_run_id=99,
-                )
-                result = await handler.execute(run=_make_run(), params=params)
+        with patch("app.actions.email_send.aiosmtplib.send", fake_send):
+            handler = EmailSendHandler()
+            params = EmailSendParams(
+                to=["user@example.com"],
+                subject="Alert",
+                from_run_id=99,
+            )
+            result = await handler.execute(run=_make_run(), params=params)
 
     assert result.ok is True
     assert captured
@@ -294,29 +314,38 @@ async def test_from_run_id_upstream_error_alerts_in_body():
 
 @pytest.mark.asyncio
 async def test_from_run_id_no_result():
-    """from_run_id with NoResult variant → email is still sent with placeholder body."""
-    with patch("app.actions.email_send.read_upstream", AsyncMock(return_value=NoResult())):
-        with patch.dict("os.environ", _SMTP_ENV):
-            with _patch_smtp_send():
-                handler = EmailSendHandler()
-                params = EmailSendParams(to=["user@example.com"], subject="Digest", from_run_id=1)
-                result = await handler.execute(run=_make_run(), params=params)
+    """from_run_id with NoResult → email is still sent with placeholder body."""
+    with (
+        patch(
+            "app.actions.email_send.resolve_for_display",
+            AsyncMock(return_value="Upstream error: (no result)"),
+        ),
+        patch("app.db.engine.async_session_factory", _make_mock_session_factory()),
+        patch.dict("os.environ", _SMTP_ENV),
+        _patch_smtp_send(),
+    ):
+        handler = EmailSendHandler()
+        params = EmailSendParams(to=["user@example.com"], subject="Digest", from_run_id=1)
+        result = await handler.execute(run=_make_run(), params=params)
 
     assert result.ok is True
 
 
 @pytest.mark.asyncio
 async def test_from_run_id_invalid_json():
-    """from_run_id with InvalidJson variant → email is still sent with placeholder body."""
-    with patch(
-        "app.actions.email_send.read_upstream",
-        AsyncMock(return_value=InvalidJson(raw='{"bad": }')),
+    """from_run_id with InvalidJson → email is still sent with placeholder body."""
+    with (
+        patch(
+            "app.actions.email_send.resolve_for_display",
+            AsyncMock(return_value='Upstream error: (invalid JSON: {"bad": })'),
+        ),
+        patch("app.db.engine.async_session_factory", _make_mock_session_factory()),
+        patch.dict("os.environ", _SMTP_ENV),
+        _patch_smtp_send(),
     ):
-        with patch.dict("os.environ", _SMTP_ENV):
-            with _patch_smtp_send():
-                handler = EmailSendHandler()
-                params = EmailSendParams(to=["user@example.com"], subject="Digest", from_run_id=1)
-                result = await handler.execute(run=_make_run(), params=params)
+        handler = EmailSendHandler()
+        params = EmailSendParams(to=["user@example.com"], subject="Digest", from_run_id=1)
+        result = await handler.execute(run=_make_run(), params=params)
 
     assert result.ok is True
 

@@ -18,7 +18,6 @@ from app.actions.slack_post import (
     _format_interview_brief,
     _format_raw,
 )
-from app.chain.upstream_reader import InvalidJson, NoResult, Ok, UpstreamError
 from app.connections.store import ConnectionMiss
 
 # ---------------------------------------------------------------------------
@@ -70,6 +69,24 @@ def _capture_http_post(response: httpx.Response | None = None) -> tuple[MagicMoc
     ctx.__aenter__ = AsyncMock(return_value=mock_client)
     ctx.__aexit__ = AsyncMock(return_value=None)
     return ctx, captured
+
+
+# ---------------------------------------------------------------------------
+# Helpers — session factory mock (used by chain-fed / from_run_id tests)
+# ---------------------------------------------------------------------------
+
+
+def _make_mock_session_factory():
+    mock_session = AsyncMock()
+    mock_session.begin = MagicMock(return_value=mock_session)
+    mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_session.__aexit__ = AsyncMock(return_value=None)
+
+    mock_factory_ctx = AsyncMock()
+    mock_factory_ctx.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_factory_ctx.__aexit__ = AsyncMock(return_value=None)
+
+    return MagicMock(return_value=mock_factory_ctx)
 
 
 # ---------------------------------------------------------------------------
@@ -341,17 +358,19 @@ async def test_slack_post_network_error_is_retryable():
 
 
 # ---------------------------------------------------------------------------
-# from_run_id — upstream variants via mocked read_upstream
+# from_run_id — upstream variants via mocked resolve_for_display
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_from_run_id_ok_raw_template():
-    data = {"summary": "5 issues closed"}
-
     with (
         patch("app.actions.slack_post.get_token", AsyncMock(return_value="xoxb-fake-token")),
-        patch("app.actions.slack_post.read_upstream", AsyncMock(return_value=Ok(data=data))),
+        patch(
+            "app.actions.slack_post.resolve_for_display",
+            AsyncMock(return_value="5 issues closed"),
+        ),
+        patch("app.db.engine.async_session_factory", _make_mock_session_factory()),
         _patch_http_slack(),
     ):
         handler = SlackPostHandler()
@@ -363,11 +382,13 @@ async def test_from_run_id_ok_raw_template():
 
 @pytest.mark.asyncio
 async def test_from_run_id_upstream_error_raw_template():
-    payload = UpstreamError(error_msg="upstream failed")
-
     with (
         patch("app.actions.slack_post.get_token", AsyncMock(return_value="xoxb-fake-token")),
-        patch("app.actions.slack_post.read_upstream", AsyncMock(return_value=payload)),
+        patch(
+            "app.actions.slack_post.resolve_for_display",
+            AsyncMock(return_value="⚠ Upstream error: upstream failed"),
+        ),
+        patch("app.db.engine.async_session_factory", _make_mock_session_factory()),
         _patch_http_slack(),
     ):
         handler = SlackPostHandler()
@@ -379,11 +400,13 @@ async def test_from_run_id_upstream_error_raw_template():
 
 @pytest.mark.asyncio
 async def test_from_run_id_no_result_digest_v1():
-    payload = NoResult()
-
     with (
         patch("app.actions.slack_post.get_token", AsyncMock(return_value="xoxb-fake-token")),
-        patch("app.actions.slack_post.read_upstream", AsyncMock(return_value=payload)),
+        patch(
+            "app.actions.slack_post.resolve_for_display",
+            AsyncMock(return_value="⚠ *Digest unavailable* — upstream error: (no result)"),
+        ),
+        patch("app.db.engine.async_session_factory", _make_mock_session_factory()),
         _patch_http_slack(),
     ):
         handler = SlackPostHandler()
@@ -395,11 +418,16 @@ async def test_from_run_id_no_result_digest_v1():
 
 @pytest.mark.asyncio
 async def test_from_run_id_invalid_json_interview_brief():
-    payload = InvalidJson(raw='{"bad": }')
-
+    _invalid_json_msg = (
+        '⚠ *Interview brief unavailable* — upstream error: (invalid JSON: {"bad": })'
+    )
     with (
         patch("app.actions.slack_post.get_token", AsyncMock(return_value="xoxb-fake-token")),
-        patch("app.actions.slack_post.read_upstream", AsyncMock(return_value=payload)),
+        patch(
+            "app.actions.slack_post.resolve_for_display",
+            AsyncMock(return_value=_invalid_json_msg),
+        ),
+        patch("app.db.engine.async_session_factory", _make_mock_session_factory()),
         _patch_http_slack(),
     ):
         handler = SlackPostHandler()
@@ -413,17 +441,22 @@ async def test_from_run_id_invalid_json_interview_brief():
 
 # ---------------------------------------------------------------------------
 # Template tests — each template on ok-path and error-path
+# (resolve_for_display handles variant→string dispatch; tested in
+# test_upstream_dispatch.py. Here we verify the handler forwards the result.)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_digest_v1_ok_path_formats_data():
-    data = {"PRs": 3, "Issues": 7}
     ctx, posted_payloads = _capture_http_post()
 
     with (
         patch("app.actions.slack_post.get_token", AsyncMock(return_value="xoxb-fake-token")),
-        patch("app.actions.slack_post.read_upstream", AsyncMock(return_value=Ok(data=data))),
+        patch(
+            "app.actions.slack_post.resolve_for_display",
+            AsyncMock(return_value="*Daily Digest*\n• *PRs*: 3\n• *Issues*: 7"),
+        ),
+        patch("app.db.engine.async_session_factory", _make_mock_session_factory()),
         patch("app.actions.slack_post.httpx.AsyncClient", return_value=ctx),
     ):
         handler = SlackPostHandler()
@@ -439,12 +472,15 @@ async def test_digest_v1_ok_path_formats_data():
 
 @pytest.mark.asyncio
 async def test_digest_v1_error_path_shows_warning():
-    payload = UpstreamError(error_msg="github rate limited")
     ctx, posted_payloads = _capture_http_post()
 
     with (
         patch("app.actions.slack_post.get_token", AsyncMock(return_value="xoxb-fake-token")),
-        patch("app.actions.slack_post.read_upstream", AsyncMock(return_value=payload)),
+        patch(
+            "app.actions.slack_post.resolve_for_display",
+            AsyncMock(return_value="⚠ *Digest unavailable* — upstream error: github rate limited"),
+        ),
+        patch("app.db.engine.async_session_factory", _make_mock_session_factory()),
         patch("app.actions.slack_post.httpx.AsyncClient", return_value=ctx),
     ):
         handler = SlackPostHandler()
@@ -459,12 +495,15 @@ async def test_digest_v1_error_path_shows_warning():
 
 @pytest.mark.asyncio
 async def test_interview_brief_ok_path_formats_data():
-    data = {"Candidate": "Alice", "Role": "SWE"}
     ctx, posted_payloads = _capture_http_post()
 
     with (
         patch("app.actions.slack_post.get_token", AsyncMock(return_value="xoxb-fake-token")),
-        patch("app.actions.slack_post.read_upstream", AsyncMock(return_value=Ok(data=data))),
+        patch(
+            "app.actions.slack_post.resolve_for_display",
+            AsyncMock(return_value="*Interview Brief*\n*Candidate*\nAlice\n*Role*\nSWE"),
+        ),
+        patch("app.db.engine.async_session_factory", _make_mock_session_factory()),
         patch("app.actions.slack_post.httpx.AsyncClient", return_value=ctx),
     ):
         handler = SlackPostHandler()
@@ -481,12 +520,19 @@ async def test_interview_brief_ok_path_formats_data():
 
 @pytest.mark.asyncio
 async def test_interview_brief_error_path_shows_warning():
-    payload = UpstreamError(error_msg="calendar unavailable")
     ctx, posted_payloads = _capture_http_post()
 
     with (
         patch("app.actions.slack_post.get_token", AsyncMock(return_value="xoxb-fake-token")),
-        patch("app.actions.slack_post.read_upstream", AsyncMock(return_value=payload)),
+        patch(
+            "app.actions.slack_post.resolve_for_display",
+            AsyncMock(
+                return_value=(
+                    "⚠ *Interview brief unavailable* — upstream error: calendar unavailable"
+                )
+            ),
+        ),
+        patch("app.db.engine.async_session_factory", _make_mock_session_factory()),
         patch("app.actions.slack_post.httpx.AsyncClient", return_value=ctx),
     ):
         handler = SlackPostHandler()
@@ -503,12 +549,15 @@ async def test_interview_brief_error_path_shows_warning():
 
 @pytest.mark.asyncio
 async def test_raw_ok_path():
-    data = "raw upstream text"
     ctx, posted_payloads = _capture_http_post()
 
     with (
         patch("app.actions.slack_post.get_token", AsyncMock(return_value="xoxb-fake-token")),
-        patch("app.actions.slack_post.read_upstream", AsyncMock(return_value=Ok(data=data))),
+        patch(
+            "app.actions.slack_post.resolve_for_display",
+            AsyncMock(return_value="raw upstream text"),
+        ),
+        patch("app.db.engine.async_session_factory", _make_mock_session_factory()),
         patch("app.actions.slack_post.httpx.AsyncClient", return_value=ctx),
     ):
         handler = SlackPostHandler()
@@ -522,12 +571,15 @@ async def test_raw_ok_path():
 
 @pytest.mark.asyncio
 async def test_raw_error_path():
-    payload = UpstreamError(error_msg="timeout error")
     ctx, posted_payloads = _capture_http_post()
 
     with (
         patch("app.actions.slack_post.get_token", AsyncMock(return_value="xoxb-fake-token")),
-        patch("app.actions.slack_post.read_upstream", AsyncMock(return_value=payload)),
+        patch(
+            "app.actions.slack_post.resolve_for_display",
+            AsyncMock(return_value="⚠ Upstream error: timeout error"),
+        ),
+        patch("app.db.engine.async_session_factory", _make_mock_session_factory()),
         patch("app.actions.slack_post.httpx.AsyncClient", return_value=ctx),
     ):
         handler = SlackPostHandler()
