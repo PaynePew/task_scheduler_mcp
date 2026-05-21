@@ -132,21 +132,18 @@ async def test_unknown_action_raises_unknown_action_error():
 
 
 @pytest.mark.asyncio
-async def test_gate_skipped_when_operator_user_id_not_set():
-    """When operator_user_id=None the gate is skipped (backward compat)."""
-    try:
+async def test_gate_fails_closed_when_operator_user_id_not_set():
+    """When operator_user_id=None, requires_operator actions must raise OperatorOnlyActionError."""
+    with pytest.raises(OperatorOnlyActionError) as exc_info:
         await create_job(
-            None,  # type: ignore[arg-type]
+            None,  # type: ignore[arg-type]  # gate fires before DB touch
             user_id=PUBLIC_ID,
             action="http_call",
             action_params={"method": "GET", "url": "https://example.com"},
             schedule_type="immediate",
             operator_user_id=None,
         )
-    except OperatorOnlyActionError:
-        pytest.fail("Gate must not fire when operator_user_id is None")
-    except Exception:
-        pass  # DB errors expected
+    assert "http_call" in str(exc_info.value)
 
 
 @pytest.mark.asyncio
