@@ -5,6 +5,7 @@ than reading ``os.environ`` directly elsewhere — the type-checked values surfa
 in autocomplete and missing required vars fail fast at import.
 """
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -74,6 +75,36 @@ class Settings(BaseSettings):
     workos_issuer: str | None = None
     workos_jwks_uri: str | None = None
     workos_audience: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_workos_all_or_nothing(self) -> "Settings":
+        """Enforce that WorkOS vars are either all set or all unset.
+
+        Partial config (1 or 2 of 3 set) silently degrades to trust-only mode,
+        which accepts any spoofed X-User-Id header. Fail fast instead.
+        """
+        present = {
+            name: val
+            for name, val in (
+                ("WORKOS_JWKS_URI", self.workos_jwks_uri),
+                ("WORKOS_ISSUER", self.workos_issuer),
+                ("WORKOS_AUDIENCE", self.workos_audience),
+            )
+            if val is not None
+        }
+        missing = [
+            name
+            for name in ("WORKOS_JWKS_URI", "WORKOS_ISSUER", "WORKOS_AUDIENCE")
+            if name not in present
+        ]
+        if present and missing:
+            raise ValueError(
+                f"Partial WorkOS configuration detected. "
+                f"Missing: {', '.join(missing)}. "
+                f"Either set all three (WORKOS_JWKS_URI, WORKOS_ISSUER, WORKOS_AUDIENCE) "
+                f"for auth-enabled mode, or leave all three unset for trust-only dev mode."
+            )
+        return self
 
     # Operator user identity — the operator's WorkOS sub. When set:
     #   - exempt from rate-limit and containment caps (ADR-055), and
