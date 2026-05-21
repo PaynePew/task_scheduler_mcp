@@ -134,6 +134,37 @@ The MCP server module is transport-agnostic. Two entrypoints select transport:
 - **stdio** — for Claude Desktop, MCP Inspector, subprocess clients. Reads `MCP_USER_ID` env var.
 - **Streamable HTTP** — listens on `$PORT`. Reads optional `X-User-Id` header (falling back to env var).
 
+### Bearer verify posture
+
+How this process verifies an incoming bearer token (HTTP transport only).
+Defined as a sum type in `app/auth/posture.py`; derived from `Settings` at
+startup via `bearer_posture_from_settings()` and consumed by the `mcp-server`
+HTTP entrypoint:
+
+- **`TrustOnly`** — no bearer verification. Falls back to the `X-User-Id`
+  header per the `user_id resolver`. Legal for W1–W4 (local / single-operator)
+  and for stdio transport at all times.
+- **`BearerVerified(jwks_uri, issuer, audience)`** — verifies the bearer's
+  signature against the JWKS, asserts `iss` + `aud`, returns the verified
+  subject (`sub`). The verify *mechanism* (JWKS fetch, key cache, PyJWT call)
+  lives in `validate_token()`; the posture is a record describing how to
+  call it. Vendor-agnostic name on purpose — WorkOS is the current IdP, but
+  any JWKS-verifying issuer slots into the same variant.
+
+Posture is *derived* from raw Settings, never inline. Partial config (some
+but not all of jwks_uri/issuer/audience) raises at startup — there is no
+third silent-trust-only state. This closes the silent-downgrade hole that
+required PR #169 + #171 to fix in two passes.
+
+W5 (ADR-049) adds `OAuthDelegated(...)` as a third variant; because the type
+is a sum, every `match posture` site is forced to handle the new mode at
+type-check time.
+
+Independent of `OAuthClientPosture` (the server's own OAuth client identity
+for outbound code-for-token flows in `app/web/connections.py`). Bearer verify
+answers "how do I trust callers"; OAuth client answers "how do I authenticate
+*to* WorkOS". Two posture types, two seams.
+
 ### user_id resolver
 
 A single function determines `user_id`:
