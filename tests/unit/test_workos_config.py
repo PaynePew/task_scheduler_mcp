@@ -2,8 +2,8 @@
 
 Covers all four cases:
   0 vars set  → trust-only (no error, INFO log emitted at module level)
-  1 var set   → RuntimeError at startup naming the missing vars
-  2 vars set  → RuntimeError at startup naming the missing var
+  1 var set   → ValidationError at startup naming the missing vars
+  2 vars set  → ValidationError at startup naming the missing var
   3 vars set  → auth-enabled (no error)
 """
 
