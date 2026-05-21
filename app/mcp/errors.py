@@ -1,4 +1,4 @@
-"""Maps domain exceptions to the 6-code MCP error vocabulary per ADR-014 / CONTEXT.md §6."""
+"""Maps domain exceptions to the 7-code MCP error vocabulary per ADR-014 / CONTEXT.md §6."""
 
 from __future__ import annotations
 
