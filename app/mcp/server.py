@@ -93,7 +93,7 @@ _TASK_CREATE_SCHEMA: dict[str, Any] = {
     "properties": {
         "action": {
             "type": "string",
-            "enum": ["echo"],
+            "enum": sorted(ACTION_REGISTRY.keys()),
             "description": "Name of the registered action to execute.",
         },
         "action_params": {
