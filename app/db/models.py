@@ -1,19 +1,23 @@
-"""ORM models for the three core tables (jobs, job_runs, run_events).
+"""ORM models for the core tables.
 
 See ``CONTEXT.md`` §1 (entity definitions) and ADR-009 (schema rationale).
-Three distinct tables; mixing them up is the #1 source of bugs:
+Three primary tables; mixing them up is the #1 source of bugs:
 
   Job        mutable definition       — "what should run, when, for whom"
   JobRun     one row per attempt      — claim state, retries, audit
   RunEvent   append-only outbox       — every transition, immutable
+
+Plus one accounting table:
+  LlmTokenBudget  per-user daily token spend tracker (ADR-052)
 """
 
-from datetime import datetime
+from datetime import date, datetime
 
 from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    Date,
     DateTime,
     ForeignKey,
     Index,
@@ -221,3 +225,23 @@ class OAuthConnection(Base):
         UniqueConstraint("user_id", "provider", name="uq_oauth_connections_user_provider"),
         Index("idx_oauth_connections_user_id", "user_id"),
     )
+
+
+class LlmTokenBudget(Base):
+    """Per-user daily token-spend tracker for operator-subsidized LLM actions.
+
+    Composite PK (user_id, budget_date) — one row per user per calendar day (UTC).
+    The daily budget resets naturally: yesterday's row is simply not found when
+    querying for today's date. Global monthly ceiling is computed by summing all
+    rows WHERE budget_date >= date_trunc('month', today).
+
+    See ADR-052 for cap design and enforcement order.
+    """
+
+    __tablename__ = "llm_token_budgets"
+
+    user_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    # UTC calendar date — the budget window. Rolls over at midnight UTC.
+    budget_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    tokens_used: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    updated_at: Mapped[datetime] = mapped_column(TZ, nullable=False, server_default=func.now())
