@@ -170,18 +170,14 @@ async def test_github_connect_with_client_id_redirects_to_github():
     """When GITHUB_CLIENT_ID is set, /connect redirects to github.com."""
     app = _make_app()
     transport = httpx.ASGITransport(app=app)
-    # Create token and make request inside the same settings patch so the session
-    # cookie is signed with the same secret used for validation.
+    # Sign the session cookie and serve the request under the same patched
+    # settings so the secret used to mint the token matches the one used to
+    # validate it.
     with patch("app.web.connections.settings") as mock_settings:
         mock_settings.github_client_id = "gh-client-123"
         mock_settings.connections_base_url = "http://localhost:8000"
         mock_settings.web_session_secret = "dev-secret-32-bytes-long-exactly!"
         token = _create_session_token("user-abc")
-
-    with patch("app.web.connections.settings") as mock_settings:
-        mock_settings.github_client_id = "gh-client-123"
-        mock_settings.connections_base_url = "http://localhost:8000"
-        mock_settings.web_session_secret = "dev-secret-32-bytes-long-exactly!"
         async with httpx.AsyncClient(
             transport=transport,
             base_url="http://test",
