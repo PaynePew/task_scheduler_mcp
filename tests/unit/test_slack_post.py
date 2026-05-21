@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
 
+from app.actions.base import CredentialMode
 from app.actions.registry import ACTION_REGISTRY
 from app.actions.slack_post import (
     SlackPostHandler,
@@ -18,35 +21,84 @@ from app.actions.slack_post import (
     _format_raw,
 )
 from app.chain.upstream_reader import InvalidJson, NoResult, Ok, UpstreamError
+from app.connections.store import ConnectionMiss
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 
-def _mock_http_client(status_code: int = 200, body: str = "ok") -> MagicMock:
-    """Return a mock AsyncClient context that replies with the given status."""
-    response = httpx.Response(status_code, content=body.encode())
+@dataclass
+class FakeRun:
+    user_id: str = "user-test"
+
+
+def _make_mock_session_factory(token: str = "xoxb-fake-token") -> Any:
+    """Mock session_factory + ConnectionStore returning a fake Slack token."""
+    mock_session = AsyncMock()
+    mock_session.begin = MagicMock(return_value=mock_session)
+    mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_session.__aexit__ = AsyncMock(return_value=None)
+
+    mock_factory_ctx = AsyncMock()
+    mock_factory_ctx.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_factory_ctx.__aexit__ = AsyncMock(return_value=None)
+
+    return MagicMock(return_value=mock_factory_ctx)
+
+
+def _make_mock_store(token: str = "xoxb-fake-token") -> AsyncMock:
+    mock_store = AsyncMock()
+    mock_store.get_fresh_token = AsyncMock(return_value=token)
+    return mock_store
+
+
+def _make_fake_envelope() -> MagicMock:
+    return MagicMock()
+
+
+def _make_handler(token: str = "xoxb-fake-token") -> tuple[SlackPostHandler, AsyncMock]:
+    """Build a handler with a fake session_factory and mocked ConnectionStore."""
+    factory = _make_mock_session_factory(token)
+    envelope = _make_fake_envelope()
+    handler = SlackPostHandler(session_factory=factory, kms_envelope=envelope)
+    mock_store = _make_mock_store(token)
+    return handler, mock_store
+
+
+def _make_slack_response(ok: bool = True, error: str | None = None) -> httpx.Response:
+    """Build a Slack-style JSON response (HTTP 200 with ok: bool)."""
+    body: dict[str, Any] = {"ok": ok}
+    if ok:
+        body["channel"] = "C12345"
+        body["ts"] = "1234567890.123456"
+    else:
+        body["error"] = error or "unknown"
+    import json as _json
+
+    return httpx.Response(200, content=_json.dumps(body).encode())
+
+
+def _patch_http_slack(response: httpx.Response | None = None):
+    if response is None:
+        response = _make_slack_response(ok=True)
     mock_client = AsyncMock()
     mock_client.post = AsyncMock(return_value=response)
     ctx = MagicMock()
     ctx.__aenter__ = AsyncMock(return_value=mock_client)
     ctx.__aexit__ = AsyncMock(return_value=None)
-    return ctx
-
-
-def _patch_http(status_code: int = 200, body: str = "ok"):
-    ctx = _mock_http_client(status_code, body)
     return patch("app.actions.slack_post.httpx.AsyncClient", return_value=ctx)
 
 
-def _capture_http_post(status_code: int = 200) -> tuple[MagicMock, list[dict]]:
+def _capture_http_post(response: httpx.Response | None = None) -> tuple[MagicMock, list[dict]]:
     """Return (AsyncClient ctx, captured_payloads list) — appends each POST JSON body."""
+    if response is None:
+        response = _make_slack_response(ok=True)
     captured: list[dict] = []
 
     async def fake_post(url: str, **kwargs: object) -> httpx.Response:
         captured.append(kwargs.get("json", {}))
-        return httpx.Response(status_code, content=b"ok")
+        return response
 
     mock_client = AsyncMock()
     mock_client.post = fake_post
@@ -109,114 +161,216 @@ class TestInterviewBriefTemplate:
 
 
 # ---------------------------------------------------------------------------
-# SlackPostHandler — happy POST
+# Handler metadata
+# ---------------------------------------------------------------------------
+
+
+def test_handler_credential_mode_is_oauth_connection():
+    assert SlackPostHandler.credential_mode == CredentialMode.oauth_connection
+
+
+def test_handler_required_provider_is_slack():
+    assert SlackPostHandler.required_provider == "slack"
+
+
+def test_handler_not_operator_only():
+    assert SlackPostHandler.requires_operator is False
+
+
+# ---------------------------------------------------------------------------
+# SlackPostHandler — missing user_id
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_slack_post_no_user_id_returns_error():
+    handler = SlackPostHandler()
+    params = SlackPostParams(channel="#general", message="hello")
+    result = await handler.execute(run=None, params=params)
+
+    assert result.ok is False
+    assert result.retryable is False
+    assert "user_id" in (result.error or "")
+
+
+# ---------------------------------------------------------------------------
+# SlackPostHandler — KMS not configured
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_slack_post_no_kms_returns_error():
+    handler = SlackPostHandler(kms_envelope=None)
+    params = SlackPostParams(channel="#general", message="hello")
+    run = FakeRun()
+
+    with patch("app.actions.slack_post._make_default_kms_envelope", return_value=None):
+        result = await handler.execute(run=run, params=params)
+
+    assert result.ok is False
+    assert result.retryable is False
+    assert "KMS" in (result.error or "")
+
+
+# ---------------------------------------------------------------------------
+# SlackPostHandler — ConnectionMiss → error with connect_url
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_slack_post_connection_miss_returns_connect_url():
+    handler, _ = _make_handler()
+    params = SlackPostParams(channel="#general", message="hello")
+    run = FakeRun()
+
+    with patch(
+        "app.actions.slack_post.ConnectionStore.get_fresh_token",
+        new=AsyncMock(side_effect=ConnectionMiss("user-test", "slack")),
+    ):
+        result = await handler.execute(run=run, params=params)
+
+    assert result.ok is False
+    assert result.retryable is False
+    assert "connect" in (result.error or "").lower() or "/connections" in (result.error or "")
+
+
+# ---------------------------------------------------------------------------
+# SlackPostHandler — happy path POST via chat.postMessage
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_slack_post_200_ok():
-    handler = SlackPostHandler()
+    handler, mock_store = _make_handler()
     params = SlackPostParams(channel="#general", message="hello")
+    run = FakeRun()
 
-    with patch.dict("os.environ", {"SLACK_WEBHOOK_URL": "https://hooks.slack.com/test"}):
-        with _patch_http(200, "ok"):
-            result = await handler.execute(run=None, params=params)
+    with (
+        patch("app.actions.slack_post.ConnectionStore", return_value=mock_store),
+        _patch_http_slack(_make_slack_response(ok=True)),
+    ):
+        result = await handler.execute(run=run, params=params)
 
     assert result.ok is True
     assert result.retryable is False
     assert result.error is None
     assert result.result is not None
-    assert result.result["status_code"] == 200
-
-
-# ---------------------------------------------------------------------------
-# Error classification
-# ---------------------------------------------------------------------------
+    assert result.result["channel"] == "C12345"
 
 
 @pytest.mark.asyncio
-async def test_slack_post_429_is_retryable():
-    handler = SlackPostHandler()
-    params = SlackPostParams(channel="#c", message="m")
+async def test_slack_post_uses_bearer_token():
+    """chat.postMessage is called with Authorization: Bearer <token>."""
+    handler, mock_store = _make_handler("xoxb-my-real-token")
+    params = SlackPostParams(channel="#c", message="hi")
+    run = FakeRun()
 
-    with patch.dict("os.environ", {"SLACK_WEBHOOK_URL": "https://hooks.slack.com/test"}):
-        with _patch_http(429, "rate limited"):
-            result = await handler.execute(run=None, params=params)
+    captured_headers: list[dict] = []
 
+    async def fake_post(url: str, **kwargs: object) -> httpx.Response:
+        captured_headers.append(dict(kwargs.get("headers", {})))
+        return _make_slack_response(ok=True)
+
+    mock_client = AsyncMock()
+    mock_client.post = fake_post
+    ctx = MagicMock()
+    ctx.__aenter__ = AsyncMock(return_value=mock_client)
+    ctx.__aexit__ = AsyncMock(return_value=None)
+
+    with (
+        patch("app.actions.slack_post.ConnectionStore", return_value=mock_store),
+        patch("app.actions.slack_post.httpx.AsyncClient", return_value=ctx),
+    ):
+        result = await handler.execute(run=run, params=params)
+
+    assert result.ok is True
+    assert captured_headers
+    assert captured_headers[0].get("Authorization") == "Bearer xoxb-my-real-token"
+
+
+# ---------------------------------------------------------------------------
+# Error classification — HTTP-level errors
+# ---------------------------------------------------------------------------
+
+
+def test_slack_post_http_429_is_retryable():
+    result = SlackPostHandler._classify_response(httpx.Response(429, content=b"rate limited"))
     assert result.ok is False
     assert result.retryable is True
     assert "429" in (result.error or "")
 
 
-@pytest.mark.asyncio
-async def test_slack_post_401_not_retryable():
-    handler = SlackPostHandler()
-    params = SlackPostParams(channel="#c", message="m")
-
-    with patch.dict("os.environ", {"SLACK_WEBHOOK_URL": "https://hooks.slack.com/test"}):
-        with _patch_http(401, "unauthorized"):
-            result = await handler.execute(run=None, params=params)
-
-    assert result.ok is False
-    assert result.retryable is False
-
-
-@pytest.mark.asyncio
-async def test_slack_post_403_not_retryable():
-    handler = SlackPostHandler()
-    params = SlackPostParams(channel="#c", message="m")
-
-    with patch.dict("os.environ", {"SLACK_WEBHOOK_URL": "https://hooks.slack.com/test"}):
-        with _patch_http(403, "forbidden"):
-            result = await handler.execute(run=None, params=params)
-
-    assert result.ok is False
-    assert result.retryable is False
-
-
-@pytest.mark.asyncio
-async def test_slack_post_404_not_retryable():
-    handler = SlackPostHandler()
-    params = SlackPostParams(channel="#c", message="m")
-
-    with patch.dict("os.environ", {"SLACK_WEBHOOK_URL": "https://hooks.slack.com/test"}):
-        with _patch_http(404, "not found"):
-            result = await handler.execute(run=None, params=params)
-
-    assert result.ok is False
-    assert result.retryable is False
-
-
-@pytest.mark.asyncio
-async def test_slack_post_410_not_retryable():
-    handler = SlackPostHandler()
-    params = SlackPostParams(channel="#c", message="m")
-
-    with patch.dict("os.environ", {"SLACK_WEBHOOK_URL": "https://hooks.slack.com/test"}):
-        with _patch_http(410, "gone"):
-            result = await handler.execute(run=None, params=params)
-
-    assert result.ok is False
-    assert result.retryable is False
-
-
-@pytest.mark.asyncio
-async def test_slack_post_500_is_retryable():
-    handler = SlackPostHandler()
-    params = SlackPostParams(channel="#c", message="m")
-
-    with patch.dict("os.environ", {"SLACK_WEBHOOK_URL": "https://hooks.slack.com/test"}):
-        with _patch_http(500, "server error"):
-            result = await handler.execute(run=None, params=params)
-
+def test_slack_post_http_500_is_retryable():
+    result = SlackPostHandler._classify_response(httpx.Response(500, content=b"error"))
     assert result.ok is False
     assert result.retryable is True
 
 
+# ---------------------------------------------------------------------------
+# Error classification — Slack JSON-level errors (HTTP 200)
+# ---------------------------------------------------------------------------
+
+
+def test_classify_response_ok_true():
+    import json
+
+    body = {"ok": True, "channel": "C1", "ts": "123.456"}
+    resp = httpx.Response(200, content=json.dumps(body).encode())
+    result = SlackPostHandler._classify_response(resp)
+    assert result.ok is True
+    assert result.result["channel"] == "C1"
+    assert result.result["ts"] == "123.456"
+
+
+def test_classify_response_invalid_auth_not_retryable():
+    resp = _make_slack_response(ok=False, error="invalid_auth")
+    result = SlackPostHandler._classify_response(resp)
+    assert result.ok is False
+    assert result.retryable is False
+    assert "invalid_auth" in (result.error or "")
+
+
+def test_classify_response_token_revoked_not_retryable():
+    result = SlackPostHandler._classify_response(
+        _make_slack_response(ok=False, error="token_revoked")
+    )
+    assert result.ok is False
+    assert result.retryable is False
+
+
+def test_classify_response_channel_not_found_not_retryable():
+    result = SlackPostHandler._classify_response(
+        _make_slack_response(ok=False, error="channel_not_found")
+    )
+    assert result.ok is False
+    assert result.retryable is False
+
+
+def test_classify_response_ratelimited_is_retryable():
+    result = SlackPostHandler._classify_response(
+        _make_slack_response(ok=False, error="ratelimited")
+    )
+    assert result.ok is False
+    assert result.retryable is True
+
+
+def test_classify_response_non_json_not_retryable():
+    resp = httpx.Response(200, content=b"not-json-!!")
+    result = SlackPostHandler._classify_response(resp)
+    assert result.ok is False
+    assert result.retryable is False
+
+
+# ---------------------------------------------------------------------------
+# Network / timeout errors
+# ---------------------------------------------------------------------------
+
+
 @pytest.mark.asyncio
 async def test_slack_post_timeout_is_retryable():
-    handler = SlackPostHandler()
+    handler, mock_store = _make_handler()
     params = SlackPostParams(channel="#c", message="m")
+    run = FakeRun()
 
     mock_client = AsyncMock()
     mock_client.post = AsyncMock(side_effect=httpx.TimeoutException("timed out"))
@@ -224,9 +378,11 @@ async def test_slack_post_timeout_is_retryable():
     ctx.__aenter__ = AsyncMock(return_value=mock_client)
     ctx.__aexit__ = AsyncMock(return_value=None)
 
-    with patch.dict("os.environ", {"SLACK_WEBHOOK_URL": "https://hooks.slack.com/test"}):
-        with patch("app.actions.slack_post.httpx.AsyncClient", return_value=ctx):
-            result = await handler.execute(run=None, params=params)
+    with (
+        patch("app.actions.slack_post.ConnectionStore", return_value=mock_store),
+        patch("app.actions.slack_post.httpx.AsyncClient", return_value=ctx),
+    ):
+        result = await handler.execute(run=run, params=params)
 
     assert result.ok is False
     assert result.retryable is True
@@ -235,8 +391,9 @@ async def test_slack_post_timeout_is_retryable():
 
 @pytest.mark.asyncio
 async def test_slack_post_network_error_is_retryable():
-    handler = SlackPostHandler()
+    handler, mock_store = _make_handler()
     params = SlackPostParams(channel="#c", message="m")
+    run = FakeRun()
 
     mock_client = AsyncMock()
     mock_client.post = AsyncMock(side_effect=httpx.ConnectError("connection refused"))
@@ -244,63 +401,14 @@ async def test_slack_post_network_error_is_retryable():
     ctx.__aenter__ = AsyncMock(return_value=mock_client)
     ctx.__aexit__ = AsyncMock(return_value=None)
 
-    with patch.dict("os.environ", {"SLACK_WEBHOOK_URL": "https://hooks.slack.com/test"}):
-        with patch("app.actions.slack_post.httpx.AsyncClient", return_value=ctx):
-            result = await handler.execute(run=None, params=params)
+    with (
+        patch("app.actions.slack_post.ConnectionStore", return_value=mock_store),
+        patch("app.actions.slack_post.httpx.AsyncClient", return_value=ctx),
+    ):
+        result = await handler.execute(run=run, params=params)
 
     assert result.ok is False
     assert result.retryable is True
-
-
-# ---------------------------------------------------------------------------
-# SLACK_WEBHOOK_URL missing
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_slack_post_missing_webhook_url_fails():
-    handler = SlackPostHandler()
-    params = SlackPostParams(channel="#c", message="m")
-
-    env = {k: v for k, v in __import__("os").environ.items() if k != "SLACK_WEBHOOK_URL"}
-    with patch.dict("os.environ", env, clear=True):
-        result = await handler.execute(run=None, params=params)
-
-    assert result.ok is False
-    assert result.retryable is False
-    assert "SLACK_WEBHOOK_URL" in (result.error or "")
-
-
-# ---------------------------------------------------------------------------
-# Secrets resolution in execute()
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_slack_post_resolves_webhook_url_via_env():
-    """SLACK_WEBHOOK_URL in env is used as the POST target."""
-    handler = SlackPostHandler()
-    params = SlackPostParams(channel="#c", message="hello")
-
-    captured_url: list[str] = []
-
-    async def fake_post(url: str, **kwargs: object) -> httpx.Response:
-        captured_url.append(url)
-        return httpx.Response(200, content=b"ok")
-
-    mock_client = AsyncMock()
-    mock_client.post = fake_post
-    ctx = MagicMock()
-    ctx.__aenter__ = AsyncMock(return_value=mock_client)
-    ctx.__aexit__ = AsyncMock(return_value=None)
-
-    webhook = "https://hooks.slack.com/services/T000/B000/xxx"
-    with patch.dict("os.environ", {"SLACK_WEBHOOK_URL": webhook}):
-        with patch("app.actions.slack_post.httpx.AsyncClient", return_value=ctx):
-            result = await handler.execute(run=None, params=params)
-
-    assert result.ok is True
-    assert captured_url == [webhook]
 
 
 # ---------------------------------------------------------------------------
@@ -308,36 +416,39 @@ async def test_slack_post_resolves_webhook_url_via_env():
 # ---------------------------------------------------------------------------
 
 
-def _make_mock_session_factory() -> Any:
-    """Mock async_session_factory whose session no-ops .begin() / context exit.
-
-    The handler reads upstream via ``read_upstream``, which each test patches
-    separately — this helper only needs to satisfy the ``async with factory()``
-    and ``async with session.begin()`` shape.
-    """
+def _make_upstream_session_factory() -> Any:
+    """Mock session_factory for upstream reading (session.begin() needed)."""
     mock_session = AsyncMock()
     mock_session.begin = MagicMock(return_value=mock_session)
     mock_session.__aenter__ = AsyncMock(return_value=mock_session)
     mock_session.__aexit__ = AsyncMock(return_value=None)
 
-    mock_factory_ctx = AsyncMock()
-    mock_factory_ctx.__aenter__ = AsyncMock(return_value=mock_session)
-    mock_factory_ctx.__aexit__ = AsyncMock(return_value=None)
+    # Two separate session contexts needed: one for connection store, one for upstream
+    call_count = {"n": 0}
 
-    return MagicMock(return_value=mock_factory_ctx)
+    @asynccontextmanager
+    async def _factory():
+        call_count["n"] += 1
+        yield mock_session
+
+    return _factory
 
 
 @pytest.mark.asyncio
 async def test_from_run_id_ok_raw_template():
     data = {"summary": "5 issues closed"}
-    mock_factory = _make_mock_session_factory()
+    factory = _make_upstream_session_factory()
+    envelope = _make_fake_envelope()
+    mock_store = _make_mock_store()
 
-    with patch("app.actions.slack_post.read_upstream", AsyncMock(return_value=Ok(data=data))):
-        with patch.dict("os.environ", {"SLACK_WEBHOOK_URL": "https://hooks.slack.com/test"}):
-            with _patch_http(200):
-                handler = SlackPostHandler(session_factory=mock_factory)
-                params = SlackPostParams(channel="#c", from_run_id=42, template=SlackTemplate.raw)
-                result = await handler.execute(run=None, params=params)
+    with (
+        patch("app.actions.slack_post.ConnectionStore", return_value=mock_store),
+        patch("app.actions.slack_post.read_upstream", AsyncMock(return_value=Ok(data=data))),
+        _patch_http_slack(),
+    ):
+        handler = SlackPostHandler(session_factory=factory, kms_envelope=envelope)
+        params = SlackPostParams(channel="#c", from_run_id=42, template=SlackTemplate.raw)
+        result = await handler.execute(run=FakeRun(), params=params)
 
     assert result.ok is True
 
@@ -345,14 +456,18 @@ async def test_from_run_id_ok_raw_template():
 @pytest.mark.asyncio
 async def test_from_run_id_upstream_error_raw_template():
     payload = UpstreamError(error_msg="upstream failed")
-    mock_factory = _make_mock_session_factory()
+    factory = _make_upstream_session_factory()
+    envelope = _make_fake_envelope()
+    mock_store = _make_mock_store()
 
-    with patch("app.actions.slack_post.read_upstream", AsyncMock(return_value=payload)):
-        with patch.dict("os.environ", {"SLACK_WEBHOOK_URL": "https://hooks.slack.com/test"}):
-            with _patch_http(200):
-                handler = SlackPostHandler(session_factory=mock_factory)
-                params = SlackPostParams(channel="#c", from_run_id=42, template=SlackTemplate.raw)
-                result = await handler.execute(run=None, params=params)
+    with (
+        patch("app.actions.slack_post.ConnectionStore", return_value=mock_store),
+        patch("app.actions.slack_post.read_upstream", AsyncMock(return_value=payload)),
+        _patch_http_slack(),
+    ):
+        handler = SlackPostHandler(session_factory=factory, kms_envelope=envelope)
+        params = SlackPostParams(channel="#c", from_run_id=42, template=SlackTemplate.raw)
+        result = await handler.execute(run=FakeRun(), params=params)
 
     assert result.ok is True  # POST succeeded even with error-path formatting
 
@@ -360,16 +475,18 @@ async def test_from_run_id_upstream_error_raw_template():
 @pytest.mark.asyncio
 async def test_from_run_id_no_result_digest_v1():
     payload = NoResult()
-    mock_factory = _make_mock_session_factory()
+    factory = _make_upstream_session_factory()
+    envelope = _make_fake_envelope()
+    mock_store = _make_mock_store()
 
-    with patch("app.actions.slack_post.read_upstream", AsyncMock(return_value=payload)):
-        with patch.dict("os.environ", {"SLACK_WEBHOOK_URL": "https://hooks.slack.com/test"}):
-            with _patch_http(200):
-                handler = SlackPostHandler(session_factory=mock_factory)
-                params = SlackPostParams(
-                    channel="#c", from_run_id=42, template=SlackTemplate.digest_v1
-                )
-                result = await handler.execute(run=None, params=params)
+    with (
+        patch("app.actions.slack_post.ConnectionStore", return_value=mock_store),
+        patch("app.actions.slack_post.read_upstream", AsyncMock(return_value=payload)),
+        _patch_http_slack(),
+    ):
+        handler = SlackPostHandler(session_factory=factory, kms_envelope=envelope)
+        params = SlackPostParams(channel="#c", from_run_id=42, template=SlackTemplate.digest_v1)
+        result = await handler.execute(run=FakeRun(), params=params)
 
     assert result.ok is True
 
@@ -377,16 +494,20 @@ async def test_from_run_id_no_result_digest_v1():
 @pytest.mark.asyncio
 async def test_from_run_id_invalid_json_interview_brief():
     payload = InvalidJson(raw='{"bad": }')
-    mock_factory = _make_mock_session_factory()
+    factory = _make_upstream_session_factory()
+    envelope = _make_fake_envelope()
+    mock_store = _make_mock_store()
 
-    with patch("app.actions.slack_post.read_upstream", AsyncMock(return_value=payload)):
-        with patch.dict("os.environ", {"SLACK_WEBHOOK_URL": "https://hooks.slack.com/test"}):
-            with _patch_http(200):
-                handler = SlackPostHandler(session_factory=mock_factory)
-                params = SlackPostParams(
-                    channel="#c", from_run_id=42, template=SlackTemplate.interview_brief
-                )
-                result = await handler.execute(run=None, params=params)
+    with (
+        patch("app.actions.slack_post.ConnectionStore", return_value=mock_store),
+        patch("app.actions.slack_post.read_upstream", AsyncMock(return_value=payload)),
+        _patch_http_slack(),
+    ):
+        handler = SlackPostHandler(session_factory=factory, kms_envelope=envelope)
+        params = SlackPostParams(
+            channel="#c", from_run_id=42, template=SlackTemplate.interview_brief
+        )
+        result = await handler.execute(run=FakeRun(), params=params)
 
     assert result.ok is True
 
@@ -399,17 +520,19 @@ async def test_from_run_id_invalid_json_interview_brief():
 @pytest.mark.asyncio
 async def test_digest_v1_ok_path_formats_data():
     data = {"PRs": 3, "Issues": 7}
-    mock_factory = _make_mock_session_factory()
+    factory = _make_upstream_session_factory()
+    envelope = _make_fake_envelope()
+    mock_store = _make_mock_store()
     ctx, posted_payloads = _capture_http_post()
 
-    with patch("app.actions.slack_post.read_upstream", AsyncMock(return_value=Ok(data=data))):
-        with patch.dict("os.environ", {"SLACK_WEBHOOK_URL": "https://hooks.slack.com/test"}):
-            with patch("app.actions.slack_post.httpx.AsyncClient", return_value=ctx):
-                handler = SlackPostHandler(session_factory=mock_factory)
-                params = SlackPostParams(
-                    channel="#c", from_run_id=1, template=SlackTemplate.digest_v1
-                )
-                result = await handler.execute(run=None, params=params)
+    with (
+        patch("app.actions.slack_post.ConnectionStore", return_value=mock_store),
+        patch("app.actions.slack_post.read_upstream", AsyncMock(return_value=Ok(data=data))),
+        patch("app.actions.slack_post.httpx.AsyncClient", return_value=ctx),
+    ):
+        handler = SlackPostHandler(session_factory=factory, kms_envelope=envelope)
+        params = SlackPostParams(channel="#c", from_run_id=1, template=SlackTemplate.digest_v1)
+        result = await handler.execute(run=FakeRun(), params=params)
 
     assert result.ok is True
     assert posted_payloads
@@ -421,17 +544,19 @@ async def test_digest_v1_ok_path_formats_data():
 @pytest.mark.asyncio
 async def test_digest_v1_error_path_shows_warning():
     payload = UpstreamError(error_msg="github rate limited")
-    mock_factory = _make_mock_session_factory()
+    factory = _make_upstream_session_factory()
+    envelope = _make_fake_envelope()
+    mock_store = _make_mock_store()
     ctx, posted_payloads = _capture_http_post()
 
-    with patch("app.actions.slack_post.read_upstream", AsyncMock(return_value=payload)):
-        with patch.dict("os.environ", {"SLACK_WEBHOOK_URL": "https://hooks.slack.com/test"}):
-            with patch("app.actions.slack_post.httpx.AsyncClient", return_value=ctx):
-                handler = SlackPostHandler(session_factory=mock_factory)
-                params = SlackPostParams(
-                    channel="#c", from_run_id=1, template=SlackTemplate.digest_v1
-                )
-                result = await handler.execute(run=None, params=params)
+    with (
+        patch("app.actions.slack_post.ConnectionStore", return_value=mock_store),
+        patch("app.actions.slack_post.read_upstream", AsyncMock(return_value=payload)),
+        patch("app.actions.slack_post.httpx.AsyncClient", return_value=ctx),
+    ):
+        handler = SlackPostHandler(session_factory=factory, kms_envelope=envelope)
+        params = SlackPostParams(channel="#c", from_run_id=1, template=SlackTemplate.digest_v1)
+        result = await handler.execute(run=FakeRun(), params=params)
 
     assert result.ok is True
     text = posted_payloads[0]["text"]
@@ -442,17 +567,21 @@ async def test_digest_v1_error_path_shows_warning():
 @pytest.mark.asyncio
 async def test_interview_brief_ok_path_formats_data():
     data = {"Candidate": "Alice", "Role": "SWE"}
-    mock_factory = _make_mock_session_factory()
+    factory = _make_upstream_session_factory()
+    envelope = _make_fake_envelope()
+    mock_store = _make_mock_store()
     ctx, posted_payloads = _capture_http_post()
 
-    with patch("app.actions.slack_post.read_upstream", AsyncMock(return_value=Ok(data=data))):
-        with patch.dict("os.environ", {"SLACK_WEBHOOK_URL": "https://hooks.slack.com/test"}):
-            with patch("app.actions.slack_post.httpx.AsyncClient", return_value=ctx):
-                handler = SlackPostHandler(session_factory=mock_factory)
-                params = SlackPostParams(
-                    channel="#c", from_run_id=1, template=SlackTemplate.interview_brief
-                )
-                result = await handler.execute(run=None, params=params)
+    with (
+        patch("app.actions.slack_post.ConnectionStore", return_value=mock_store),
+        patch("app.actions.slack_post.read_upstream", AsyncMock(return_value=Ok(data=data))),
+        patch("app.actions.slack_post.httpx.AsyncClient", return_value=ctx),
+    ):
+        handler = SlackPostHandler(session_factory=factory, kms_envelope=envelope)
+        params = SlackPostParams(
+            channel="#c", from_run_id=1, template=SlackTemplate.interview_brief
+        )
+        result = await handler.execute(run=FakeRun(), params=params)
 
     assert result.ok is True
     text = posted_payloads[0]["text"]
@@ -463,17 +592,21 @@ async def test_interview_brief_ok_path_formats_data():
 @pytest.mark.asyncio
 async def test_interview_brief_error_path_shows_warning():
     payload = UpstreamError(error_msg="calendar unavailable")
-    mock_factory = _make_mock_session_factory()
+    factory = _make_upstream_session_factory()
+    envelope = _make_fake_envelope()
+    mock_store = _make_mock_store()
     ctx, posted_payloads = _capture_http_post()
 
-    with patch("app.actions.slack_post.read_upstream", AsyncMock(return_value=payload)):
-        with patch.dict("os.environ", {"SLACK_WEBHOOK_URL": "https://hooks.slack.com/test"}):
-            with patch("app.actions.slack_post.httpx.AsyncClient", return_value=ctx):
-                handler = SlackPostHandler(session_factory=mock_factory)
-                params = SlackPostParams(
-                    channel="#c", from_run_id=1, template=SlackTemplate.interview_brief
-                )
-                result = await handler.execute(run=None, params=params)
+    with (
+        patch("app.actions.slack_post.ConnectionStore", return_value=mock_store),
+        patch("app.actions.slack_post.read_upstream", AsyncMock(return_value=payload)),
+        patch("app.actions.slack_post.httpx.AsyncClient", return_value=ctx),
+    ):
+        handler = SlackPostHandler(session_factory=factory, kms_envelope=envelope)
+        params = SlackPostParams(
+            channel="#c", from_run_id=1, template=SlackTemplate.interview_brief
+        )
+        result = await handler.execute(run=FakeRun(), params=params)
 
     assert result.ok is True
     text = posted_payloads[0]["text"]
@@ -484,15 +617,19 @@ async def test_interview_brief_error_path_shows_warning():
 @pytest.mark.asyncio
 async def test_raw_ok_path():
     data = "raw upstream text"
-    mock_factory = _make_mock_session_factory()
+    factory = _make_upstream_session_factory()
+    envelope = _make_fake_envelope()
+    mock_store = _make_mock_store()
     ctx, posted_payloads = _capture_http_post()
 
-    with patch("app.actions.slack_post.read_upstream", AsyncMock(return_value=Ok(data=data))):
-        with patch.dict("os.environ", {"SLACK_WEBHOOK_URL": "https://hooks.slack.com/test"}):
-            with patch("app.actions.slack_post.httpx.AsyncClient", return_value=ctx):
-                handler = SlackPostHandler(session_factory=mock_factory)
-                params = SlackPostParams(channel="#c", from_run_id=1, template=SlackTemplate.raw)
-                result = await handler.execute(run=None, params=params)
+    with (
+        patch("app.actions.slack_post.ConnectionStore", return_value=mock_store),
+        patch("app.actions.slack_post.read_upstream", AsyncMock(return_value=Ok(data=data))),
+        patch("app.actions.slack_post.httpx.AsyncClient", return_value=ctx),
+    ):
+        handler = SlackPostHandler(session_factory=factory, kms_envelope=envelope)
+        params = SlackPostParams(channel="#c", from_run_id=1, template=SlackTemplate.raw)
+        result = await handler.execute(run=FakeRun(), params=params)
 
     assert result.ok is True
     text = posted_payloads[0]["text"]
@@ -502,20 +639,43 @@ async def test_raw_ok_path():
 @pytest.mark.asyncio
 async def test_raw_error_path():
     payload = UpstreamError(error_msg="timeout error")
-    mock_factory = _make_mock_session_factory()
+    factory = _make_upstream_session_factory()
+    envelope = _make_fake_envelope()
+    mock_store = _make_mock_store()
     ctx, posted_payloads = _capture_http_post()
 
-    with patch("app.actions.slack_post.read_upstream", AsyncMock(return_value=payload)):
-        with patch.dict("os.environ", {"SLACK_WEBHOOK_URL": "https://hooks.slack.com/test"}):
-            with patch("app.actions.slack_post.httpx.AsyncClient", return_value=ctx):
-                handler = SlackPostHandler(session_factory=mock_factory)
-                params = SlackPostParams(channel="#c", from_run_id=1, template=SlackTemplate.raw)
-                result = await handler.execute(run=None, params=params)
+    with (
+        patch("app.actions.slack_post.ConnectionStore", return_value=mock_store),
+        patch("app.actions.slack_post.read_upstream", AsyncMock(return_value=payload)),
+        patch("app.actions.slack_post.httpx.AsyncClient", return_value=ctx),
+    ):
+        handler = SlackPostHandler(session_factory=factory, kms_envelope=envelope)
+        params = SlackPostParams(channel="#c", from_run_id=1, template=SlackTemplate.raw)
+        result = await handler.execute(run=FakeRun(), params=params)
 
     assert result.ok is True
     text = posted_payloads[0]["text"]
     assert "⚠" in text
     assert "timeout error" in text
+
+
+# ---------------------------------------------------------------------------
+# Neither message nor from_run_id
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_slack_post_no_message_no_from_run_id_fails():
+    handler, mock_store = _make_handler()
+    params = SlackPostParams(channel="#c")
+    run = FakeRun()
+
+    with patch("app.actions.slack_post.ConnectionStore", return_value=mock_store):
+        result = await handler.execute(run=run, params=params)
+
+    assert result.ok is False
+    assert result.retryable is False
+    assert "message" in (result.error or "").lower() or "from_run_id" in (result.error or "")
 
 
 # ---------------------------------------------------------------------------
