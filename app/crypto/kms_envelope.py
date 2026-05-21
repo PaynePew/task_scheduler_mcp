@@ -22,12 +22,9 @@ from __future__ import annotations
 import base64
 import json
 import os
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-
-if TYPE_CHECKING:
-    pass
 
 _VERSION = 1
 _NONCE_BYTES = 12  # 96-bit nonce for AES-GCM (NIST recommended)
