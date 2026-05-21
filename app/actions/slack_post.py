@@ -317,7 +317,10 @@ class SlackPostHandler:
         # Slack Web API returns HTTP 200 with ok: bool in JSON
         try:
             body = response.json()
-        except Exception:
+        except ValueError:
+            # httpx raises json.JSONDecodeError (a ValueError subclass) for
+            # non-JSON bodies. Treat as a permanent failure — the response
+            # bytes are not Slack's API contract.
             return ActionResult(
                 ok=False,
                 result=None,
