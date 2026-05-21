@@ -151,6 +151,11 @@ class Settings(BaseSettings):
     github_client_id: str | None = None
     github_client_secret: str | None = None
 
+    # Slack OAuth app credentials (ADR-058, issue #139).
+    # Required for the Slack "Connect" flow on the /connections dashboard.
+    slack_client_id: str | None = None
+    slack_client_secret: str | None = None
+
     # Google OAuth app credentials (ADR-058).
     # Required for the Google "Connect" flow (Gmail send scope) on /connections.
     google_client_id: str | None = None

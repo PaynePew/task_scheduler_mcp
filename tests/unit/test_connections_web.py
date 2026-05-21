@@ -359,3 +359,228 @@ async def test_task_create_no_kms_skips_connection_check():
         result = await _check_oauth_connection("github_digest", "user-abc", _factory)
 
     assert result is None
+
+
+# ---------------------------------------------------------------------------
+# /connections dashboard shows Slack row
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_connections_dashboard_shows_slack():
+    """Authenticated user sees a Slack row in the connections dashboard."""
+    app = _make_app()
+    token = _create_session_token("user-abc")
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://test",
+        cookies={"session": token},
+        follow_redirects=False,
+    ) as client:
+        with patch("app.web.connections._make_kms_envelope", return_value=None):
+            resp = await client.get("/connections")
+
+    assert resp.status_code == 200
+    assert "Slack" in resp.text
+    assert "GitHub" in resp.text
+
+
+# ---------------------------------------------------------------------------
+# /connections/slack/connect
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_slack_connect_requires_session():
+    app = _make_app()
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://test", follow_redirects=False
+    ) as client:
+        resp = await client.get("/connections/slack/connect")
+
+    assert resp.status_code == 302
+    assert "login" in resp.headers["location"]
+
+
+@pytest.mark.asyncio
+async def test_slack_connect_without_client_id_returns_503():
+    """When SLACK_CLIENT_ID is not set, the connect endpoint returns 503."""
+    app = _make_app()
+    token = _create_session_token("user-abc")
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://test",
+        cookies={"session": token},
+        follow_redirects=False,
+    ) as client:
+        # slack_client_id is None by default
+        resp = await client.get("/connections/slack/connect")
+
+    assert resp.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_slack_connect_with_client_id_redirects_to_slack():
+    """When SLACK_CLIENT_ID is set, /connect redirects to slack.com."""
+    app = _make_app()
+    transport = httpx.ASGITransport(app=app)
+    with patch("app.web.connections.settings") as mock_settings:
+        mock_settings.slack_client_id = "slack-client-123"
+        mock_settings.connections_base_url = "http://localhost:8000"
+        mock_settings.web_session_secret = "dev-secret-32-bytes-long-exactly!"
+        token = _create_session_token("user-abc")
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+            cookies={"session": token},
+            follow_redirects=False,
+        ) as client:
+            resp = await client.get("/connections/slack/connect")
+
+    assert resp.status_code == 302
+    assert "slack.com/oauth/v2/authorize" in resp.headers["location"]
+    assert "slack-client-123" in resp.headers["location"]
+
+
+# ---------------------------------------------------------------------------
+# /connections/slack/callback (fake OAuth callback stores connection)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_slack_callback_stores_connection():
+    """Simulates the Slack OAuth callback with a fake code.
+
+    The real Slack token exchange is mocked so no network calls are made.
+    """
+    factory, fake_session = _make_test_session_factory()
+    app = _make_app(session_factory=factory)
+    token = _create_session_token("user-abc")
+    transport = httpx.ASGITransport(app=app)
+
+    fake_token_data = {
+        "ok": True,
+        "access_token": "xoxb-fake-token",
+        "scope": "chat:write",
+        "token_type": "bot",
+    }
+    fake_envelope = MagicMock()
+
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://test",
+        cookies={"session": token},
+        follow_redirects=False,
+    ) as client:
+        with (
+            patch("app.web.connections._make_kms_envelope", return_value=fake_envelope),
+            patch(
+                "app.web.connections._exchange_slack_code",
+                new=AsyncMock(return_value=fake_token_data),
+            ),
+            patch("app.web.connections.ConnectionStore") as mock_store_class,
+        ):
+            mock_store = AsyncMock()
+            mock_store.upsert = AsyncMock()
+            mock_store_class.return_value = mock_store
+            fake_session.commit = AsyncMock()
+
+            resp = await client.get(
+                "/connections/slack/callback", params={"code": "fake-code", "state": ""}
+            )
+
+    assert resp.status_code == 302
+    assert resp.headers["location"] == "/connections"
+    mock_store.upsert.assert_called_once_with("user-abc", "slack", fake_token_data)
+
+
+@pytest.mark.asyncio
+async def test_slack_callback_requires_session():
+    app = _make_app()
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://test", follow_redirects=False
+    ) as client:
+        resp = await client.get("/connections/slack/callback", params={"code": "fake-code"})
+
+    assert resp.status_code == 302
+    assert "login" in resp.headers["location"]
+
+
+# ---------------------------------------------------------------------------
+# /connections/slack/disconnect
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_slack_disconnect_removes_connection():
+    factory, fake_session = _make_test_session_factory()
+    app = _make_app(session_factory=factory)
+    token = _create_session_token("user-abc")
+    transport = httpx.ASGITransport(app=app)
+    fake_envelope = MagicMock()
+
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://test",
+        cookies={"session": token},
+        follow_redirects=False,
+    ) as client:
+        with (
+            patch("app.web.connections._make_kms_envelope", return_value=fake_envelope),
+            patch("app.web.connections.ConnectionStore") as mock_store_class,
+        ):
+            mock_store = AsyncMock()
+            mock_store.get_fresh_token = AsyncMock(return_value="xoxb-token")
+            mock_store.delete = AsyncMock()
+            mock_store_class.return_value = mock_store
+            fake_session.commit = AsyncMock()
+
+            resp = await client.post("/connections/slack/disconnect")
+
+    assert resp.status_code == 302
+    mock_store.delete.assert_called_once_with("user-abc", "slack")
+
+
+# ---------------------------------------------------------------------------
+# task.create with slack_post + no Slack connection → connect_url
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_task_create_slack_post_no_connection_returns_connect_url():
+    """When user has no Slack connection, task.create returns MISSING_CONNECTION
+    with a connect_url field."""
+    from contextlib import asynccontextmanager
+    from unittest.mock import AsyncMock, MagicMock
+
+    from app.connections.store import ConnectionMiss
+    from app.crypto.kms_envelope import KmsEnvelope
+    from app.mcp.server import _check_oauth_connection
+
+    fake_session = MagicMock()
+
+    @asynccontextmanager
+    async def _factory():
+        yield fake_session
+
+    fake_envelope = MagicMock(spec=KmsEnvelope)
+
+    with (
+        patch("app.mcp.server._make_server_kms_envelope", return_value=fake_envelope),
+        patch("app.mcp.server.ConnectionStore") as mock_store_class,
+    ):
+        mock_store = AsyncMock()
+        mock_store.get_fresh_token = AsyncMock(side_effect=ConnectionMiss("user-abc", "slack"))
+        mock_store_class.return_value = mock_store
+
+        result = await _check_oauth_connection("slack_post", "user-abc", _factory)
+
+    assert result is not None
+    assert result["ok"] is False
+    assert result["error"]["code"] == "MISSING_CONNECTION"
+    assert "connect_url" in result["error"]
+    assert "/connections" in result["error"]["connect_url"]

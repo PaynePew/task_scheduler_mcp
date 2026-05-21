@@ -1,9 +1,14 @@
-"""slack_post action handler — posts to a Slack incoming webhook.
+"""slack_post action handler — posts to a Slack channel via the Web API.
 
-Secrets convention (ADR-032): the webhook URL is read from ``SLACK_WEBHOOK_URL``
-environment variable. It is NEVER stored in ``action_params``. Callers may pass
-``${SLACK_WEBHOOK_URL}`` as a template reference in other string params; the
-secrets resolver expands it before network I/O.
+Credential resolution (ADR-050, ADR-051):
+  credential_mode = oauth_connection — resolves the Slack bot token from the
+  connection store keyed by (job.user_id, "slack").  The session_factory and
+  kms_envelope are injected at construction time; defaults to module-level singletons.
+
+If the user has no Slack connection:
+  - execute() returns ok=False, retryable=False with a descriptive error + connect_url.
+  - task.create pre-flight also checks and returns an error with connect_url
+    (handled in app.mcp.server, not here).
 
 Chain-fed mode (ADR-033): set ``from_run_id`` to consume a prior handler's
 ``JobRun.result`` as the message body. The upstream payload is dispatched via
@@ -16,30 +21,22 @@ Templates:
     interview_brief — formats upstream dict as key/value brief sections
 
 Error classification:
-    429            → retryable (Slack rate limit)
-    401/403/404/410 → not retryable (auth / channel error → DLQ)
-    5xx            → retryable (Slack server error)
-    timeout / network → retryable
-
-Manual smoke test::
-
-    SLACK_WEBHOOK_URL=<your-webhook-url> uv run python -c "
-    import asyncio
-    from app.actions.slack_post import SlackPostHandler, SlackPostParams
-    p = SlackPostParams(channel='#general', message='Hello from slack_post smoke test')
-    r = asyncio.run(SlackPostHandler().execute(run=None, params=p))
-    print(r)"
+    HTTP 429             → retryable (rate limit)
+    HTTP 5xx             → retryable (Slack server error)
+    ok=false error=ratelimited → retryable
+    ok=false (other)     → not retryable (auth / channel / message error)
+    timeout / network    → retryable
 """
 
 from __future__ import annotations
 
-import os
 from collections.abc import Callable
 from enum import StrEnum
 from typing import Any, ClassVar
 
 import httpx
 from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.actions.base import ActionResult, CredentialMode
 from app.chain.upstream_reader import (
@@ -49,12 +46,25 @@ from app.chain.upstream_reader import (
     UpstreamError,
     read_upstream,
 )
-from app.secrets.resolver import SecretResolutionError, build_effective_whitelist, resolve
+from app.connections.store import ConnectionMiss, ConnectionStore
+from app.crypto.kms_envelope import KmsEnvelope
 
-# 429: rate-limited → retry.  401/403/404/410: permanent auth/channel error → DLQ.
-# 5xx: Slack-side error → retry. DLQ statuses fall through to retryable=False
-# since they are not in this set; no explicit DLQ set is needed.
-_RETRYABLE_STATUSES: frozenset[int] = frozenset([429, *range(500, 600)])
+_SLACK_API_BASE = "https://slack.com/api"
+
+_NON_RETRYABLE_SLACK_ERRORS: frozenset[str] = frozenset(
+    [
+        "invalid_auth",
+        "token_revoked",
+        "not_authed",
+        "account_inactive",
+        "channel_not_found",
+        "not_in_channel",
+        "is_archived",
+        "message_too_long",
+        "no_text",
+        "invalid_blocks",
+    ]
+)
 
 
 class SlackTemplate(StrEnum):
@@ -111,74 +121,130 @@ _TEMPLATE_FORMATTERS: dict[SlackTemplate, Callable[..., str]] = {
 
 
 # ---------------------------------------------------------------------------
+# KMS envelope factory
+# ---------------------------------------------------------------------------
+
+
+def _make_default_kms_envelope() -> KmsEnvelope | None:
+    """Build KmsEnvelope from settings, or None if KMS is not configured."""
+    from app.config.settings import settings  # noqa: PLC0415
+
+    if not settings.kms_key_id:
+        return None
+    import boto3  # noqa: PLC0415
+
+    client = boto3.client(
+        "kms",
+        region_name=settings.kms_region,
+        aws_access_key_id=settings.aws_access_key_id,
+        aws_secret_access_key=settings.aws_secret_access_key,
+    )
+    return KmsEnvelope(kms_client=client, key_id=settings.kms_key_id)
+
+
+# ---------------------------------------------------------------------------
 # Handler
 # ---------------------------------------------------------------------------
 
 
 class SlackPostHandler:
-    """Posts a message to a Slack channel via incoming webhook.
+    """Posts a message to a Slack channel via the Slack Web API.
 
-    Pass *session_factory* to override the default DB session factory — useful
-    in tests that need to inject a pre-seeded session without touching the real
-    engine pool.
+    Resolves the bot token from the connection store keyed by (run.user_id, "slack").
+    Pass *session_factory* and *kms_envelope* to override module-level defaults —
+    useful in tests that need to inject pre-seeded sessions without touching the
+    real engine pool or real AWS KMS.
     """
 
     name: ClassVar[str] = "slack_post"
     description: ClassVar[str] = (
-        "Posts a message to a Slack channel via incoming webhook. "
-        "Set SLACK_WEBHOOK_URL in the server environment. "
+        "Posts a message to a Slack channel using your connected Slack workspace. "
+        "Connect your Slack account at /connections. "
         "Use from_run_id to chain from a prior handler's output. "
         "Templates: raw (default), digest_v1, interview_brief."
     )
     params_model: ClassVar[type[BaseModel]] = SlackPostParams
     timeout_seconds: ClassVar[int] = 30
     requires_operator: ClassVar[bool] = False
-    credential_mode: ClassVar[CredentialMode] = CredentialMode.operator_env
+    credential_mode: ClassVar[CredentialMode] = CredentialMode.oauth_connection
+    required_provider: ClassVar[str] = "slack"
 
-    def __init__(self, session_factory: Any = None) -> None:
+    def __init__(
+        self,
+        session_factory: async_sessionmaker | None = None,
+        kms_envelope: KmsEnvelope | None = None,
+    ) -> None:
         self._session_factory = session_factory
+        self._kms_envelope = kms_envelope
 
-    def _get_session_factory(self) -> Any:
+    def _get_session_factory(self) -> async_sessionmaker:
         if self._session_factory is not None:
             return self._session_factory
-        from app.db.engine import async_session_factory
+        from app.db.engine import async_session_factory  # noqa: PLC0415
 
         return async_session_factory
 
-    async def execute(self, run: Any, params: SlackPostParams) -> ActionResult:
-        # Resolve any ${VAR} references (secrets convention, ADR-032).
-        whitelist = build_effective_whitelist()
-        env = dict(os.environ)
-        try:
-            resolved_channel = resolve(params.channel, env, whitelist)
-            resolved_message = (
-                resolve(params.message, env, whitelist) if params.message is not None else None
-            )
-        except SecretResolutionError as exc:
-            return ActionResult(ok=False, result=None, error=str(exc), retryable=False)
+    def _get_kms_envelope(self) -> KmsEnvelope | None:
+        if self._kms_envelope is not None:
+            return self._kms_envelope
+        return _make_default_kms_envelope()
 
-        # Webhook URL comes from env — never from action_params.
-        webhook_url = os.environ.get("SLACK_WEBHOOK_URL")
-        if not webhook_url:
+    async def execute(self, run: Any, params: SlackPostParams) -> ActionResult:
+        # Resolve user_id from the JobRun (denormalized column, ADR-059).
+        user_id: str | None = getattr(run, "user_id", None)
+        if not user_id:
             return ActionResult(
                 ok=False,
                 result=None,
-                error="SLACK_WEBHOOK_URL environment variable is not set",
+                error="slack_post: no user_id on run — cannot resolve Slack connection",
                 retryable=False,
             )
 
-        message_text = await self._build_message(
-            params=params,
-            resolved_message=resolved_message,
-        )
+        # Look up the Slack token from the connection store.
+        envelope = self._get_kms_envelope()
+        if envelope is None:
+            return ActionResult(
+                ok=False,
+                result=None,
+                error=(
+                    "slack_post: KMS not configured — cannot decrypt Slack connection. "
+                    "Set KMS_KEY_ID in environment."
+                ),
+                retryable=False,
+            )
+
+        factory = self._get_session_factory()
+        try:
+            async with factory() as session:
+                store = ConnectionStore(session, envelope)
+                token = await store.get_fresh_token(user_id, "slack")
+        except ConnectionMiss:
+            from app.config.settings import settings  # noqa: PLC0415
+
+            connect_url = f"{settings.connections_base_url}/connections"
+            return ActionResult(
+                ok=False,
+                result=None,
+                error=(
+                    f"No Slack connection for this user. "
+                    f"Connect your Slack workspace at {connect_url}"
+                ),
+                retryable=False,
+            )
+
+        message_text = await self._build_message(params=params)
         if isinstance(message_text, ActionResult):
             return message_text
 
-        payload = {"text": message_text, "channel": resolved_channel}
+        payload = {"channel": params.channel, "text": message_text}
 
         try:
             async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
-                response = await client.post(webhook_url, json=payload)
+                response = await client.post(
+                    f"{_SLACK_API_BASE}/chat.postMessage",
+                    headers={"Authorization": f"Bearer {token}"},
+                    json=payload,
+                )
         except httpx.TimeoutException as exc:
             return ActionResult(ok=False, result=None, error=f"Timeout: {exc}", retryable=True)
         except httpx.RequestError as exc:
@@ -186,19 +252,15 @@ class SlackPostHandler:
 
         return self._classify_response(response)
 
-    async def _build_message(
-        self,
-        params: SlackPostParams,
-        resolved_message: str | None,
-    ) -> str | ActionResult:
+    async def _build_message(self, params: SlackPostParams) -> str | ActionResult:
         template = params.template or SlackTemplate.raw
         formatter = _TEMPLATE_FORMATTERS[template]
 
         if params.from_run_id is not None:
             return await self._message_from_upstream(params.from_run_id, formatter)
 
-        if resolved_message is not None:
-            return resolved_message
+        if params.message is not None:
+            return params.message
 
         return ActionResult(
             ok=False,
@@ -229,21 +291,59 @@ class SlackPostHandler:
 
     @staticmethod
     def _classify_response(response: httpx.Response) -> ActionResult:
-        status = response.status_code
-        body = response.text[:200]
+        # HTTP-level rate limit / server error
+        if response.status_code == 429:
+            return ActionResult(
+                ok=False,
+                result=None,
+                error="Slack rate-limited (HTTP 429)",
+                retryable=True,
+            )
+        if response.status_code >= 500:
+            return ActionResult(
+                ok=False,
+                result=None,
+                error=f"Slack server error (HTTP {response.status_code})",
+                retryable=True,
+            )
+        if not response.is_success:
+            return ActionResult(
+                ok=False,
+                result=None,
+                error=f"Slack API HTTP {response.status_code}",
+                retryable=False,
+            )
 
-        if response.is_success:
+        # Slack Web API returns HTTP 200 with ok: bool in JSON
+        try:
+            body = response.json()
+        except ValueError:
+            # httpx raises json.JSONDecodeError (a ValueError subclass) for
+            # non-JSON bodies. Treat as a permanent failure — the response
+            # bytes are not Slack's API contract.
+            return ActionResult(
+                ok=False,
+                result=None,
+                error="Slack API returned non-JSON response",
+                retryable=False,
+            )
+
+        if body.get("ok"):
             return ActionResult(
                 ok=True,
-                result={"status_code": status, "body": body},
+                result={"channel": body.get("channel"), "ts": body.get("ts")},
                 error=None,
                 retryable=False,
             )
 
-        retryable = status in _RETRYABLE_STATUSES
+        error_code = body.get("error", "unknown")
+        # "ratelimited" is the only known retryable error code; any other unknown
+        # error_code also falls through to retryable so transient Slack issues
+        # we haven't catalogued get another attempt.
+        retryable = error_code not in _NON_RETRYABLE_SLACK_ERRORS
         return ActionResult(
             ok=False,
             result=None,
-            error=f"Slack webhook returned HTTP {status}: {body}",
+            error=f"Slack API error: {error_code}",
             retryable=retryable,
         )
