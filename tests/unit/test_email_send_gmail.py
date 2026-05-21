@@ -4,14 +4,12 @@ Exercises:
   - Operator path: routes to SMTP (no Google connection needed)
   - Public path: routes to Gmail API using Google OAuth token
   - Public path without Google connection → non-retryable error
-  - Public path KMS not configured → non-retryable error
   - Gmail API error classifications (401, 403, 429, 5xx)
   - Registry: email_send is public, oauth_connection, provider=google
 """
 
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -30,18 +28,6 @@ from app.connections.store import ConnectionMiss
 @dataclass
 class FakeRun:
     user_id: str = "user-abc"
-
-
-def _make_handler() -> EmailSendHandler:
-    """Build EmailSendHandler with injected fakes."""
-    fake_session = MagicMock()
-
-    @asynccontextmanager
-    async def _fake_factory():
-        yield fake_session
-
-    mock_envelope = MagicMock()
-    return EmailSendHandler(session_factory=_fake_factory, kms_envelope=mock_envelope)
 
 
 def _build_mock_http_client(response: httpx.Response) -> MagicMock:
@@ -79,7 +65,7 @@ def test_email_send_is_public_oauth():
 @pytest.mark.asyncio
 async def test_operator_routes_to_smtp():
     """When operator_user_id is set and run.user_id matches, SMTP path is used."""
-    handler = _make_handler()
+    handler = EmailSendHandler()
     params = EmailSendParams(to=["dest@example.com"], subject="Hello", body="World")
     run = FakeRun(user_id="operator-uid")
 
@@ -109,7 +95,7 @@ async def test_operator_routes_to_smtp():
 
 @pytest.mark.asyncio
 async def test_operator_smtp_missing_host_returns_error():
-    handler = _make_handler()
+    handler = EmailSendHandler()
     params = EmailSendParams(to=["dest@example.com"], subject="Hello", body="World")
     run = FakeRun(user_id="operator-uid")
 
@@ -133,7 +119,7 @@ async def test_operator_smtp_missing_host_returns_error():
 @pytest.mark.asyncio
 async def test_public_user_routes_to_gmail():
     """When user is not operator, Gmail API path is used."""
-    handler = _make_handler()
+    handler = EmailSendHandler()
     params = EmailSendParams(to=["dest@example.com"], subject="Test", body="Body text")
     run = FakeRun(user_id="user-abc")
 
@@ -141,7 +127,10 @@ async def test_public_user_routes_to_gmail():
 
     with (
         patch("app.actions.email_send.settings") as mock_settings,
-        patch("app.actions.email_send.ConnectionStore") as mock_store_class,
+        patch(
+            "app.actions.email_send.get_token",
+            AsyncMock(return_value="ya29.fake-token"),
+        ),
         patch(
             "app.actions.email_send.httpx.AsyncClient",
             return_value=_build_mock_http_client(success_resp),
@@ -149,9 +138,6 @@ async def test_public_user_routes_to_gmail():
     ):
         mock_settings.operator_user_id = "operator-uid"
         mock_settings.connections_base_url = "http://localhost:8000"
-        mock_store = AsyncMock()
-        mock_store.get_fresh_token = AsyncMock(return_value="ya29.fake-token")
-        mock_store_class.return_value = mock_store
 
         result = await handler.execute(run=run, params=params)
 
@@ -164,51 +150,25 @@ async def test_public_user_routes_to_gmail():
 @pytest.mark.asyncio
 async def test_public_user_no_google_connection_returns_error():
     """Public user with no Google connection gets a non-retryable error."""
-    handler = _make_handler()
+    handler = EmailSendHandler()
     params = EmailSendParams(to=["dest@example.com"], subject="Test", body="Body")
     run = FakeRun(user_id="user-abc")
 
     with (
         patch("app.actions.email_send.settings") as mock_settings,
-        patch("app.actions.email_send.ConnectionStore") as mock_store_class,
+        patch(
+            "app.actions.email_send.get_token",
+            AsyncMock(side_effect=ConnectionMiss("user-abc", "google")),
+        ),
     ):
         mock_settings.operator_user_id = "operator-uid"
         mock_settings.connections_base_url = "http://localhost:8000"
-        mock_store = AsyncMock()
-        mock_store.get_fresh_token = AsyncMock(side_effect=ConnectionMiss("user-abc", "google"))
-        mock_store_class.return_value = mock_store
 
         result = await handler.execute(run=run, params=params)
 
     assert result.ok is False
     assert result.retryable is False
     assert "google" in (result.error or "").lower()
-
-
-@pytest.mark.asyncio
-async def test_public_user_no_kms_returns_error():
-    """Public user with KMS unconfigured gets a clear error."""
-    fake_session = MagicMock()
-
-    @asynccontextmanager
-    async def _fake_factory():
-        yield fake_session
-
-    # No kms_envelope injected → _get_kms_envelope returns None
-    handler = EmailSendHandler(session_factory=_fake_factory, kms_envelope=None)
-    params = EmailSendParams(to=["dest@example.com"], subject="Test", body="Body")
-    run = FakeRun(user_id="user-abc")
-
-    with (
-        patch("app.actions.email_send.settings") as mock_settings,
-        patch("app.actions.email_send._make_default_kms_envelope", return_value=None),
-    ):
-        mock_settings.operator_user_id = "operator-uid"
-        result = await handler.execute(run=run, params=params)
-
-    assert result.ok is False
-    assert result.retryable is False
-    assert "KMS" in (result.error or "")
 
 
 # ---------------------------------------------------------------------------
@@ -218,7 +178,7 @@ async def test_public_user_no_kms_returns_error():
 
 @pytest.mark.asyncio
 async def test_gmail_401_is_dlq():
-    handler = _make_handler()
+    handler = EmailSendHandler()
     params = EmailSendParams(to=["dest@example.com"], subject="Test", body="Body")
     run = FakeRun(user_id="user-abc")
 
@@ -226,7 +186,10 @@ async def test_gmail_401_is_dlq():
 
     with (
         patch("app.actions.email_send.settings") as mock_settings,
-        patch("app.actions.email_send.ConnectionStore") as mock_store_class,
+        patch(
+            "app.actions.email_send.get_token",
+            AsyncMock(return_value="ya29.fake-token"),
+        ),
         patch(
             "app.actions.email_send.httpx.AsyncClient",
             return_value=_build_mock_http_client(resp),
@@ -234,9 +197,6 @@ async def test_gmail_401_is_dlq():
     ):
         mock_settings.operator_user_id = "operator-uid"
         mock_settings.connections_base_url = "http://localhost:8000"
-        mock_store = AsyncMock()
-        mock_store.get_fresh_token = AsyncMock(return_value="ya29.fake-token")
-        mock_store_class.return_value = mock_store
 
         result = await handler.execute(run=run, params=params)
 
@@ -247,7 +207,7 @@ async def test_gmail_401_is_dlq():
 
 @pytest.mark.asyncio
 async def test_gmail_403_is_dlq():
-    handler = _make_handler()
+    handler = EmailSendHandler()
     params = EmailSendParams(to=["dest@example.com"], subject="Test", body="Body")
     run = FakeRun(user_id="user-abc")
 
@@ -255,7 +215,10 @@ async def test_gmail_403_is_dlq():
 
     with (
         patch("app.actions.email_send.settings") as mock_settings,
-        patch("app.actions.email_send.ConnectionStore") as mock_store_class,
+        patch(
+            "app.actions.email_send.get_token",
+            AsyncMock(return_value="ya29.fake-token"),
+        ),
         patch(
             "app.actions.email_send.httpx.AsyncClient",
             return_value=_build_mock_http_client(resp),
@@ -263,9 +226,6 @@ async def test_gmail_403_is_dlq():
     ):
         mock_settings.operator_user_id = "operator-uid"
         mock_settings.connections_base_url = "http://localhost:8000"
-        mock_store = AsyncMock()
-        mock_store.get_fresh_token = AsyncMock(return_value="ya29.fake-token")
-        mock_store_class.return_value = mock_store
 
         result = await handler.execute(run=run, params=params)
 
@@ -276,7 +236,7 @@ async def test_gmail_403_is_dlq():
 
 @pytest.mark.asyncio
 async def test_gmail_429_is_retryable():
-    handler = _make_handler()
+    handler = EmailSendHandler()
     params = EmailSendParams(to=["dest@example.com"], subject="Test", body="Body")
     run = FakeRun(user_id="user-abc")
 
@@ -284,7 +244,10 @@ async def test_gmail_429_is_retryable():
 
     with (
         patch("app.actions.email_send.settings") as mock_settings,
-        patch("app.actions.email_send.ConnectionStore") as mock_store_class,
+        patch(
+            "app.actions.email_send.get_token",
+            AsyncMock(return_value="ya29.fake-token"),
+        ),
         patch(
             "app.actions.email_send.httpx.AsyncClient",
             return_value=_build_mock_http_client(resp),
@@ -292,9 +255,6 @@ async def test_gmail_429_is_retryable():
     ):
         mock_settings.operator_user_id = "operator-uid"
         mock_settings.connections_base_url = "http://localhost:8000"
-        mock_store = AsyncMock()
-        mock_store.get_fresh_token = AsyncMock(return_value="ya29.fake-token")
-        mock_store_class.return_value = mock_store
 
         result = await handler.execute(run=run, params=params)
 
@@ -304,7 +264,7 @@ async def test_gmail_429_is_retryable():
 
 @pytest.mark.asyncio
 async def test_gmail_500_is_retryable():
-    handler = _make_handler()
+    handler = EmailSendHandler()
     params = EmailSendParams(to=["dest@example.com"], subject="Test", body="Body")
     run = FakeRun(user_id="user-abc")
 
@@ -312,7 +272,10 @@ async def test_gmail_500_is_retryable():
 
     with (
         patch("app.actions.email_send.settings") as mock_settings,
-        patch("app.actions.email_send.ConnectionStore") as mock_store_class,
+        patch(
+            "app.actions.email_send.get_token",
+            AsyncMock(return_value="ya29.fake-token"),
+        ),
         patch(
             "app.actions.email_send.httpx.AsyncClient",
             return_value=_build_mock_http_client(resp),
@@ -320,9 +283,6 @@ async def test_gmail_500_is_retryable():
     ):
         mock_settings.operator_user_id = "operator-uid"
         mock_settings.connections_base_url = "http://localhost:8000"
-        mock_store = AsyncMock()
-        mock_store.get_fresh_token = AsyncMock(return_value="ya29.fake-token")
-        mock_store_class.return_value = mock_store
 
         result = await handler.execute(run=run, params=params)
 
@@ -332,7 +292,7 @@ async def test_gmail_500_is_retryable():
 
 @pytest.mark.asyncio
 async def test_gmail_network_error_is_retryable():
-    handler = _make_handler()
+    handler = EmailSendHandler()
     params = EmailSendParams(to=["dest@example.com"], subject="Test", body="Body")
     run = FakeRun(user_id="user-abc")
 
@@ -344,14 +304,14 @@ async def test_gmail_network_error_is_retryable():
 
     with (
         patch("app.actions.email_send.settings") as mock_settings,
-        patch("app.actions.email_send.ConnectionStore") as mock_store_class,
+        patch(
+            "app.actions.email_send.get_token",
+            AsyncMock(return_value="ya29.fake-token"),
+        ),
         patch("app.actions.email_send.httpx.AsyncClient", return_value=ctx),
     ):
         mock_settings.operator_user_id = "operator-uid"
         mock_settings.connections_base_url = "http://localhost:8000"
-        mock_store = AsyncMock()
-        mock_store.get_fresh_token = AsyncMock(return_value="ya29.fake-token")
-        mock_store_class.return_value = mock_store
 
         result = await handler.execute(run=run, params=params)
 
@@ -367,7 +327,7 @@ async def test_gmail_network_error_is_retryable():
 @pytest.mark.asyncio
 async def test_no_operator_user_id_set_routes_to_smtp():
     """When operator_user_id is None (dev mode), SMTP path is used regardless of user."""
-    handler = _make_handler()
+    handler = EmailSendHandler()
     params = EmailSendParams(to=["dest@example.com"], subject="Hello", body="World")
     run = FakeRun(user_id="some-public-user")
 

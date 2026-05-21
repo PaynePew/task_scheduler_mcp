@@ -216,7 +216,7 @@ class ConnectionStore:
 async def get_token(
     user_id: str,
     provider: str,
-    refresher: TokenRefresher,
+    refresher: TokenRefresher | None,
     *,
     session_factory: Any = None,
     envelope: KmsEnvelope | None = None,
@@ -225,6 +225,9 @@ async def get_token(
 
     Opens a session from *session_factory* (defaults to the module-level engine
     pool), constructs a ConnectionStore, and delegates to get_fresh_token.
+
+    Pass *refresher=None* for providers without a refresh flow (e.g. Slack bot
+    tokens, GitHub fine-grained PATs) — the stored token is returned as-is.
 
     Pass *session_factory* and *envelope* to override the module-level defaults
     — useful in tests that need to inject pre-seeded sessions without touching

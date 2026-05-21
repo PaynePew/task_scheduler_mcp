@@ -35,20 +35,6 @@ def _patch_smtp_send(side_effect=None):
     )
 
 
-def _make_mock_session_factory() -> Any:
-    """Return a mock async_session_factory suitable for from_run_id tests."""
-    mock_session = AsyncMock()
-    mock_session.begin = MagicMock(return_value=mock_session)
-    mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-    mock_session.__aexit__ = AsyncMock(return_value=None)
-
-    mock_factory_ctx = AsyncMock()
-    mock_factory_ctx.__aenter__ = AsyncMock(return_value=mock_session)
-    mock_factory_ctx.__aexit__ = AsyncMock(return_value=None)
-
-    return MagicMock(return_value=mock_factory_ctx)
-
-
 def _make_run(user_id: str = "operator-id") -> Any:
     """Minimal run stub with a user_id attribute."""
     run = MagicMock()
@@ -253,7 +239,6 @@ async def test_neither_body_nor_from_run_id_fails():
 async def test_from_run_id_ok_uses_upstream_json_as_body():
     """from_run_id with Ok variant → email body contains upstream JSON data."""
     data = {"summary": "5 issues closed", "prs": 2}
-    mock_factory = _make_mock_session_factory()
 
     with patch("app.actions.email_send.read_upstream", AsyncMock(return_value=Ok(data=data))):
         with patch.dict("os.environ", _SMTP_ENV):
@@ -264,7 +249,7 @@ async def test_from_run_id_ok_uses_upstream_json_as_body():
                 return {}, "250 OK"
 
             with patch("app.actions.email_send.aiosmtplib.send", fake_send):
-                handler = EmailSendHandler(session_factory=mock_factory)
+                handler = EmailSendHandler()
                 params = EmailSendParams(
                     to=["user@example.com"],
                     subject="Digest",
@@ -283,7 +268,6 @@ async def test_from_run_id_ok_uses_upstream_json_as_body():
 async def test_from_run_id_upstream_error_alerts_in_body():
     """from_run_id with UpstreamError variant → email body contains error alert."""
     payload = UpstreamError(error_msg="github API rate limited")
-    mock_factory = _make_mock_session_factory()
 
     with patch("app.actions.email_send.read_upstream", AsyncMock(return_value=payload)):
         with patch.dict("os.environ", _SMTP_ENV):
@@ -294,7 +278,7 @@ async def test_from_run_id_upstream_error_alerts_in_body():
                 return {}, "250 OK"
 
             with patch("app.actions.email_send.aiosmtplib.send", fake_send):
-                handler = EmailSendHandler(session_factory=mock_factory)
+                handler = EmailSendHandler()
                 params = EmailSendParams(
                     to=["user@example.com"],
                     subject="Alert",
@@ -311,12 +295,10 @@ async def test_from_run_id_upstream_error_alerts_in_body():
 @pytest.mark.asyncio
 async def test_from_run_id_no_result():
     """from_run_id with NoResult variant → email is still sent with placeholder body."""
-    mock_factory = _make_mock_session_factory()
-
     with patch("app.actions.email_send.read_upstream", AsyncMock(return_value=NoResult())):
         with patch.dict("os.environ", _SMTP_ENV):
             with _patch_smtp_send():
-                handler = EmailSendHandler(session_factory=mock_factory)
+                handler = EmailSendHandler()
                 params = EmailSendParams(to=["user@example.com"], subject="Digest", from_run_id=1)
                 result = await handler.execute(run=_make_run(), params=params)
 
@@ -326,15 +308,13 @@ async def test_from_run_id_no_result():
 @pytest.mark.asyncio
 async def test_from_run_id_invalid_json():
     """from_run_id with InvalidJson variant → email is still sent with placeholder body."""
-    mock_factory = _make_mock_session_factory()
-
     with patch(
         "app.actions.email_send.read_upstream",
         AsyncMock(return_value=InvalidJson(raw='{"bad": }')),
     ):
         with patch.dict("os.environ", _SMTP_ENV):
             with _patch_smtp_send():
-                handler = EmailSendHandler(session_factory=mock_factory)
+                handler = EmailSendHandler()
                 params = EmailSendParams(to=["user@example.com"], subject="Digest", from_run_id=1)
                 result = await handler.execute(run=_make_run(), params=params)
 
