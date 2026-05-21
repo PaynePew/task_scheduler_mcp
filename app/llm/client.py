@@ -53,7 +53,7 @@ class LLMClientError(Exception):
 class LLMClient:
     """Thin httpx wrapper around the OpenAI Chat Completions API.
 
-    Pass *_http_client* to override the real httpx client in tests — the
+    Pass *http_client* to override the real httpx client in tests — the
     injected client's ``post`` method is called with the same kwargs.
     """
 
