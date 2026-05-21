@@ -550,8 +550,6 @@ async def _exchange_google_code(code: str, redirect_uri: str) -> dict[str, Any]:
     Computes ``expires_at`` from ``expires_in`` so the connection store can
     check the refresh window without decrypting the blob.
     """
-    from datetime import UTC, datetime, timedelta  # noqa: PLC0415
-
     async with httpx.AsyncClient(timeout=15) as client:
         resp = await client.post(
             _GOOGLE_TOKEN_URL,
