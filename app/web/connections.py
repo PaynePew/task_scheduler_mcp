@@ -43,7 +43,7 @@ from starlette.routing import Route
 from app.auth.token_validation import TokenValidationError, validate_token
 from app.config.settings import settings
 from app.connections.store import ConnectionMiss, ConnectionStore
-from app.crypto.kms_envelope import KmsEnvelope
+from app.crypto.envelope_factory import kms_envelope_from_settings as _make_kms_envelope
 from app.db.identity import resolve_user_id_stdio
 
 logger = logging.getLogger(__name__)
@@ -99,26 +99,6 @@ def _set_session(response: Response, user_id: str) -> None:
         max_age=int(_SESSION_TTL.total_seconds()),
         secure=settings.connections_base_url.startswith("https://"),
     )
-
-
-# ---------------------------------------------------------------------------
-# KMS envelope factory
-# ---------------------------------------------------------------------------
-
-
-def _make_kms_envelope() -> KmsEnvelope | None:
-    """Create KmsEnvelope from settings, or None if KMS is not configured."""
-    if not settings.kms_key_id:
-        return None
-    import boto3  # noqa: PLC0415
-
-    client = boto3.client(
-        "kms",
-        region_name=settings.kms_region,
-        aws_access_key_id=settings.aws_access_key_id,
-        aws_secret_access_key=settings.aws_secret_access_key,
-    )
-    return KmsEnvelope(kms_client=client, key_id=settings.kms_key_id)
 
 
 # ---------------------------------------------------------------------------

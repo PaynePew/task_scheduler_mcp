@@ -53,6 +53,7 @@ from app.chain.upstream_reader import (
 )
 from app.config.settings import settings
 from app.connections.store import ConnectionMiss, ConnectionStore
+from app.crypto.envelope_factory import kms_envelope_from_settings as _make_default_kms_envelope
 from app.crypto.kms_envelope import KmsEnvelope
 from app.secrets.resolver import SecretResolutionError, build_effective_whitelist, resolve
 
@@ -104,21 +105,6 @@ _TEMPLATE_FORMATTERS: dict[EmailTemplate, Callable[..., str]] = {
 # ---------------------------------------------------------------------------
 # Handler
 # ---------------------------------------------------------------------------
-
-
-def _make_default_kms_envelope() -> KmsEnvelope | None:
-    """Build KmsEnvelope from settings, or None if KMS is not configured."""
-    if not settings.kms_key_id:
-        return None
-    import boto3  # noqa: PLC0415
-
-    client = boto3.client(
-        "kms",
-        region_name=settings.kms_region,
-        aws_access_key_id=settings.aws_access_key_id,
-        aws_secret_access_key=settings.aws_secret_access_key,
-    )
-    return KmsEnvelope(kms_client=client, key_id=settings.kms_key_id)
 
 
 class EmailSendHandler:
