@@ -1,5 +1,15 @@
 """github_digest action handler — queries GitHub Issues + PRs for a repo.
 
+Credential resolution (ADR-050, ADR-051):
+  credential_mode = oauth_connection — resolves the GitHub token from the
+  connection store keyed by (job.user_id, "github").  The session_factory is
+  injected at construction time; defaults to the module-level factory.
+
+If the user has no GitHub connection:
+  - execute() returns ok=False, retryable=False with a descriptive error.
+  - task.create pre-flight also checks and returns an error with connect_url
+    (handled in app.mcp.server, not here).
+
 Error classification policy (deliberate trade-offs per ADR-013 commentary):
   - 401 Unauthorized          → DLQ (permanent failure, bad token)
   - 403 rate-limited          → retry (x-ratelimit-remaining == 0)
@@ -8,22 +18,20 @@ Error classification policy (deliberate trade-offs per ADR-013 commentary):
   - 422 Unprocessable Entity  → DLQ (permanent failure, bad query params)
   - 5xx Server Error          → retry
   - timeout / network error   → retry
-
-Does NOT honour x-ratelimit-reset — relies on SQS visibility timeout + retry
-count to provide backoff (deliberate trade-off: simpler, no wall-clock dependency).
 """
 
 from __future__ import annotations
 
-import os
 from datetime import UTC, datetime, timedelta
 from typing import Any, ClassVar
 
 import httpx
 from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.actions.base import ActionResult, CredentialMode
-from app.secrets.resolver import SecretResolutionError, build_effective_whitelist, resolve
+from app.connections.store import ConnectionMiss, ConnectionStore
+from app.crypto.kms_envelope import KmsEnvelope
 
 GITHUB_API_BASE = "https://api.github.com"
 
@@ -54,34 +62,105 @@ class GitHubDigestResult(BaseModel):
     prs: dict[str, Any]
 
 
+def _make_default_kms_envelope() -> KmsEnvelope | None:
+    """Build KmsEnvelope from settings, or None if KMS is not configured."""
+    from app.config.settings import settings  # noqa: PLC0415
+
+    if not settings.kms_key_id:
+        return None
+    import boto3  # noqa: PLC0415
+
+    client = boto3.client(
+        "kms",
+        region_name=settings.kms_region,
+        aws_access_key_id=settings.aws_access_key_id,
+        aws_secret_access_key=settings.aws_secret_access_key,
+    )
+    return KmsEnvelope(kms_client=client, key_id=settings.kms_key_id)
+
+
 class GitHubDigestHandler:
     name: ClassVar[str] = "github_digest"
     description: ClassVar[str] = (
         "Queries GitHub Issues + PRs for a repository and returns a structured JSON payload. "
         "Filters issues by label and identifies stale open PRs. "
-        "Result is stored in JobRun.result for downstream chaining (e.g., slack_post)."
+        "Result is stored in JobRun.result for downstream chaining (e.g., slack_post). "
+        "Requires a GitHub OAuth connection — connect at /connections."
     )
     params_model: ClassVar[type[BaseModel]] = GitHubDigestParams
     timeout_seconds: ClassVar[int] = 30
     requires_operator: ClassVar[bool] = False
-    credential_mode: ClassVar[CredentialMode] = CredentialMode.operator_env
+    credential_mode: ClassVar[CredentialMode] = CredentialMode.oauth_connection
+    required_provider: ClassVar[str] = "github"
+
+    def __init__(
+        self,
+        session_factory: async_sessionmaker | None = None,
+        kms_envelope: KmsEnvelope | None = None,
+    ) -> None:
+        self._session_factory = session_factory
+        self._kms_envelope = kms_envelope
+
+    def _get_session_factory(self) -> async_sessionmaker:
+        if self._session_factory is not None:
+            return self._session_factory
+        from app.db.engine import async_session_factory  # noqa: PLC0415
+
+        return async_session_factory
+
+    def _get_kms_envelope(self) -> KmsEnvelope | None:
+        if self._kms_envelope is not None:
+            return self._kms_envelope
+        return _make_default_kms_envelope()
 
     async def execute(self, run: Any, params: GitHubDigestParams) -> ActionResult:
-        whitelist = build_effective_whitelist()
-        env = dict(os.environ)
+        # Resolve user_id from the JobRun (denormalized column, ADR-059).
+        user_id: str | None = getattr(run, "user_id", None)
+        if not user_id:
+            return ActionResult(
+                ok=False,
+                result=None,
+                error="github_digest: no user_id on run — cannot resolve GitHub connection",
+                retryable=False,
+            )
 
+        # Look up the GitHub token from the connection store.
+        envelope = self._get_kms_envelope()
+        if envelope is None:
+            return ActionResult(
+                ok=False,
+                result=None,
+                error=(
+                    "github_digest: KMS not configured — cannot decrypt GitHub connection. "
+                    "Set KMS_KEY_ID in environment."
+                ),
+                retryable=False,
+            )
+
+        factory = self._get_session_factory()
         try:
-            resolve(params.repo, env, whitelist)
-        except SecretResolutionError as exc:
-            return ActionResult(ok=False, result=None, error=str(exc), retryable=False)
+            async with factory() as session:
+                store = ConnectionStore(session, envelope)
+                token = await store.get_fresh_token(user_id, "github")
+        except ConnectionMiss:
+            from app.config.settings import settings  # noqa: PLC0415
 
-        token = env.get("GITHUB_TOKEN", "")
+            connect_url = f"{settings.connections_base_url}/connections"
+            return ActionResult(
+                ok=False,
+                result=None,
+                error=(
+                    f"No GitHub connection for this user. "
+                    f"Connect your GitHub account at {connect_url}"
+                ),
+                retryable=False,
+            )
+
         headers: dict[str, str] = {
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
+            "Authorization": f"Bearer {token}",
         }
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
 
         try:
             async with httpx.AsyncClient(

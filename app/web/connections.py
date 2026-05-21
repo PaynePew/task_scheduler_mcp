@@ -1,0 +1,442 @@
+"""Web routes for the /connections dashboard and OAuth flows (ADR-058).
+
+Routes:
+  GET  /connections                 — dashboard (requires session cookie)
+  GET  /connections/login           — initiate WorkOS login (or trust-only for dev)
+  GET  /connections/auth/callback   — WorkOS authorization code callback
+  GET  /connections/github/connect  — start GitHub OAuth
+  GET  /connections/github/callback — GitHub OAuth callback → store token
+  POST /connections/github/disconnect — remove GitHub connection
+
+Session mechanism:
+  JWT HS256 cookie named ``session`` signed with ``settings.web_session_secret``.
+  Sub claim contains user_id; expiry is 24 hours.
+
+Trust-only mode (when workos_client_id is not set):
+  /connections/login sets a session cookie directly using MCP_USER_ID env var
+  (or "default-user") so local dev / CI can exercise the dashboard without
+  real WorkOS credentials.
+"""
+
+from __future__ import annotations
+
+import secrets
+import urllib.parse
+from datetime import UTC, datetime, timedelta
+from typing import Any
+
+import httpx
+import jwt
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from starlette.requests import Request
+from starlette.responses import HTMLResponse, RedirectResponse, Response
+from starlette.routing import Route
+
+from app.config.settings import settings
+from app.connections.store import ConnectionMiss, ConnectionStore
+from app.crypto.kms_envelope import KmsEnvelope
+from app.db.identity import resolve_user_id_stdio
+
+_SESSION_COOKIE = "session"
+_STATE_COOKIE = "oauth_state"
+_SESSION_TTL = timedelta(hours=24)
+_GITHUB_OAUTH_SCOPE = "read:user repo"
+
+# ---------------------------------------------------------------------------
+# Session helpers
+# ---------------------------------------------------------------------------
+
+
+def _create_session_token(user_id: str) -> str:
+    """Return a signed JWT to store in the session cookie."""
+    now = datetime.now(UTC)
+    exp = int((now + _SESSION_TTL).timestamp())
+    payload = {"sub": user_id, "iat": int(now.timestamp()), "exp": exp}
+    return jwt.encode(payload, settings.web_session_secret, algorithm="HS256")
+
+
+def _decode_session_token(token: str) -> str | None:
+    """Return user_id from a valid session token, or None on any failure."""
+    try:
+        payload = jwt.decode(token, settings.web_session_secret, algorithms=["HS256"])
+        return payload.get("sub")
+    except jwt.InvalidTokenError:
+        return None
+
+
+def _get_session_user(request: Request) -> str | None:
+    """Return the authenticated user_id from the session cookie, or None."""
+    token = request.cookies.get(_SESSION_COOKIE)
+    if not token:
+        return None
+    return _decode_session_token(token)
+
+
+def _set_session(response: Response, user_id: str) -> None:
+    """Attach a signed session cookie to *response*."""
+    token = _create_session_token(user_id)
+    response.set_cookie(
+        _SESSION_COOKIE,
+        token,
+        httponly=True,
+        samesite="lax",
+        max_age=int(_SESSION_TTL.total_seconds()),
+        secure=settings.connections_base_url.startswith("https://"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# KMS envelope factory
+# ---------------------------------------------------------------------------
+
+
+def _make_kms_envelope() -> KmsEnvelope | None:
+    """Create KmsEnvelope from settings, or None if KMS is not configured."""
+    if not settings.kms_key_id:
+        return None
+    import boto3  # noqa: PLC0415
+
+    client = boto3.client(
+        "kms",
+        region_name=settings.kms_region,
+        aws_access_key_id=settings.aws_access_key_id,
+        aws_secret_access_key=settings.aws_secret_access_key,
+    )
+    return KmsEnvelope(kms_client=client, key_id=settings.kms_key_id)
+
+
+# ---------------------------------------------------------------------------
+# HTML rendering
+# ---------------------------------------------------------------------------
+
+_HTML_STYLE = """
+body { font-family: system-ui, sans-serif; max-width: 700px; margin: 3rem auto; padding: 0 1rem; }
+table { border-collapse: collapse; width: 100%; }
+th, td { border: 1px solid #ddd; padding: .5rem 1rem; text-align: left; }
+th { background: #f4f4f4; }
+.btn { display: inline-block; padding: .4rem .9rem; border-radius: 4px;
+       text-decoration: none; font-size: .9rem; cursor: pointer; border: none; }
+.btn-connect { background: #2ea44f; color: #fff; }
+.btn-disconnect { background: #d73a49; color: #fff; }
+.status-ok { color: #2ea44f; }
+.status-no { color: #888; }
+"""
+
+
+def _render_dashboard(user_id: str, connections: list[str]) -> str:
+    """Return a simple HTML string for the connections dashboard."""
+    rows = []
+    providers = [("GitHub", "github")]
+    for display_name, provider_slug in providers:
+        connected = provider_slug in connections
+        if connected:
+            status = '<span class="status-ok">Connected</span>'
+            disc_url = f"/connections/{provider_slug}/disconnect"
+            action = (
+                f'<form method="post" action="{disc_url}" style="display:inline">'
+                f'<button type="submit" class="btn btn-disconnect">Disconnect</button></form>'
+            )
+        else:
+            status = '<span class="status-no">Not connected</span>'
+            conn_url = f"/connections/{provider_slug}/connect"
+            action = f'<a href="{conn_url}" class="btn btn-connect">Connect</a>'
+        rows.append(f"<tr><td>{display_name}</td><td>{status}</td><td>{action}</td></tr>")
+
+    rows_html = "\n".join(rows)
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Connections</title><style>{_HTML_STYLE}</style></head>
+<body>
+  <h1>My Connections</h1>
+  <p>Signed in as <code>{user_id}</code> &nbsp;
+     <a href="/connections/logout">Sign out</a></p>
+  <table>
+    <thead><tr><th>Provider</th><th>Status</th><th>Action</th></tr></thead>
+    <tbody>{rows_html}</tbody>
+  </table>
+</body>
+</html>"""
+
+
+def _render_login_page(redirect_url: str) -> str:
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Sign in</title><style>{_HTML_STYLE}</style></head>
+<body>
+  <h1>Sign in required</h1>
+  <p>You need to sign in to manage your connections.</p>
+  <a href="{redirect_url}" class="btn btn-connect">Sign in</a>
+</body>
+</html>"""
+
+
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
+
+
+def _make_routes(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> list[Route]:
+    """Return the list of Starlette Route objects for the connections web surface.
+
+    Accepts a session_factory so tests can inject a per-test factory without
+    disturbing the module-level engine pool.
+    """
+
+    async def _connections_dashboard(request: Request) -> Response:
+        user_id = _get_session_user(request)
+        if not user_id:
+            return RedirectResponse("/connections/login", status_code=302)
+
+        envelope = _make_kms_envelope()
+        connected_providers: list[str] = []
+        if envelope is not None:
+            try:
+                async with session_factory() as session:
+                    store = ConnectionStore(session, envelope)
+                    infos = await store.list(user_id)
+                    connected_providers = [info.provider for info in infos]
+            except Exception:
+                pass
+
+        html = _render_dashboard(user_id, connected_providers)
+        return HTMLResponse(html)
+
+    async def _connections_login(request: Request) -> Response:
+        """Redirect to WorkOS login page, or set trust-only session in dev mode."""
+        _wb_enabled = bool(
+            settings.workos_client_id and settings.workos_client_secret and settings.workos_issuer
+        )
+        if _wb_enabled:
+            state = secrets.token_urlsafe(24)
+            cb = f"{settings.connections_base_url}/connections/auth/callback"
+            params = {
+                "response_type": "code",
+                "client_id": settings.workos_client_id,
+                "redirect_uri": cb,
+                "scope": "openid profile email",
+                "state": state,
+            }
+            qs = urllib.parse.urlencode(params)
+            authorize_url = f"{settings.workos_issuer}/sso/authorize?{qs}"
+            resp = RedirectResponse(authorize_url, status_code=302)
+            resp.set_cookie(_STATE_COOKIE, state, httponly=True, samesite="lax", max_age=600)
+            return resp
+        else:
+            # Trust-only dev mode: set session as MCP_USER_ID / default-user
+            user_id = resolve_user_id_stdio()
+            resp = RedirectResponse("/connections", status_code=302)
+            _set_session(resp, user_id)
+            return resp
+
+    async def _workos_auth_callback(request: Request) -> Response:
+        """Exchange WorkOS authorization code for a session."""
+        code = request.query_params.get("code")
+        state = request.query_params.get("state")
+        stored_state = request.cookies.get(_STATE_COOKIE)
+
+        if not code:
+            return HTMLResponse("Missing code parameter", status_code=400)
+        if stored_state and state != stored_state:
+            return HTMLResponse("Invalid state parameter", status_code=400)
+
+        # Exchange code for token
+        redirect_uri = f"{settings.connections_base_url}/connections/auth/callback"
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.post(
+                    f"{settings.workos_issuer}/sso/token",
+                    data={
+                        "grant_type": "authorization_code",
+                        "code": code,
+                        "redirect_uri": redirect_uri,
+                        "client_id": settings.workos_client_id,
+                        "client_secret": settings.workos_client_secret,
+                    },
+                )
+        except httpx.RequestError as exc:
+            return HTMLResponse(f"Auth error: {exc}", status_code=502)
+
+        if not resp.is_success:
+            return HTMLResponse(f"Token exchange failed: {resp.text}", status_code=502)
+
+        token_data = resp.json()
+        access_token = token_data.get("access_token")
+        if not access_token:
+            return HTMLResponse("No access_token in response", status_code=502)
+
+        # Extract user_id from the JWT (same validation as Bearer token path)
+        from app.auth.token_validation import TokenValidationError, validate_token  # noqa: PLC0415
+
+        try:
+            ctx = validate_token(
+                access_token,
+                issuer=settings.workos_issuer,  # type: ignore[arg-type]
+                audience=settings.workos_audience or "",
+                jwks_uri=settings.workos_jwks_uri,  # type: ignore[arg-type]
+            )
+            user_id = ctx.user_id
+        except TokenValidationError:
+            # WorkOS may use a different token format; try the id_token
+            id_token = token_data.get("id_token", "")
+            try:
+                payload = jwt.decode(id_token, options={"verify_signature": False})
+                user_id = payload.get("sub") or ""
+            except Exception:
+                user_id = ""
+        if not user_id:
+            return HTMLResponse("Could not determine user identity from token", status_code=502)
+
+        resp = RedirectResponse("/connections", status_code=302)
+        _set_session(resp, user_id)
+        resp.delete_cookie(_STATE_COOKIE)
+        return resp
+
+    async def _connections_logout(request: Request) -> Response:
+        resp = RedirectResponse("/connections/login", status_code=302)
+        resp.delete_cookie(_SESSION_COOKIE)
+        return resp
+
+    async def _github_connect(request: Request) -> Response:
+        """Start GitHub OAuth flow."""
+        user_id = _get_session_user(request)
+        if not user_id:
+            return RedirectResponse("/connections/login", status_code=302)
+
+        if not settings.github_client_id:
+            return HTMLResponse(
+                "GitHub OAuth not configured (GITHUB_CLIENT_ID missing)", status_code=503
+            )
+
+        state = secrets.token_urlsafe(24)
+        redirect_uri = f"{settings.connections_base_url}/connections/github/callback"
+        params = {
+            "client_id": settings.github_client_id,
+            "redirect_uri": redirect_uri,
+            "scope": _GITHUB_OAUTH_SCOPE,
+            "state": state,
+        }
+        github_url = "https://github.com/login/oauth/authorize?" + urllib.parse.urlencode(params)
+        resp = RedirectResponse(github_url, status_code=302)
+        resp.set_cookie(_STATE_COOKIE, state, httponly=True, samesite="lax", max_age=600)
+        return resp
+
+    async def _github_callback(request: Request) -> Response:
+        """Handle GitHub OAuth callback — exchange code for token and store it."""
+        user_id = _get_session_user(request)
+        if not user_id:
+            return RedirectResponse("/connections/login", status_code=302)
+
+        code = request.query_params.get("code")
+        state = request.query_params.get("state")
+        stored_state = request.cookies.get(_STATE_COOKIE)
+
+        if not code:
+            return HTMLResponse("Missing code parameter from GitHub", status_code=400)
+        if stored_state and state != stored_state:
+            return HTMLResponse("Invalid state — possible CSRF", status_code=400)
+
+        envelope = _make_kms_envelope()
+        if envelope is None:
+            return HTMLResponse(
+                "GitHub connection could not be stored (KMS not configured)",
+                status_code=503,
+            )
+
+        # Exchange code for access token
+        redirect_uri = f"{settings.connections_base_url}/connections/github/callback"
+        try:
+            token_data = await _exchange_github_code(code, redirect_uri)
+        except Exception as exc:
+            return HTMLResponse(f"GitHub token exchange failed: {exc}", status_code=502)
+
+        # Store in the connection store
+        async with session_factory() as session:
+            store = ConnectionStore(session, envelope)
+            await store.upsert(user_id, "github", token_data)
+            await session.commit()
+
+        resp = RedirectResponse("/connections", status_code=302)
+        resp.delete_cookie(_STATE_COOKIE)
+        return resp
+
+    async def _github_disconnect(request: Request) -> Response:
+        """Remove GitHub connection and revoke upstream token."""
+        user_id = _get_session_user(request)
+        if not user_id:
+            return RedirectResponse("/connections/login", status_code=302)
+
+        envelope = _make_kms_envelope()
+        if envelope is not None:
+            async with session_factory() as session:
+                store = ConnectionStore(session, envelope)
+                try:
+                    token = await store.get_fresh_token(user_id, "github")
+                    # Revoke the token upstream if client credentials are configured
+                    if settings.github_client_id and settings.github_client_secret:
+                        await _revoke_github_token(token)
+                except ConnectionMiss:
+                    pass
+                await store.delete(user_id, "github")
+                await session.commit()
+
+        return RedirectResponse("/connections", status_code=302)
+
+    return [
+        Route("/connections", endpoint=_connections_dashboard, methods=["GET"]),
+        Route("/connections/login", endpoint=_connections_login, methods=["GET"]),
+        Route("/connections/logout", endpoint=_connections_logout, methods=["GET"]),
+        Route("/connections/auth/callback", endpoint=_workos_auth_callback, methods=["GET"]),
+        Route("/connections/github/connect", endpoint=_github_connect, methods=["GET"]),
+        Route("/connections/github/callback", endpoint=_github_callback, methods=["GET"]),
+        Route("/connections/github/disconnect", endpoint=_github_disconnect, methods=["POST"]),
+    ]
+
+
+# ---------------------------------------------------------------------------
+# GitHub OAuth helpers
+# ---------------------------------------------------------------------------
+
+
+async def _exchange_github_code(code: str, redirect_uri: str) -> dict[str, Any]:
+    """Exchange a GitHub authorization code for an access token.
+
+    Returns the parsed token response dict (contains access_token, scope, etc.).
+    Raises on any HTTP or parse error.
+    """
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.post(
+            "https://github.com/login/oauth/access_token",
+            headers={"Accept": "application/json"},
+            data={
+                "client_id": settings.github_client_id,
+                "client_secret": settings.github_client_secret,
+                "code": code,
+                "redirect_uri": redirect_uri,
+            },
+        )
+    resp.raise_for_status()
+    data = resp.json()
+    if "access_token" not in data:
+        raise ValueError(f"GitHub OAuth error: {data.get('error_description', data)}")
+    return data
+
+
+async def _revoke_github_token(token: str) -> None:
+    """Attempt to revoke *token* via GitHub's token revocation API.
+
+    Best-effort: errors are silently swallowed (the connection is deleted
+    from our store regardless, per ADR-058 revocation semantics).
+    """
+    if not settings.github_client_id or not settings.github_client_secret:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            await client.delete(
+                f"https://api.github.com/applications/{settings.github_client_id}/token",
+                auth=(settings.github_client_id, settings.github_client_secret),
+                json={"access_token": token},
+            )
+    except Exception:
+        pass
