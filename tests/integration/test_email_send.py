@@ -13,12 +13,19 @@ import email
 import os
 import socket
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from aiosmtpd.controller import Controller
 
 from app.actions.email_send import EmailSendHandler, EmailSendParams
+
+
+def _make_run(user_id: str = "operator-id") -> Any:
+    run = MagicMock()
+    run.user_id = user_id
+    return run
+
 
 # ---------------------------------------------------------------------------
 # In-process SMTP server via aiosmtpd
@@ -87,7 +94,7 @@ async def test_email_send_end_to_end_single_recipient(smtp_server):
     )
 
     with patch.dict(os.environ, _env(host, port)):
-        result = await handler.execute(run=None, params=params)
+        result = await handler.execute(run=_make_run(), params=params)
 
     assert result.ok is True, f"Expected ok=True, got error={result.error}"
     assert result.result is not None
@@ -114,7 +121,7 @@ async def test_email_send_end_to_end_multi_recipient(smtp_server):
     )
 
     with patch.dict(os.environ, _env(host, port)):
-        result = await handler.execute(run=None, params=params)
+        result = await handler.execute(run=_make_run(), params=params)
 
     assert result.ok is True
     assert len(capturing.envelopes) == 1
@@ -134,7 +141,7 @@ async def test_email_send_subject_appears_in_message(smtp_server):
     )
 
     with patch.dict(os.environ, _env(host, port)):
-        result = await handler.execute(run=None, params=params)
+        result = await handler.execute(run=_make_run(), params=params)
 
     assert result.ok is True
     assert capturing.envelopes

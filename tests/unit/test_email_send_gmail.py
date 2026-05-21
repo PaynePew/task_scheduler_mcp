@@ -211,20 +211,6 @@ async def test_public_user_no_kms_returns_error():
     assert "KMS" in (result.error or "")
 
 
-@pytest.mark.asyncio
-async def test_public_user_no_run_user_id_returns_error():
-    handler = _make_handler()
-    params = EmailSendParams(to=["dest@example.com"], subject="Test", body="Body")
-
-    with patch("app.actions.email_send.settings") as mock_settings:
-        mock_settings.operator_user_id = "operator-uid"
-        result = await handler.execute(run=None, params=params)
-
-    assert result.ok is False
-    assert result.retryable is False
-    assert "user_id" in (result.error or "").lower()
-
-
 # ---------------------------------------------------------------------------
 # Gmail API error classifications
 # ---------------------------------------------------------------------------

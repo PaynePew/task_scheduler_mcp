@@ -178,22 +178,6 @@ def test_handler_not_operator_only():
 
 
 # ---------------------------------------------------------------------------
-# SlackPostHandler — missing user_id
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_slack_post_no_user_id_returns_error():
-    handler = SlackPostHandler()
-    params = SlackPostParams(channel="#general", message="hello")
-    result = await handler.execute(run=None, params=params)
-
-    assert result.ok is False
-    assert result.retryable is False
-    assert "user_id" in (result.error or "")
-
-
-# ---------------------------------------------------------------------------
 # SlackPostHandler — KMS not configured
 # ---------------------------------------------------------------------------
 

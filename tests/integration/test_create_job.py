@@ -400,3 +400,32 @@ async def test_chain_creates_waiting_run_with_wait_for_run_id(session_factory):
 
     assert downstream_run.status == "WAITING"
     assert downstream_run.wait_for_run_id == upstream_run.run_id
+
+
+# ---------------------------------------------------------------------------
+# Issue #162: user_id populated on new run insert (migration 0008)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+async def test_new_run_has_user_id_matching_parent_job(session_factory):
+    """A freshly created JobRun must have user_id set from its parent Job (Refs #162)."""
+    async with session_factory() as session:
+        job = await create_job(
+            session,
+            user_id="acme-user-xyz",
+            action="echo",
+            action_params={"message": "user_id check"},
+            schedule_type="immediate",
+        )
+
+    async with session_factory() as session:
+        async with session.begin():
+            run = (
+                await session.execute(select(JobRun).where(JobRun.job_id == job.job_id))
+            ).scalar_one()
+
+    assert run.user_id is not None, "JobRun.user_id must not be NULL"
+    assert run.user_id == job.user_id, (
+        f"JobRun.user_id ({run.user_id!r}) must match parent Job.user_id ({job.user_id!r})"
+    )

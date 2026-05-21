@@ -78,6 +78,7 @@ async def _insert_pending_run(
             run = JobRun(
                 time_bucket=now_bucket.isoformat(),
                 job_id=job.job_id,
+                user_id=job.user_id,
                 scheduled_at=scheduled_at,
                 status=status,
             )

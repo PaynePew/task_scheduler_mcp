@@ -79,8 +79,10 @@ async def _add_run(
             time_bucket = now.replace(minute=0, second=0, microsecond=0).isoformat()
             result = await session.execute(
                 text(
-                    "INSERT INTO job_runs (time_bucket, job_id, scheduled_at, status)"
-                    " VALUES (:tb, :jid, :sat, :st) RETURNING run_id"
+                    "INSERT INTO job_runs (time_bucket, job_id, user_id, scheduled_at, status)"
+                    " VALUES (:tb, :jid,"
+                    " (SELECT user_id FROM jobs WHERE job_id = :jid),"
+                    " :sat, :st) RETURNING run_id"
                 ),
                 {"tb": time_bucket, "jid": job_id, "sat": now, "st": status},
             )

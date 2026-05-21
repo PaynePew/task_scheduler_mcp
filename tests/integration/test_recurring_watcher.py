@@ -71,6 +71,7 @@ async def _insert_recurring_job_with_terminal_event(
             run = JobRun(
                 time_bucket=bucket,
                 job_id=job.job_id,
+                user_id=job.user_id,
                 scheduled_at=scheduled,
                 status=event_type,
                 finish_at=datetime.now(tz=UTC),
@@ -154,7 +155,11 @@ async def test_tick_scheduled_at_matches_cron_next(session_factory):
             await session.flush()
             bucket = occurred_at.replace(minute=0, second=0, microsecond=0).isoformat()
             run = JobRun(
-                time_bucket=bucket, job_id=job.job_id, scheduled_at=occurred_at, status="SUCCEEDED"
+                time_bucket=bucket,
+                job_id=job.job_id,
+                user_id=job.user_id,
+                scheduled_at=occurred_at,
+                status="SUCCEEDED",
             )
             session.add(run)
             await session.flush()
@@ -287,6 +292,7 @@ async def test_recurring_watcher_ignores_one_shot_jobs(session_factory):
             run = JobRun(
                 time_bucket=bucket,
                 job_id=job.job_id,
+                user_id=job.user_id,
                 scheduled_at=scheduled,
                 status="SUCCEEDED",
                 finish_at=datetime.now(tz=UTC),
@@ -376,6 +382,7 @@ async def test_no_duplicate_spawn_for_same_cron_tick(session_factory, caplog):
             run1 = JobRun(
                 time_bucket=bucket1,
                 job_id=job.job_id,
+                user_id=job.user_id,
                 scheduled_at=tick_base - timedelta(minutes=1),  # previous tick
                 status="SUCCEEDED",
                 finish_at=occurred_at_1,
@@ -400,6 +407,7 @@ async def test_no_duplicate_spawn_for_same_cron_tick(session_factory, caplog):
             run2 = JobRun(
                 time_bucket=bucket2,
                 job_id=job.job_id,
+                user_id=job.user_id,
                 scheduled_at=tick_base,  # current tick, but completed early
                 status="SUCCEEDED",
                 finish_at=occurred_at_2,
@@ -502,6 +510,7 @@ async def test_no_duplicate_spawn_when_run_finishes_before_scheduled_at(session_
             run1 = JobRun(
                 time_bucket=bucket,
                 job_id=job.job_id,
+                user_id=job.user_id,
                 scheduled_at=tick,
                 status="SUCCEEDED",
                 start_at=occurred_at - timedelta(milliseconds=5),
@@ -580,6 +589,7 @@ async def test_at_most_one_run_per_scheduled_at_over_n_ticks(session_factory):
             seed_run = JobRun(
                 time_bucket=bucket,
                 job_id=job_id,
+                user_id=job.user_id,
                 scheduled_at=base,
                 status="SUCCEEDED",
                 start_at=base - timedelta(milliseconds=200),

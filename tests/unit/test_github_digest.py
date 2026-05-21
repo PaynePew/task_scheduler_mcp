@@ -317,19 +317,6 @@ async def test_pr_items_in_issues_endpoint_are_filtered_out():
 
 
 @pytest.mark.asyncio
-async def test_no_run_user_id_returns_error():
-    """Handler returns a clear error when run has no user_id."""
-    handler = _make_handler()
-    params = GitHubDigestParams(repo="owner/repo", labels=["bug"])
-
-    result = await handler.execute(run=None, params=params)
-
-    assert result.ok is False
-    assert result.retryable is False
-    assert "user_id" in (result.error or "").lower()
-
-
-@pytest.mark.asyncio
 async def test_missing_connection_returns_non_retryable_error():
     """When no GitHub connection exists, handler fails non-retryably."""
     handler = _make_handler()

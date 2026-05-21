@@ -250,6 +250,7 @@ async def create_job(
         run = JobRun(
             time_bucket=time_bucket,
             job_id=job.job_id,
+            user_id=job.user_id,
             scheduled_at=run_at,
             status=initial_status,
             wait_for_run_id=wait_run.run_id if wait_run is not None else None,
