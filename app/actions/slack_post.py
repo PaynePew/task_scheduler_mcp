@@ -138,7 +138,7 @@ class SlackPostHandler:
 
     async def execute(self, run: Any, params: SlackPostParams) -> ActionResult:
         try:
-            token = await get_token(run.user_id, "slack", refresher=None)
+            token = await get_token(run.user_id, "slack")
         except ConnectionMiss:
             from app.config.settings import settings  # noqa: PLC0415
 

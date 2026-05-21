@@ -75,7 +75,7 @@ class GitHubDigestHandler:
 
     async def execute(self, run: Any, params: GitHubDigestParams) -> ActionResult:
         try:
-            token = await get_token(run.user_id, "github", refresher=None)
+            token = await get_token(run.user_id, "github")
         except ConnectionMiss:
             from app.config.settings import settings  # noqa: PLC0415
 

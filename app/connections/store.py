@@ -216,7 +216,7 @@ class ConnectionStore:
 async def get_token(
     user_id: str,
     provider: str,
-    refresher: TokenRefresher | None,
+    refresher: TokenRefresher | None = None,
     *,
     session_factory: Any = None,
     envelope: KmsEnvelope | None = None,
