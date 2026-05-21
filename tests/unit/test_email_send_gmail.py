@@ -32,7 +32,7 @@ class FakeRun:
     user_id: str = "user-abc"
 
 
-def _make_handler(google_token: str = "ya29.fake-token") -> EmailSendHandler:
+def _make_handler() -> EmailSendHandler:
     """Build EmailSendHandler with injected fakes."""
     fake_session = MagicMock()
 
