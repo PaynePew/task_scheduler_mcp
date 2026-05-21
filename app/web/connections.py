@@ -39,6 +39,7 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, RedirectResponse, Response
 from starlette.routing import Route
 
+from app.auth.token_validation import TokenValidationError, validate_token
 from app.config.settings import settings
 from app.connections.store import ConnectionMiss, ConnectionStore
 from app.crypto.kms_envelope import KmsEnvelope
@@ -117,6 +118,38 @@ def _make_kms_envelope() -> KmsEnvelope | None:
         aws_secret_access_key=settings.aws_secret_access_key,
     )
     return KmsEnvelope(kms_client=client, key_id=settings.kms_key_id)
+
+
+# ---------------------------------------------------------------------------
+# WorkOS id_token verification
+# ---------------------------------------------------------------------------
+
+
+def _verify_id_token_sub(
+    id_token: str,
+    *,
+    issuer: str,
+    client_id: str,
+    jwks_uri: str,
+    _jwks_client=None,
+) -> str:
+    """Verify an OIDC id_token signature and return the verified sub claim.
+
+    The id_token audience is the OAuth client_id, per the OIDC spec.  Raises
+    TokenValidationError on any verification failure (bad signature, expired,
+    wrong audience, missing sub, etc.).
+
+    The *_jwks_client* parameter is injectable so tests can supply a pre-built
+    PyJWKClient backed by fixture keys without making network calls.
+    """
+    ctx = validate_token(
+        id_token,
+        issuer=issuer,
+        audience=client_id,
+        jwks_uri=jwks_uri,
+        _jwks_client=_jwks_client,
+    )
+    return ctx.user_id
 
 
 # ---------------------------------------------------------------------------
@@ -283,8 +316,6 @@ def make_routes(
             return HTMLResponse("No access_token in response", status_code=502)
 
         # Extract user_id from the JWT (same validation as Bearer token path)
-        from app.auth.token_validation import TokenValidationError, validate_token  # noqa: PLC0415
-
         try:
             ctx = validate_token(
                 access_token,
@@ -294,14 +325,23 @@ def make_routes(
             )
             user_id = ctx.user_id
         except TokenValidationError:
-            # WorkOS may use a different token format; try the id_token
+            # access_token didn't carry sub; fall back to id_token.
+            # Signature MUST be verified — trusting an unverified payload would
+            # let an attacker control the session user identity (issue #160).
             id_token = token_data.get("id_token", "")
-            try:
-                payload = jwt.decode(id_token, options={"verify_signature": False})
-                user_id = payload.get("sub") or ""
-            except Exception:
-                logger.exception("failed to decode WorkOS id_token fallback")
+            if not id_token or not settings.workos_jwks_uri or not settings.workos_issuer:
                 user_id = ""
+            else:
+                try:
+                    user_id = _verify_id_token_sub(
+                        id_token,
+                        issuer=settings.workos_issuer,  # type: ignore[arg-type]
+                        client_id=settings.workos_client_id or "",
+                        jwks_uri=settings.workos_jwks_uri,  # type: ignore[arg-type]
+                    )
+                except TokenValidationError:
+                    logger.warning("WorkOS id_token signature verification failed")
+                    user_id = ""
         if not user_id:
             return HTMLResponse("Could not determine user identity from token", status_code=502)
 
