@@ -334,7 +334,10 @@ class SlackPostHandler:
             )
 
         error_code = body.get("error", "unknown")
-        retryable = error_code == "ratelimited" or error_code not in _NON_RETRYABLE_SLACK_ERRORS
+        # "ratelimited" is the only known retryable error code; any other unknown
+        # error_code also falls through to retryable so transient Slack issues
+        # we haven't catalogued get another attempt.
+        retryable = error_code not in _NON_RETRYABLE_SLACK_ERRORS
         return ActionResult(
             ok=False,
             result=None,
