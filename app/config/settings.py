@@ -8,6 +8,8 @@ in autocomplete and missing required vars fail fast at import.
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.auth.posture import bearer_posture_from_settings
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
@@ -78,29 +80,8 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _validate_workos_all_or_nothing(self) -> "Settings":
-        """Enforce that WorkOS vars are either all set or all unset.
-
-        Partial config (1 or 2 of 3 set) silently degrades to trust-only mode,
-        which accepts any spoofed X-User-Id header. Fail fast instead.
-        """
-        workos_vars = (
-            ("WORKOS_JWKS_URI", self.workos_jwks_uri),
-            ("WORKOS_ISSUER", self.workos_issuer),
-            ("WORKOS_AUDIENCE", self.workos_audience),
-        )
-        # "Missing" must match what mcp_http._AUTH_ENABLED treats as missing:
-        # a truthy check that rejects None, "", and whitespace-only. Without
-        # this, an empty-string env var passes the validator yet disables auth
-        # at runtime — the exact silent-downgrade this validator exists to stop.
-        missing = [name for name, val in workos_vars if not val or not val.strip()]
-        # All set (missing=[]) and all unset (missing=all of them) are both legal.
-        if missing and len(missing) < len(workos_vars):
-            raise ValueError(
-                f"Partial WorkOS configuration detected. "
-                f"Missing: {', '.join(missing)}. "
-                f"Either set all three (WORKOS_JWKS_URI, WORKOS_ISSUER, WORKOS_AUDIENCE) "
-                f"for auth-enabled mode, or leave all three unset for trust-only dev mode."
-            )
+        """Delegate to bearer_posture_from_settings; raises ValueError on partial config."""
+        bearer_posture_from_settings(self)
         return self
 
     # Operator user identity — the operator's WorkOS sub. When set:
