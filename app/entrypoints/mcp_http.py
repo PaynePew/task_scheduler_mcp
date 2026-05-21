@@ -35,6 +35,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 from starlette.types import Receive, Scope, Send
 
+from app.auth.posture import BearerVerified, TrustOnly, bearer_posture_from_settings
 from app.auth.token_validation import TokenValidationError, validate_token
 from app.config.settings import settings
 from app.db.engine import async_session_factory as _default_session_factory
@@ -51,10 +52,8 @@ logger = logging.getLogger(__name__)
 # Auth helpers
 # ---------------------------------------------------------------------------
 
-_AUTH_ENABLED = bool(
-    settings.workos_jwks_uri and settings.workos_issuer and settings.workos_audience
-)
-if not _AUTH_ENABLED:
+POSTURE = bearer_posture_from_settings(settings)
+if isinstance(POSTURE, TrustOnly):
     logger.info(
         "WorkOS auth disabled: WORKOS_JWKS_URI / WORKOS_ISSUER / WORKOS_AUDIENCE not set. "
         "Running in trust-only mode (X-User-Id header accepted as authoritative). "
@@ -84,46 +83,42 @@ def _resolve_user_id(request: Request) -> tuple[str, None] | tuple[None, JSONRes
     """Return (user_id, None) on success or (None, error_response) on failure.
 
     Resolution order per ADR-053 / ADR-049:
-      - Auth enabled (WorkOS configured): Bearer JWT → sub claim.
+      - BearerVerified (WorkOS configured): Bearer JWT → sub claim.
         X-User-Id is explicitly ignored in this mode.
-      - Auth disabled (no WorkOS creds, local dev / CI): X-User-Id header →
+      - TrustOnly (no WorkOS creds, local dev / CI): X-User-Id header →
         MCP_USER_ID env → "default-user" (old trust-only chain, per ADR-015).
     """
-    if not _AUTH_ENABLED:
-        x_user_id = request.headers.get("x-user-id") or None
-        if x_user_id:
-            return x_user_id, None
-        return resolve_user_id_stdio(), None
-
-    token = _extract_bearer(request)
-    if token is None:
-        resp = JSONResponse(
-            {"error": "unauthorized", "detail": "Bearer token required"},
-            status_code=401,
-            headers={"WWW-Authenticate": _www_authenticate_header()},
-        )
-        return None, resp
-
-    # _AUTH_ENABLED gates this branch on all three being non-None, but the
-    # checker can't narrow through the module-level constant — hence the
-    # explicit type: ignore on each argument.
-    try:
-        ctx = validate_token(
-            token,
-            issuer=settings.workos_issuer,  # type: ignore[arg-type]
-            audience=settings.workos_audience,  # type: ignore[arg-type]
-            jwks_uri=settings.workos_jwks_uri,  # type: ignore[arg-type]
-        )
-    except TokenValidationError as exc:
-        logger.debug("Token validation failed: %s", exc)
-        resp = JSONResponse(
-            {"error": "unauthorized", "detail": str(exc)},
-            status_code=401,
-            headers={"WWW-Authenticate": _www_authenticate_header()},
-        )
-        return None, resp
-
-    return ctx.user_id, None
+    match POSTURE:
+        case TrustOnly():
+            x_user_id = request.headers.get("x-user-id") or None
+            if x_user_id:
+                return x_user_id, None
+            return resolve_user_id_stdio(), None
+        case BearerVerified(jwks_uri=jwks_uri, issuer=issuer, audience=audience):
+            token = _extract_bearer(request)
+            if token is None:
+                resp = JSONResponse(
+                    {"error": "unauthorized", "detail": "Bearer token required"},
+                    status_code=401,
+                    headers={"WWW-Authenticate": _www_authenticate_header()},
+                )
+                return None, resp
+            try:
+                ctx = validate_token(
+                    token,
+                    issuer=issuer,
+                    audience=audience,
+                    jwks_uri=jwks_uri,
+                )
+            except TokenValidationError as exc:
+                logger.debug("Token validation failed: %s", exc)
+                resp = JSONResponse(
+                    {"error": "unauthorized", "detail": str(exc)},
+                    status_code=401,
+                    headers={"WWW-Authenticate": _www_authenticate_header()},
+                )
+                return None, resp
+            return ctx.user_id, None
 
 
 # ---------------------------------------------------------------------------

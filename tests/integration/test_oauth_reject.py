@@ -13,6 +13,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
+from app.auth.posture import BearerVerified
 from app.entrypoints import mcp_http
 
 MCP_HEADERS = {
@@ -23,13 +24,21 @@ MCP_HEADERS = {
 
 @pytest.fixture
 def auth_enabled_app(monkeypatch):
-    """Build the MCP HTTP ASGI app with _AUTH_ENABLED forced True.
+    """Build the MCP HTTP ASGI app with POSTURE forced to BearerVerified.
 
     This simulates a deployment with WorkOS credentials configured without
     needing real credentials — the middleware gate is exercised, requests
     are rejected before any WorkOS call is made.
     """
-    monkeypatch.setattr(mcp_http, "_AUTH_ENABLED", True)
+    monkeypatch.setattr(
+        mcp_http,
+        "POSTURE",
+        BearerVerified(
+            jwks_uri="https://api.workos.com/sso/jwks/client_test",
+            issuer="https://api.workos.com",
+            audience="https://scheduler.example.com",
+        ),
+    )
     # Disable health-based load shedding: should_shed() reads live CPU via
     # psutil, so on a saturated CI runner (cpu>=90%) the /mcp request is
     # shed with 503 *before* auth runs — masking the 401 these tests assert.
