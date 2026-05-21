@@ -33,6 +33,10 @@ _DEFAULT_USER = "default-user"
 
 
 def _operator_user_id() -> str:
+    # Reads os.environ directly — not via app.config.settings — to preserve
+    # replay safety. Migrations are versioned snapshots; importing Settings
+    # would couple this revision to a moving target. See ADR-010 "Migrations
+    # boundary" for the rationale and the project-wide rule.
     return os.environ.get("OPERATOR_USER_ID", _DEFAULT_USER)
 
 
