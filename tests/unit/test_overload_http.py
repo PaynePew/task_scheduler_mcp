@@ -78,7 +78,7 @@ async def test_load_shedding_returns_503_with_retry_after():
     assert "Retry-After" in resp.headers
     body = resp.json()
     assert body["ok"] is False
-    assert body["error"]["code"] == "OVERLOADED"
+    assert body["error"]["code"] == "INVALID_STATE"
 
 
 async def test_load_shedding_not_triggered_when_healthy():
@@ -121,7 +121,7 @@ async def test_concurrency_limiter_rejects_at_capacity():
     assert resp.status_code == 503
     body = resp.json()
     assert body["ok"] is False
-    assert body["error"]["code"] == "OVERLOADED"
+    assert body["error"]["code"] == "INVALID_STATE"
 
 
 async def test_concurrency_limiter_allows_when_under_capacity():

@@ -1,11 +1,25 @@
-# ADR-014: MCP tool surface — 5 `.v1` tools + uniform envelope + 6 error codes
+# ADR-014: MCP tool surface — 5 `.v1` tools + uniform envelope + error codes
 
-- **Status**: Accepted (amended 2026-05-16)
+- **Status**: Accepted (amended 2026-05-16, 2026-05-21)
 - **Date**: 2026-05-12
 - **Source**: internal grilling session Q14 (local-only, not in git)
 - **Related**: ADR-013 (action catalog), ADR-015 (user_id resolver)
 
 ## Amendments
+
+### 2026-05-21 — Error-code vocabulary consolidation (ADR-060)
+
+Five codes introduced in PRs #142/145/154–156 (`OPERATOR_ONLY`, `OVERLOADED`, `RATE_LIMITED`, `BACKPRESSURE`, `MISSING_CONNECTION`) were not formally recorded here, violating the "no new codes without an ADR" rule in `CODING_STANDARDS.md`.
+
+Resolution (hybrid, per ADR-060 / issue #157):
+
+- `OPERATOR_ONLY` → mapped back to `INVALID_STATE` (operator restriction is a state-based rejection).
+- `OVERLOADED` (load-shedding + concurrency cap, `mcp_http.py`) → mapped back to `INVALID_STATE`.
+- `RATE_LIMITED` (per-user rate limit, `mcp_http.py`) → mapped back to `INVALID_STATE`.
+- `BACKPRESSURE` (SQS queue-depth guard, `server.py`) → mapped back to `INVALID_STATE`.
+- `MISSING_CONNECTION` — **formally added** as the 7th code. It is the only one with a distinct structured payload (`connect_url` hint, per ADR-058) that cannot be expressed by an existing code without loss of information.
+
+Updated vocabulary (7 codes): `USER_INPUT | NOT_FOUND | INVALID_STATE | UNKNOWN_ACTION | DUPLICATE | INTERNAL | MISSING_CONNECTION`
 
 ### 2026-05-16 — `@v1` → `.v1` (SEP-986 compliance)
 
@@ -38,7 +52,7 @@ Success: {"ok": true, "data": {...}}
 Failure: {"ok": false, "error": {"code", "message", "field", "expected"}}
 ```
 
-**Six error codes:** `USER_INPUT`, `NOT_FOUND`, `INVALID_STATE`, `UNKNOWN_ACTION`, `DUPLICATE`, `INTERNAL`. Drawn from a fixed vocabulary so the LLM can branch on `code` deterministically.
+**Seven error codes (amended 2026-05-21):** `USER_INPUT`, `NOT_FOUND`, `INVALID_STATE`, `UNKNOWN_ACTION`, `DUPLICATE`, `INTERNAL`, `MISSING_CONNECTION`. Drawn from a fixed vocabulary so the LLM can branch on `code` deterministically. `MISSING_CONNECTION` carries an optional `connect_url` field pointing the user to the connections dashboard (ADR-058).
 
 **Strict input schemas.** Every tool specifies `required`, `enum`, `default`, and `additionalProperties: false`. ISO 8601 timezone-aware datetime strings throughout.
 

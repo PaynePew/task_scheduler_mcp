@@ -398,7 +398,7 @@ async def _handle_task_create(
     if depth >= backpressure_threshold:
         retry_after = settings.overload_retry_after_seconds
         return error(
-            "BACKPRESSURE",
+            "INVALID_STATE",
             f"Queue depth ({depth}) exceeds threshold ({backpressure_threshold}). "
             f"The system is busy; please retry after {retry_after} seconds.",
             field="queue_depth",

@@ -111,16 +111,17 @@ Success: {"ok": true, "data": {...}}
 Failure: {"ok": false, "error": {"code", "message", "field", "expected"}}
 ```
 
-`code` is drawn from a fixed 6-word vocabulary:
+`code` is drawn from a fixed 7-word vocabulary (ADR-014, amended ADR-060):
 
 | Code | Meaning |
 |---|---|
 | `USER_INPUT` | Caller's args failed schema validation or a business rule |
 | `NOT_FOUND` | `job_id` doesn't exist or isn't owned by this user |
-| `INVALID_STATE` | Tried to cancel a terminal job, or a similar state-violation |
+| `INVALID_STATE` | Tried to cancel a terminal job, rate/concurrency limit, overload, or a similar state-violation |
 | `UNKNOWN_ACTION` | `Job.action` not in registry |
 | `DUPLICATE` | `idempotency_key` collision |
 | `INTERNAL` | Server-side failure not caused by the caller |
+| `MISSING_CONNECTION` | Required OAuth connection not set up; carries optional `connect_url` field |
 
 ### Versioning (`.v1`)
 

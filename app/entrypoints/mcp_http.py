@@ -166,7 +166,7 @@ class _McpHttpEndpoint:
                 {
                     "ok": False,
                     "error": {
-                        "code": "OVERLOADED",
+                        "code": "INVALID_STATE",
                         "message": "Service is temporarily overloaded. Please retry later.",
                     },
                 },
@@ -199,7 +199,7 @@ class _McpHttpEndpoint:
                 {
                     "ok": False,
                     "error": {
-                        "code": "RATE_LIMITED",
+                        "code": "INVALID_STATE",
                         "message": f"Rate limit exceeded ({decision.reason}). "
                         f"Retry after {decision.retry_after_seconds} seconds.",
                         "retry_after_seconds": decision.retry_after_seconds,
@@ -222,7 +222,7 @@ class _McpHttpEndpoint:
                 {
                     "ok": False,
                     "error": {
-                        "code": "OVERLOADED",
+                        "code": "INVALID_STATE",
                         "message": "Too many concurrent requests. Please retry later.",
                     },
                 },

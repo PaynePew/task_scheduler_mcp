@@ -205,7 +205,7 @@ async def test_http_1001st_job_returns_429(session_factory):
     assert int(resp.headers["Retry-After"]) > 0
     body = resp.json()
     assert body["ok"] is False
-    assert body["error"]["code"] == "RATE_LIMITED"
+    assert body["error"]["code"] == "INVALID_STATE"
     assert "daily" in body["error"]["message"]
     assert body["error"]["retry_after_seconds"] > 0
 
@@ -235,7 +235,7 @@ async def test_http_11th_burst_job_returns_429(session_factory):
     assert "Retry-After" in resp.headers
     body = resp.json()
     assert body["ok"] is False
-    assert body["error"]["code"] == "RATE_LIMITED"
+    assert body["error"]["code"] == "INVALID_STATE"
     assert "burst" in body["error"]["message"]
 
 
