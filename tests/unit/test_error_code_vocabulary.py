@@ -16,7 +16,6 @@ from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
-import pytest
 
 from app.domain.jobs import OperatorOnlyActionError
 from app.entrypoints.mcp_http import build_app
@@ -168,7 +167,6 @@ async def test_rate_limit_http_uses_invalid_state():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
 async def test_backpressure_uses_invalid_state():
     """SQS queue-depth guard must use INVALID_STATE (not BACKPRESSURE)."""
     session = AsyncMock()
