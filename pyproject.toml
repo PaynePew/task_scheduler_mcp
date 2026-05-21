@@ -23,6 +23,7 @@ dependencies = [
     "psutil>=7.2.2",
     "pyjwt[crypto]>=2.12.1",
     "python-json-logger>=3.2",
+    "cryptography",
 ]
 
 [dependency-groups]
@@ -32,7 +33,7 @@ dev = [
     "pytest-cov",
     "ruff",
     "aiosmtpd>=1.4",
-    "moto[s3]",
+    "moto[s3,kms]",
 ]
 
 [tool.pytest.ini_options]

@@ -60,7 +60,8 @@ class KmsEnvelope:
         aesgcm = AESGCM(plaintext_dek)
         ciphertext = aesgcm.encrypt(nonce, plaintext, None)
 
-        # Zero out the plaintext key as soon as we're done with it.
+        # Drop our reference; the bytes object is left for GC (CPython del
+        # does not zero memory — a true wipe would need bytearray + ctypes.memset).
         del plaintext_dek
 
         blob = json.dumps(
@@ -106,6 +107,8 @@ class KmsEnvelope:
         except Exception as exc:
             raise DecryptionError(f"AES-GCM authentication failed: {exc}") from exc
         finally:
+            # Drop our reference; the bytes object is left for GC (CPython del
+            # does not zero memory — a true wipe would need bytearray + ctypes.memset).
             del plaintext_dek
 
         return plaintext
