@@ -161,7 +161,7 @@ async def create_job(
     if action not in ACTION_REGISTRY:
         raise UnknownActionError(action)
     handler = ACTION_REGISTRY[action]
-    if handler.requires_operator and operator_user_id is not None and user_id != operator_user_id:
+    if handler.requires_operator and user_id != operator_user_id:
         raise OperatorOnlyActionError(action)
 
     if trigger_on_status is not None and trigger_on_status not in _VALID_TRIGGER_ON_STATUS:
