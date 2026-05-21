@@ -157,8 +157,11 @@ pwsh ./.harness/run.ps1
 | `-Yes` | Plan + auto-confirm top candidate + full pipeline. No Y/n prompt. |
 | `-Issue N` | Skip plan. Claim + implement + review + merge issue N. |
 | `-Resume` | Resume implement on an existing branch for `-Issue N`. Fails if no matching branch exists. |
+| `-StartPhase <phase>` | For `-Issue N`: start at `implement` (default), `review`, or `merge`. Skips the earlier phases and resumes the existing worktree (or rehydrates from `origin/<branch>` if none exists locally). Use when implement — and maybe review — already finished but a later phase died. |
 | `-SkipReview` | Skip the review phase after implement. Branch is ready to push manually. |
 | `-SkipMerge` | Skip the merge phase after review. No push, no PR created. |
+| `-Force` | Override a live-PID issue lock. Use only when the holding process is genuinely dead/abandoned. |
+| `-Cleanup N` | Remove the worktree, lock, and per-issue DB/queues for issue N without running any phase. |
 | `-SmokeTest` | Run the smoke-test prompt only (validates plumbing). |
 | `-PlanModel <id>` | Override `agents.plan.model` from config. |
 | `-ImplementModel <id>` | Override `agents.implement.model` from config. |
@@ -194,26 +197,44 @@ pwsh ./.harness/run.ps1 -Issue 42
 The plan phase deconflicts against local branches and open PRs, so a second terminal that runs plan will never pick an issue another terminal has claimed. If you skip plan (`-Issue N` directly), parallel-safety is enforced by a per-issue lock file at `.harness/locks/issue-N.lock`: a second terminal trying the same issue is rejected with the holder's PID + branch + phase. Each issue also gets its own `git worktree` at `.harness/worktrees/issue-N/`, so two terminals working on *different* issues never see each other's in-flight files.
 
 Recovery flags:
-- `-Resume`           — attach to an existing worktree+branch for the issue (lock auto-takes from the dead PID of the previous run).
+- `-Resume`           — attach to an existing worktree+branch and re-run **implement** from the last commit (lock auto-takes from the dead PID of the previous run).
+- `-StartPhase <p>`   — skip ahead to `review` or `merge` — the phases before it already finished. Unlike `-Resume`, it does **not** re-run implement. See *Resume / restart after an interruption* below.
 - `-Force`            — override a live-PID lock (only use if you really know what the other process is doing).
 - `-Cleanup N`        — remove the worktree + lock for issue `N` without running any phase. Use when a slice was abandoned (PR closed, branch deleted upstream).
 
 ---
 
-## Resume after rate-limit
+## Resume / restart after an interruption
 
-When `claude` exits non-zero with `Rate limit exceeded` or `usage_limit_exceeded` in the log, the wrapper surfaces the exact resume command:
+When a phase exits non-zero — `Rate limit exceeded` / `usage_limit_exceeded`, max-turns reached, or a manual Ctrl+C — the commits the agent already made stay on the feature branch. Each phase commits before the next begins, so you never lose finished work. **Which flag you resume with depends on which phase died:**
+
+| Phase that died | Resume with | What re-runs |
+|---|---|---|
+| implement | `-Issue N -Resume` | implement (from the last commit) → review → merge |
+| review | `-Issue N -StartPhase review` | review → merge (implement already committed) |
+| merge | `-Issue N -StartPhase merge` | merge only — the push + PR step (implement & review already committed) |
+
+```powershell
+# implement died mid-way:
+pwsh ./.harness/run.ps1 -Issue 30 -Resume
+
+# review or merge died — implement/review commits are already on the branch:
+pwsh ./.harness/run.ps1 -Issue 30 -StartPhase review
+pwsh ./.harness/run.ps1 -Issue 30 -StartPhase merge
+```
+
+> **Don't reach for `-Resume` by reflex.** It always re-enters *implement*, so using it after review or merge died pays to redo work that already landed on the branch. Match the flag to the failed phase.
+
+On a rate-limit exit specifically, the wrapper auto-detects `Rate limit exceeded` / `usage_limit_exceeded` and prints a ready-made command:
 
 ```
-Run interrupted. Resume with:
+Rate limit hit. Resume with:
   pwsh ./.harness/run.ps1 -Issue 30 -Resume
 ```
 
-Partial commits on the branch are preserved. `-Resume` skips branch creation and continues from the last committed state.
+That hint only covers the implement case — if review or merge was the phase that hit the limit, use the matching `-StartPhase` instead.
 
-```powershell
-pwsh ./.harness/run.ps1 -Issue 30 -Resume
-```
+`-StartPhase review|merge` reuses the existing per-issue worktree if it's still on disk, or rehydrates it from `origin/<branch>` when the worktree was already cleaned up. Either way the skipped phases are marked `⊝ SKIPPED (-StartPhase …)` in the run summary.
 
 ---
 
