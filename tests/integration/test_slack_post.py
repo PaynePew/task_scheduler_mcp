@@ -209,8 +209,11 @@ async def test_slack_post_from_run_id_ok_variant(session_factory):
         template=SlackTemplate.digest_v1,
     )
 
+    # Patch the module-level engine's session factory so _message_from_upstream
+    # uses the per-test engine instead of the shared module-level singleton.
     with (
         patch("app.actions.slack_post.get_token", AsyncMock(return_value="xoxb-fake-token")),
+        patch("app.db.engine.async_session_factory", session_factory),
         patch("app.actions.slack_post.httpx.AsyncClient", return_value=ctx),
     ):
         result = await handler.execute(run=FakeRun(), params=params)
@@ -238,8 +241,11 @@ async def test_slack_post_from_run_id_error_variant(session_factory):
         template=SlackTemplate.digest_v1,
     )
 
+    # Patch the module-level engine's session factory so _message_from_upstream
+    # uses the per-test engine instead of the shared module-level singleton.
     with (
         patch("app.actions.slack_post.get_token", AsyncMock(return_value="xoxb-fake-token")),
+        patch("app.db.engine.async_session_factory", session_factory),
         patch("app.actions.slack_post.httpx.AsyncClient", return_value=ctx),
     ):
         result = await handler.execute(run=FakeRun(), params=params)
