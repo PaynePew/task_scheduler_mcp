@@ -18,6 +18,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     Text,
     UniqueConstraint,
     func,
@@ -209,9 +210,7 @@ class OAuthConnection(Base):
     # Canonical provider slug: "github" | "slack" | "google"
     provider: Mapped[str] = mapped_column(Text, nullable=False)
     # KMS envelope-encrypted JSON containing access_token, refresh_token, scope, etc.
-    encrypted_blob: Mapped[bytes] = mapped_column(
-        __import__("sqlalchemy").LargeBinary, nullable=False
-    )
+    encrypted_blob: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     # Plaintext access-token expiry — allows refresh-window check without decrypting.
     # NULL means the token has no known expiry (treat as non-expiring).
     expires_at: Mapped[datetime | None] = mapped_column(TZ, nullable=True)
