@@ -28,12 +28,6 @@ class Settings(BaseSettings):
     queue_dlq_url: str = "http://localhost:9324/queue/task-dlq"
     # Default identity when stdio transport runs without MCP_USER_ID set (ADR-015).
     mcp_user_id: str = "default-user"
-    # Verified operator identity — user_id that bypasses the requires_operator gate
-    # (ADR-051) and is the migration target for default-user rows in 0005 (ADR-059).
-    # Defaults to "default-user" so the single-operator setup works out of the box
-    # and migration 0005 is a no-op in unset deployments. Set to the operator's
-    # actual WorkOS sub before running migration 0005. Override via OPERATOR_USER_ID.
-    operator_user_id: str = "default-user"
     # Optional user timezone forwarded from the client environment (ADR-017).
     # Falls back to the X-Timezone header, then "UTC". Set via MCP_USER_TZ.
     mcp_user_tz: str | None = None
@@ -70,10 +64,6 @@ class Settings(BaseSettings):
     quota_active_total_per_user: int = 50
     quota_global_active_recurring: int = 500
 
-    # Operator user identity (ADR-055). When set, this user_id is exempt from
-    # all rate-limit and containment caps. Leave empty to disable exemption.
-    operator_user_id: str = ""
-
     # WorkOS AuthKit / OAuth 2.1 resource-server settings (ADR-053).
     # All three must be set together for HTTP auth to be enforced; when any
     # is absent the server runs in trust-only mode (for local dev / CI without
@@ -85,8 +75,13 @@ class Settings(BaseSettings):
     workos_jwks_uri: str | None = None
     workos_audience: str | None = None
 
-    # Operator's WorkOS sub — used to identify the operator in multi-tenant
-    # contexts (quota exemptions, action-tiering).  Set via OPERATOR_USER_ID.
+    # Operator user identity — the operator's WorkOS sub. When set:
+    #   - exempt from rate-limit and containment caps (ADR-055), and
+    #   - allowed to invoke requires_operator actions (ADR-053 action-tiering).
+    # Leave unset (None) to disable both gates. Override via OPERATOR_USER_ID.
+    #
+    # Note: migration 0005 (ADR-059) reads OPERATOR_USER_ID directly from the
+    # environment, not from this setting — keep both in sync at deploy time.
     operator_user_id: str | None = None
 
     # Overload protection (ADR-057).
@@ -107,6 +102,22 @@ class Settings(BaseSettings):
     # When set, a LogtailHandler ships logs to Better Stack.
     # Leave unset in local dev — logs go to stdout only.
     better_stack_source_token: str | None = None
+
+    # AWS KMS envelope encryption for OAuth token storage (ADR-054).
+    # kms_key_id: CMK ARN or alias — required for connection-store encrypt/decrypt.
+    # kms_region: AWS region where the CMK lives (Lightsail is ap-northeast-1).
+    # aws_access_key_id / aws_secret_access_key: IAM user scoped to
+    #   kms:GenerateDataKey + kms:Decrypt on this one CMK (stored in .env 0600).
+    # All four are optional so local dev / CI without real KMS keeps working;
+    # connection-store operations raise at runtime if kms_key_id is unset.
+    kms_key_id: str | None = None
+    kms_region: str = "ap-northeast-1"
+    aws_access_key_id: str | None = None
+    aws_secret_access_key: str | None = None
+
+    # Refresh window: re-fetch a connection's access token when it expires within
+    # this many seconds (default 5 minutes).
+    connection_refresh_window_seconds: int = 300
 
     # Operator-subsidized LLM actions (ADR-052).
     # LLM_MODEL: pinned cheap model — callers cannot override this.

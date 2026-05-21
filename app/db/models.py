@@ -22,6 +22,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     Text,
     UniqueConstraint,
     func,
@@ -192,6 +193,37 @@ class RunEvent(Base):
             "event_type",
             postgresql_where="event_type IN ('SUCCEEDED','FAILED','CANCELLED')",
         ),
+    )
+
+
+class OAuthConnection(Base):
+    """Per-user, per-provider OAuth token storage (ADR-054, ADR-050).
+
+    Token data (access token, refresh token, scope, expiry) is stored as an
+    opaque KMS-encrypted blob.  No plaintext token bytes are persisted.
+    The encrypted_blob column contains the serialised output of
+    KmsEnvelope.encrypt() — a JSON envelope with wrapped DEK + AES-GCM
+    ciphertext.  expires_at is stored plaintext for cheap refresh-window
+    queries without needing to decrypt the blob on every read.
+    """
+
+    __tablename__ = "oauth_connections"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    # Canonical provider slug: "github" | "slack" | "google"
+    provider: Mapped[str] = mapped_column(Text, nullable=False)
+    # KMS envelope-encrypted JSON containing access_token, refresh_token, scope, etc.
+    encrypted_blob: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    # Plaintext access-token expiry — allows refresh-window check without decrypting.
+    # NULL means the token has no known expiry (treat as non-expiring).
+    expires_at: Mapped[datetime | None] = mapped_column(TZ, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(TZ, nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(TZ, nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "provider", name="uq_oauth_connections_user_provider"),
+        Index("idx_oauth_connections_user_id", "user_id"),
     )
 
 

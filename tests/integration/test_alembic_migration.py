@@ -331,19 +331,41 @@ def test_0005_task_list_returns_migrated_jobs():
 
 @pytest.mark.integration
 def test_0005_downgrade_removes_user_id_column():
-    """Downgrading from 0005 removes the user_id column from job_runs."""
+    """Downgrading from 0005 to 0004 removes the user_id column from job_runs."""
     url = os.environ["ALEMBIC_DATABASE_URL"]
 
-    # Ensure 0005 is applied.
-    _run_alembic_with_operator("upgrade", "head")
+    # Ensure 0005 is applied (use explicit revision, not head, so this test
+    # keeps working when later migrations are added).
+    _run_alembic_with_operator("upgrade", "0005")
     cols_before = _get_job_run_columns(url)
     assert "user_id" in cols_before, "user_id must exist before downgrade"
 
     # Downgrade to 0004 explicitly — tests migration 0005's downgrade (removes user_id).
-    # Using "-1" would now go 0006→0005 (removing llm_token_budgets) since 0006 is head.
+    # Stays explicit so the test still targets the right revision boundary as more
+    # migrations are added on top.
     _run_alembic_with_operator("downgrade", "0004")
     cols_after = _get_job_run_columns(url)
     assert "user_id" not in cols_after, "user_id must be removed after downgrade from 0005"
 
     # Re-apply so the DB is back at head for subsequent tests.
     _run_alembic_with_operator("upgrade", "head")
+
+
+@pytest.mark.integration
+def test_0006_creates_and_drops_oauth_connections():
+    """Migration 0006 creates oauth_connections; downgrade drops it."""
+    url = os.environ["ALEMBIC_DATABASE_URL"]
+    engine = sa.create_engine(url)
+
+    _run_alembic_with_operator("upgrade", "0006")
+    with engine.connect() as conn:
+        tables = sa.inspect(conn).get_table_names()
+    assert "oauth_connections" in tables, "oauth_connections must exist after 0006 upgrade"
+
+    _run_alembic_with_operator("downgrade", "0005")
+    with engine.connect() as conn:
+        tables_after = sa.inspect(conn).get_table_names()
+    assert "oauth_connections" not in tables_after, "oauth_connections must be gone after downgrade"
+
+    _run_alembic_with_operator("upgrade", "head")
+    engine.dispose()
