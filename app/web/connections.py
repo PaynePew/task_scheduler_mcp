@@ -20,6 +20,7 @@ Trust-only mode (when workos_client_id is not set):
 
 from __future__ import annotations
 
+import logging
 import secrets
 import urllib.parse
 from datetime import UTC, datetime, timedelta
@@ -36,6 +37,8 @@ from app.config.settings import settings
 from app.connections.store import ConnectionMiss, ConnectionStore
 from app.crypto.kms_envelope import KmsEnvelope
 from app.db.identity import resolve_user_id_stdio
+
+logger = logging.getLogger(__name__)
 
 _SESSION_COOKIE = "session"
 _STATE_COOKIE = "oauth_state"
@@ -198,7 +201,9 @@ def make_routes(
                     infos = await store.list(user_id)
                     connected_providers = [info.provider for info in infos]
             except Exception:
-                pass
+                # Render an empty dashboard rather than 500-ing on a transient
+                # DB/KMS failure; the user can still hit Connect to retry.
+                logger.exception("failed to list connections for user %s", user_id)
 
         html = _render_dashboard(user_id, connected_providers)
         return HTMLResponse(html)
@@ -284,6 +289,7 @@ def make_routes(
                 payload = jwt.decode(id_token, options={"verify_signature": False})
                 user_id = payload.get("sub") or ""
             except Exception:
+                logger.exception("failed to decode WorkOS id_token fallback")
                 user_id = ""
         if not user_id:
             return HTMLResponse("Could not determine user identity from token", status_code=502)
