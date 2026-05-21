@@ -34,6 +34,7 @@ from typing import Any
 
 import httpx
 import jwt
+from jwt import PyJWKClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, RedirectResponse, Response
@@ -131,7 +132,7 @@ def _verify_id_token_sub(
     issuer: str,
     client_id: str,
     jwks_uri: str,
-    _jwks_client=None,
+    _jwks_client: PyJWKClient | None = None,
 ) -> str:
     """Verify an OIDC id_token signature and return the verified sub claim.
 
