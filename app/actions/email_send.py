@@ -43,13 +43,7 @@ import httpx
 from pydantic import BaseModel, EmailStr
 
 from app.actions.base import ActionResult, CredentialMode
-from app.chain.upstream_reader import (
-    InvalidJson,
-    NoResult,
-    Ok,
-    UpstreamError,
-    read_upstream,
-)
+from app.chain.upstream_reader import resolve_for_display
 from app.config.settings import settings
 from app.connections.store import ConnectionMiss, get_token
 from app.secrets.resolver import SecretResolutionError, build_effective_whitelist, resolve
@@ -387,26 +381,12 @@ class EmailSendHandler:
             retryable=False,
         )
 
-    async def _body_from_upstream(
-        self, from_run_id: int, formatter: Callable[..., str]
-    ) -> str | ActionResult:
+    async def _body_from_upstream(self, from_run_id: int, formatter: Callable[..., str]) -> str:
         from app.db.engine import async_session_factory  # noqa: PLC0415
 
         async with async_session_factory() as session:
             async with session.begin():
-                upstream = await read_upstream(run_id=from_run_id, session=session)
-
-        if isinstance(upstream, Ok):
-            return formatter(upstream.data, is_error=False)
-        if isinstance(upstream, UpstreamError):
-            return formatter(upstream.error_msg, is_error=True)
-        if isinstance(upstream, NoResult):
-            return formatter("(no result)", is_error=True)
-        if isinstance(upstream, InvalidJson):
-            return formatter(f"(invalid JSON: {upstream.raw[:100]})", is_error=True)
-        return ActionResult(
-            ok=False, result=None, error="unknown upstream payload", retryable=False
-        )
+                return await resolve_for_display(from_run_id, session, formatter=formatter)
 
 
 # ---------------------------------------------------------------------------
