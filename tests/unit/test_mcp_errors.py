@@ -1,6 +1,10 @@
 """Unit tests for app/mcp/errors.py — domain exception → error envelope mapping."""
 
-from app.domain.jobs import UnknownActionError, UnsupportedScheduleTypeError
+from app.domain.jobs import (
+    OperatorOnlyActionError,
+    UnknownActionError,
+    UnsupportedScheduleTypeError,
+)
 from app.mcp.errors import map_domain_error
 
 
@@ -36,3 +40,17 @@ def test_value_error_maps_to_user_input():
 def test_error_message_is_non_empty():
     result = map_domain_error(UnknownActionError("x"))
     assert len(result["error"]["message"]) > 0
+
+
+# ---------------------------------------------------------------------------
+# ADR-060 regression: 4 drift codes must map to existing vocabulary codes
+# ---------------------------------------------------------------------------
+
+
+def test_operator_only_maps_to_invalid_state():
+    """OperatorOnlyActionError must use INVALID_STATE (not OPERATOR_ONLY) per ADR-060."""
+    result = map_domain_error(OperatorOnlyActionError("http_call"))
+    assert result["ok"] is False
+    assert result["error"]["code"] == "INVALID_STATE"
+    msg = result["error"]["message"].lower()
+    assert "operator" in msg or "restricted" in msg

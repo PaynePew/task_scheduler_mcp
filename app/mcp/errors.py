@@ -26,7 +26,8 @@ from app.mcp.envelope import error
 def map_domain_error(exc: Exception) -> dict[str, Any]:
     """Return an error envelope for a domain exception.
 
-    Codes: USER_INPUT | NOT_FOUND | INVALID_STATE | UNKNOWN_ACTION | DUPLICATE | INTERNAL
+    Codes: USER_INPUT | NOT_FOUND | INVALID_STATE | UNKNOWN_ACTION
+           | DUPLICATE | INTERNAL | MISSING_CONNECTION
     """
     if isinstance(exc, UnknownActionError):
         return error(
@@ -37,7 +38,7 @@ def map_domain_error(exc: Exception) -> dict[str, Any]:
         )
     if isinstance(exc, OperatorOnlyActionError):
         return error(
-            "OPERATOR_ONLY",
+            "INVALID_STATE",
             f"Action '{exc}' is restricted to the operator.",
             field="action",
         )
