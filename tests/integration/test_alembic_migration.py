@@ -339,8 +339,9 @@ def test_0005_downgrade_removes_user_id_column():
     cols_before = _get_job_run_columns(url)
     assert "user_id" in cols_before, "user_id must exist before downgrade"
 
-    # Downgrade one step.
-    _run_alembic_with_operator("downgrade", "-1")
+    # Downgrade to 0004 explicitly — tests migration 0005's downgrade (removes user_id).
+    # Using "-1" would now go 0006→0005 (removing llm_token_budgets) since 0006 is head.
+    _run_alembic_with_operator("downgrade", "0004")
     cols_after = _get_job_run_columns(url)
     assert "user_id" not in cols_after, "user_id must be removed after downgrade from 0005"
 

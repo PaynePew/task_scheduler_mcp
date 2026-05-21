@@ -419,7 +419,7 @@ def test_r2_upload_removed_from_registry():
 
 
 def test_registry_has_eight_actions():
-    """task.list_actions.v1 exposes 8 actions (r2_upload removed in #132; llm actions added in #137)."""
+    """task.list_actions.v1 exposes 8 actions (r2_upload removed #132; llm actions added #137)."""
     assert len(ACTION_REGISTRY) == 8
     expected = {
         "echo",

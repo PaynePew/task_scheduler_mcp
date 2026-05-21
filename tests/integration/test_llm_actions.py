@@ -42,7 +42,15 @@ async def session_factory() -> async_sessionmaker[AsyncSession]:
     async with factory() as session:
         async with session.begin():
             await session.execute(text("DELETE FROM run_events"))
-            await session.execute(text("DELETE FROM llm_token_budgets"))
+            await session.execute(
+                text(
+                    "DO $$ BEGIN"
+                    "  IF to_regclass('public.llm_token_budgets') IS NOT NULL"
+                    "    THEN DELETE FROM llm_token_budgets;"
+                    "  END IF;"
+                    " END $$"
+                )
+            )
             await session.execute(text("DELETE FROM job_runs"))
             await session.execute(text("DELETE FROM jobs"))
     await engine.dispose()
