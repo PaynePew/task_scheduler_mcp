@@ -68,7 +68,6 @@ def _seconds_until_utc_midnight(now: datetime) -> int:
 
 def _seconds_until_next_month(now: datetime) -> int:
     """Seconds from *now* until 00:00:00 UTC on the first day of the next month."""
-
     year, month = now.year, now.month
     if month == 12:
         year, month = year + 1, 1
