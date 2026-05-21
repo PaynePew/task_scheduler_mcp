@@ -2,7 +2,7 @@
 
 Credential modes:
   - Public users (oauth_connection): sends via Gmail API using the caller's
-    Google OAuth token from the connection store (provider="google").
+    Google OAuth token via get_token(user_id, "google") (provider="google").
   - Operator (operator env): sends via SMTP using SMTP_HOST/PORT/USER/PASSWORD
     and EMAIL_FROM env vars (ADR-032). No Google connection required.
 
@@ -41,7 +41,6 @@ from typing import Any, ClassVar
 import aiosmtplib
 import httpx
 from pydantic import BaseModel, EmailStr
-from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.actions.base import ActionResult, CredentialMode
 from app.chain.upstream_reader import (
@@ -52,9 +51,7 @@ from app.chain.upstream_reader import (
     read_upstream,
 )
 from app.config.settings import settings
-from app.connections.store import ConnectionMiss, ConnectionStore
-from app.crypto.envelope_factory import kms_envelope_from_settings as _make_default_kms_envelope
-from app.crypto.kms_envelope import KmsEnvelope
+from app.connections.store import ConnectionMiss, get_token
 from app.secrets.resolver import SecretResolutionError, build_effective_whitelist, resolve
 
 _GMAIL_SEND_URL = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send"
@@ -113,9 +110,7 @@ class EmailSendHandler:
     Public users need a Google OAuth connection (provider="google") stored in
     the connection store. The operator uses SMTP env vars (ADR-032).
 
-    Pass *session_factory* and *kms_envelope* to override the defaults — useful
-    in tests that need to inject pre-seeded state without touching the real DB
-    pool or KMS.
+    Patch app.actions.email_send.get_token in tests to override OAuth lookup.
     """
 
     name: ClassVar[str] = "email_send"
@@ -133,26 +128,6 @@ class EmailSendHandler:
     requires_operator: ClassVar[bool] = False
     credential_mode: ClassVar[CredentialMode] = CredentialMode.oauth_connection
     required_provider: ClassVar[str] = "google"
-
-    def __init__(
-        self,
-        session_factory: async_sessionmaker | None = None,
-        kms_envelope: KmsEnvelope | None = None,
-    ) -> None:
-        self._session_factory = session_factory
-        self._kms_envelope = kms_envelope
-
-    def _get_session_factory(self) -> Any:
-        if self._session_factory is not None:
-            return self._session_factory
-        from app.db.engine import async_session_factory  # noqa: PLC0415
-
-        return async_session_factory
-
-    def _get_kms_envelope(self) -> KmsEnvelope | None:
-        if self._kms_envelope is not None:
-            return self._kms_envelope
-        return _make_default_kms_envelope()
 
     async def execute(self, run: Any, params: EmailSendParams) -> ActionResult:
         # Resolve any ${VAR} references (ADR-032) in subject/body.
@@ -310,25 +285,8 @@ class EmailSendHandler:
                 retryable=False,
             )
 
-        envelope = self._get_kms_envelope()
-        if envelope is None:
-            return ActionResult(
-                ok=False,
-                result=None,
-                error=(
-                    "email_send: KMS not configured — cannot decrypt Google connection. "
-                    "Set KMS_KEY_ID in environment."
-                ),
-                retryable=False,
-            )
-
-        factory = self._get_session_factory()
         try:
-            async with factory() as session:
-                store = ConnectionStore(session, envelope)
-                token = await store.get_fresh_token(
-                    user_id, "google", refresher=_make_google_refresher()
-                )
+            token = await get_token(user_id, "google", refresher=_make_google_refresher())
         except ConnectionMiss:
             connect_url = f"{settings.connections_base_url}/connections"
             return ActionResult(
@@ -432,8 +390,9 @@ class EmailSendHandler:
     async def _body_from_upstream(
         self, from_run_id: int, formatter: Callable[..., str]
     ) -> str | ActionResult:
-        factory = self._get_session_factory()
-        async with factory() as session:
+        from app.db.engine import async_session_factory  # noqa: PLC0415
+
+        async with async_session_factory() as session:
             async with session.begin():
                 upstream = await read_upstream(run_id=from_run_id, session=session)
 

@@ -1,9 +1,8 @@
 """slack_post action handler — posts to a Slack channel via the Web API.
 
 Credential resolution (ADR-050, ADR-051):
-  credential_mode = oauth_connection — resolves the Slack bot token from the
-  connection store keyed by (job.user_id, "slack").  The session_factory and
-  kms_envelope are injected at construction time; defaults to module-level singletons.
+  credential_mode = oauth_connection — resolves the Slack bot token via
+  the get_token facade keyed by (job.user_id, "slack").
 
 If the user has no Slack connection:
   - execute() returns ok=False, retryable=False with a descriptive error + connect_url.
@@ -36,7 +35,6 @@ from typing import Any, ClassVar
 
 import httpx
 from pydantic import BaseModel
-from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.actions.base import ActionResult, CredentialMode
 from app.chain.upstream_reader import (
@@ -46,9 +44,7 @@ from app.chain.upstream_reader import (
     UpstreamError,
     read_upstream,
 )
-from app.connections.store import ConnectionMiss, ConnectionStore
-from app.crypto.envelope_factory import kms_envelope_from_settings as _make_default_kms_envelope
-from app.crypto.kms_envelope import KmsEnvelope
+from app.connections.store import ConnectionMiss, get_token
 
 _SLACK_API_BASE = "https://slack.com/api"
 
@@ -129,10 +125,8 @@ _TEMPLATE_FORMATTERS: dict[SlackTemplate, Callable[..., str]] = {
 class SlackPostHandler:
     """Posts a message to a Slack channel via the Slack Web API.
 
-    Resolves the bot token from the connection store keyed by (run.user_id, "slack").
-    Pass *session_factory* and *kms_envelope* to override module-level defaults —
-    useful in tests that need to inject pre-seeded sessions without touching the
-    real engine pool or real AWS KMS.
+    Resolves the bot token via get_token(user_id, "slack") from the connection
+    store. Patch app.actions.slack_post.get_token in tests.
     """
 
     name: ClassVar[str] = "slack_post"
@@ -148,47 +142,9 @@ class SlackPostHandler:
     credential_mode: ClassVar[CredentialMode] = CredentialMode.oauth_connection
     required_provider: ClassVar[str] = "slack"
 
-    def __init__(
-        self,
-        session_factory: async_sessionmaker | None = None,
-        kms_envelope: KmsEnvelope | None = None,
-    ) -> None:
-        self._session_factory = session_factory
-        self._kms_envelope = kms_envelope
-
-    def _get_session_factory(self) -> async_sessionmaker:
-        if self._session_factory is not None:
-            return self._session_factory
-        from app.db.engine import async_session_factory  # noqa: PLC0415
-
-        return async_session_factory
-
-    def _get_kms_envelope(self) -> KmsEnvelope | None:
-        if self._kms_envelope is not None:
-            return self._kms_envelope
-        return _make_default_kms_envelope()
-
     async def execute(self, run: Any, params: SlackPostParams) -> ActionResult:
-        user_id: str = run.user_id
-
-        # Look up the Slack token from the connection store.
-        envelope = self._get_kms_envelope()
-        if envelope is None:
-            return ActionResult(
-                ok=False,
-                result=None,
-                error=(
-                    "slack_post: KMS not configured — cannot decrypt Slack connection. "
-                    "Set KMS_KEY_ID in environment."
-                ),
-                retryable=False,
-            )
-
-        factory = self._get_session_factory()
         try:
-            async with factory() as session:
-                store = ConnectionStore(session, envelope)
-                token = await store.get_fresh_token(user_id, "slack")
+            token = await get_token(run.user_id, "slack", refresher=None)
         except ConnectionMiss:
             from app.config.settings import settings  # noqa: PLC0415
 
@@ -243,8 +199,9 @@ class SlackPostHandler:
     async def _message_from_upstream(
         self, from_run_id: int, formatter: Callable[..., str]
     ) -> str | ActionResult:
-        factory = self._get_session_factory()
-        async with factory() as session:
+        from app.db.engine import async_session_factory  # noqa: PLC0415
+
+        async with async_session_factory() as session:
             async with session.begin():
                 upstream = await read_upstream(run_id=from_run_id, session=session)
 
