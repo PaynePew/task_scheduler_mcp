@@ -32,7 +32,6 @@ from __future__ import annotations
 
 import asyncio
 import io
-import json
 import os
 import ssl
 from typing import Any, ClassVar
@@ -43,7 +42,7 @@ from boto3.s3.transfer import TransferConfig
 from pydantic import BaseModel
 
 from app.actions.base import ActionResult
-from app.chain.upstream_reader import InvalidJson, NoResult, Ok, UpstreamError, read_upstream
+from app.chain.upstream_reader import resolve_or_terminal
 from app.secrets.resolver import SecretResolutionError, build_effective_whitelist, resolve
 
 _MULTIPART_THRESHOLD = 100 * 1024 * 1024  # 100 MB
@@ -178,29 +177,14 @@ class R2UploadHandler:
             factory = self._get_session_factory()
             async with factory() as session:
                 async with session.begin():
-                    upstream = await read_upstream(run_id=params.from_run_id, session=session)
-
-            if isinstance(upstream, Ok):
-                return json.dumps(upstream.data).encode()
-            if isinstance(upstream, UpstreamError):
-                return ActionResult(
-                    ok=False,
-                    result=None,
-                    error=f"Upstream run failed: {upstream.error_msg}",
-                    retryable=False,
-                )
-            if isinstance(upstream, NoResult):
-                return ActionResult(
-                    ok=False,
-                    result=None,
-                    error="Upstream run not found or has no result",
-                    retryable=False,
-                )
-            if isinstance(upstream, InvalidJson):
-                return upstream.raw.encode()
-            return ActionResult(
-                ok=False, result=None, error="Unknown upstream payload", retryable=False
-            )
+                    result = await resolve_or_terminal(
+                        params.from_run_id,
+                        session,
+                        on_invalid_json="accept_raw",
+                    )
+            if isinstance(result, ActionResult):
+                return result
+            return result.encode()
 
         if resolved_content is not None:
             return resolved_content.encode()

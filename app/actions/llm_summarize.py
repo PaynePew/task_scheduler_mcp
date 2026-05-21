@@ -18,18 +18,12 @@ or ``text`` must be set.
 
 from __future__ import annotations
 
-import json
 from typing import Any, ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
 from app.actions.base import ActionResult, CredentialMode
-from app.chain.upstream_reader import (
-    NoResult,
-    Ok,
-    UpstreamError,
-    read_upstream,
-)
+from app.chain.upstream_reader import resolve_or_terminal
 from app.llm.budget import (
     DailyBudgetExceeded,
     GlobalCeilingExceeded,
@@ -235,34 +229,14 @@ class LlmSummarizeHandler:
         if params.text is not None:
             return params.text
 
-        # from_run_id path (guaranteed non-None by params validator)
         factory = self._get_session_factory()
         async with factory() as session:
             async with session.begin():
-                upstream = await read_upstream(
-                    run_id=params.from_run_id,  # type: ignore[arg-type]
-                    session=session,
+                return await resolve_or_terminal(
+                    params.from_run_id,  # type: ignore[arg-type]
+                    session,
+                    on_invalid_json="accept_raw",
                 )
-
-        if isinstance(upstream, Ok):
-            data = upstream.data
-            return json.dumps(data) if not isinstance(data, str) else data
-        if isinstance(upstream, UpstreamError):
-            return ActionResult(
-                ok=False,
-                result=None,
-                error=f"Upstream run failed: {upstream.error_msg}",
-                retryable=False,
-            )
-        if isinstance(upstream, NoResult):
-            return ActionResult(
-                ok=False,
-                result=None,
-                error=f"Upstream run {params.from_run_id} has no result",
-                retryable=False,
-            )
-        # InvalidJson
-        return upstream.raw  # summarize raw text even if not valid JSON
 
     @staticmethod
     def _get_user_id(run: Any) -> str:

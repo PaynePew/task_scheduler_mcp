@@ -10,9 +10,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import botocore.exceptions
 import pytest
 
+from app.actions.base import ActionResult
 from app.actions.r2_upload import _MULTIPART_THRESHOLD, R2UploadHandler, R2UploadParams
 from app.actions.registry import ACTION_REGISTRY
-from app.chain.upstream_reader import InvalidJson, NoResult, Ok, UpstreamError
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -56,10 +56,10 @@ def _make_handler(
 def _make_mock_session_factory() -> Any:
     """Build an async-context-manager mock with the shape the handler expects.
 
-    The actual upstream variant returned by ``read_upstream`` is configured per
-    test via ``patch("app.actions.r2_upload.read_upstream", ...)``; this helper
-    only fakes the ``async with factory() as session: async with session.begin():``
-    plumbing the handler walks before calling read_upstream.
+    The actual upstream variant returned by ``resolve_or_terminal`` is configured
+    per test via ``patch("app.actions.r2_upload.resolve_or_terminal", ...)``; this
+    helper only fakes the ``async with factory() as session: async with session.begin():``
+    plumbing the handler walks before calling resolve_or_terminal.
     """
     mock_session = AsyncMock()
     mock_session.begin = MagicMock(return_value=mock_session)
@@ -283,7 +283,10 @@ async def test_from_run_id_ok_serializes_json():
     )
     params = R2UploadParams(bucket_path="reports/out.json", from_run_id=99)
 
-    with patch("app.actions.r2_upload.read_upstream", AsyncMock(return_value=Ok(data=data))):
+    with patch(
+        "app.actions.r2_upload.resolve_or_terminal",
+        AsyncMock(return_value=json.dumps(data)),
+    ):
         with patch.dict("os.environ", _R2_ENV):
             result = await handler.execute(run=None, params=params)
 
@@ -303,8 +306,10 @@ async def test_from_run_id_upstream_error_returns_failure():
     )
     params = R2UploadParams(bucket_path="reports/out.json", from_run_id=99)
 
-    upstream_payload = UpstreamError(error_msg="upstream failed")
-    with patch("app.actions.r2_upload.read_upstream", AsyncMock(return_value=upstream_payload)):
+    terminal = ActionResult(
+        ok=False, result=None, error="Upstream run failed: upstream failed", retryable=False
+    )
+    with patch("app.actions.r2_upload.resolve_or_terminal", AsyncMock(return_value=terminal)):
         with patch.dict("os.environ", _R2_ENV):
             result = await handler.execute(run=None, params=params)
 
@@ -323,7 +328,10 @@ async def test_from_run_id_no_result_returns_failure():
     )
     params = R2UploadParams(bucket_path="reports/out.json", from_run_id=99)
 
-    with patch("app.actions.r2_upload.read_upstream", AsyncMock(return_value=NoResult())):
+    terminal = ActionResult(
+        ok=False, result=None, error="Upstream run 99 has no result", retryable=False
+    )
+    with patch("app.actions.r2_upload.resolve_or_terminal", AsyncMock(return_value=terminal)):
         with patch.dict("os.environ", _R2_ENV):
             result = await handler.execute(run=None, params=params)
 
@@ -333,7 +341,7 @@ async def test_from_run_id_no_result_returns_failure():
 
 @pytest.mark.asyncio
 async def test_from_run_id_invalid_json_uploads_raw():
-    """from_run_id with InvalidJson → raw bytes are uploaded (pass-through)."""
+    """from_run_id with accept_raw InvalidJson → raw bytes are uploaded (pass-through)."""
     raw = "not-valid-json-but-upload-anyway"
     mock_session_factory = _make_mock_session_factory()
     mock_client = _make_mock_s3_client()
@@ -342,7 +350,7 @@ async def test_from_run_id_invalid_json_uploads_raw():
     )
     params = R2UploadParams(bucket_path="reports/raw.txt", from_run_id=99)
 
-    with patch("app.actions.r2_upload.read_upstream", AsyncMock(return_value=InvalidJson(raw=raw))):
+    with patch("app.actions.r2_upload.resolve_or_terminal", AsyncMock(return_value=raw)):
         with patch.dict("os.environ", _R2_ENV):
             result = await handler.execute(run=None, params=params)
 
