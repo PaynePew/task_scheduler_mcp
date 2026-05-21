@@ -95,7 +95,9 @@ def mcp_client(session_factory) -> httpx.AsyncClient:
     cross-event-loop errors that arise when the module-level engine pool is
     reused across pytest-asyncio function-scoped event loops.
     """
-    app = build_app(json_response=True, session_factory=session_factory)
+    # shed_fn=lambda: False disables real-CPU load shedding so a busy CI
+    # runner can't return 503 before the request reaches the handler.
+    app = build_app(json_response=True, session_factory=session_factory, shed_fn=lambda: False)
     transport = httpx.ASGITransport(app=app)
     return httpx.AsyncClient(transport=transport, base_url="http://test")
 

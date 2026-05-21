@@ -30,7 +30,10 @@ def auth_enabled_app(monkeypatch):
     are rejected before any WorkOS call is made.
     """
     monkeypatch.setattr(mcp_http, "_AUTH_ENABLED", True)
-    app = mcp_http.build_app(json_response=True)
+    # Disable health-based load shedding: should_shed() reads live CPU via
+    # psutil, so on a saturated CI runner (cpu>=90%) the /mcp request is
+    # shed with 503 *before* auth runs — masking the 401 these tests assert.
+    app = mcp_http.build_app(json_response=True, shed_fn=lambda: False)
     return app
 
 

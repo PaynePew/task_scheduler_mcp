@@ -212,7 +212,9 @@ def sqs() -> SQSClient:
 @pytest.fixture
 def mcp_client(session_factory) -> httpx.AsyncClient:
     """In-process httpx client pointed at the MCP HTTP ASGI app (json_response mode)."""
-    app = build_app(json_response=True, session_factory=session_factory)
+    # shed_fn=lambda: False disables real-CPU load shedding so a busy CI
+    # runner can't return 503 before the request reaches the handler.
+    app = build_app(json_response=True, session_factory=session_factory, shed_fn=lambda: False)
     transport = httpx.ASGITransport(app=app)
     return httpx.AsyncClient(transport=transport, base_url="http://test")
 
