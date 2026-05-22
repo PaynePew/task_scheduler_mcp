@@ -62,11 +62,15 @@ if isinstance(POSTURE, TrustOnly):
 
 
 def _www_authenticate_header() -> str:
-    """Build the WWW-Authenticate value pointing at WorkOS (RFC 6750 / RFC 9728)."""
+    """Build the WWW-Authenticate value (RFC 6750 / RFC 9728).
+
+    resource_metadata MUST point at the resource server's own PRM endpoint
+    (this server), not the authorization server. RFC 9728 §2.
+    """
     parts = ['Bearer realm="task-scheduler-mcp"']
     if settings.workos_issuer:
         parts.append(
-            f'resource_metadata="{settings.workos_issuer}/.well-known/oauth-protected-resource"'
+            f'resource_metadata="{settings.connections_base_url}/.well-known/oauth-protected-resource"'
         )
     return ", ".join(parts)
 
