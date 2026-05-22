@@ -25,6 +25,7 @@ import logging
 from collections.abc import Callable
 
 import anyio
+import httpx
 from anyio.abc import TaskStatus
 from mcp.server.streamable_http import StreamableHTTPServerTransport
 from sqlalchemy import text
@@ -300,40 +301,36 @@ def _make_prm_endpoint() -> Route:
 def _make_as_metadata_endpoint() -> Route:
     """Return the /.well-known/oauth-authorization-server route (RFC 8414).
 
-    MCP clients fall back to fetching AS metadata at the resource server's own
-    domain when the authorization_servers entry in PRM is unreachable
-    (observed with WorkOS Production without a paid AuthKit custom domain).
-    We hand-craft a metadata document pointing at WorkOS /sso/* endpoints so
-    the discovery chain can at least continue past this step.
-
-    Caveat: this does NOT include a registration_endpoint — WorkOS /sso/* does
-    not expose DCR. Clients that require DCR (e.g. Claude Desktop's connector)
-    will still fail at the registration step, but with a clearer error than
-    the silent 404 we returned before.
+    Proxies upstream from WORKOS_ISSUER (the AuthKit domain). MCP clients that
+    follow PRM go directly to AuthKit; this endpoint exists for older clients
+    that probe the RS host. Proxying guarantees `issuer`, `registration_endpoint`,
+    `jwks_uri`, etc. stay in lock-step with AuthKit instead of being hand-rolled
+    (which drifts and violates RFC 8414 §3.3).
     """
 
     async def _as_metadata(_request: Request) -> JSONResponse:
-        if not settings.workos_issuer or not settings.workos_client_id:
+        if not settings.workos_issuer:
             return JSONResponse(
                 {"error": "as_metadata_unavailable"},
                 status_code=404,
             )
-        issuer = settings.workos_issuer
-        body: dict[str, object] = {
-            "issuer": issuer,
-            "authorization_endpoint": f"{issuer}/sso/authorize",
-            "token_endpoint": f"{issuer}/sso/token",
-            "jwks_uri": f"{issuer}/sso/jwks/{settings.workos_client_id}",
-            "response_types_supported": ["code"],
-            "grant_types_supported": ["authorization_code"],
-            "code_challenge_methods_supported": ["S256"],
-            "token_endpoint_auth_methods_supported": [
-                "client_secret_post",
-                "client_secret_basic",
-            ],
-            "scopes_supported": ["openid", "profile", "email"],
-        }
-        return JSONResponse(body)
+        upstream = f"{settings.workos_issuer.rstrip('/')}/.well-known/oauth-authorization-server"
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(upstream)
+        except httpx.HTTPError as exc:
+            logger.warning("AS metadata upstream fetch failed: %s", exc)
+            return JSONResponse(
+                {"error": "as_metadata_upstream_unreachable"},
+                status_code=502,
+            )
+        if resp.status_code != 200:
+            logger.warning("AS metadata upstream %s returned %s", upstream, resp.status_code)
+            return JSONResponse(
+                {"error": "as_metadata_upstream_error"},
+                status_code=502,
+            )
+        return JSONResponse(resp.json())
 
     return Route(
         "/.well-known/oauth-authorization-server",
