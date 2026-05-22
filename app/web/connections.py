@@ -247,6 +247,10 @@ def make_routes(
                 "redirect_uri": cb,
                 "scope": "openid profile email",
                 "state": state,
+                # WorkOS /sso/authorize requires a connection selector;
+                # "authkit" sends the user to the AuthKit hosted UI where
+                # they choose between configured social providers / email.
+                "provider": "authkit",
             }
             qs = urllib.parse.urlencode(params)
             authorize_url = f"{settings.workos_issuer}/sso/authorize?{qs}"

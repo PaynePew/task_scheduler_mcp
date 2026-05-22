@@ -36,6 +36,13 @@ scheduler.paynepew.dev {
         }
     }
 
+    # OAuth 2.1 Protected Resource Metadata (RFC 9728, ADR-053).
+    # Required so MCP clients can discover the authorization server via
+    # the WWW-Authenticate challenge on 401 responses.
+    handle /.well-known/* {
+        reverse_proxy mcp-server:8000
+    }
+
     handle / {
         root * /var/www
         file_server
