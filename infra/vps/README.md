@@ -15,7 +15,7 @@ containing **these 6 runtime files** at the root:
 | `vector.toml`       | `infra/vps/vector.toml`       | Docker logs → Better Stack              |
 | `elasticmq.conf`    | `elasticmq.conf` (repo root)  | shared with local dev                   |
 | `static/`           | `static/` (repo root)         | served at `/` by Caddy                  |
-| `.env`              | `infra/vps/.env.example` →    | **secrets — gitignored**                |
+| `.env.docker`       | `infra/vps/.env.docker.example` → | **secrets — gitignored**            |
 
 Everything else in the repo (app code, tests, docs, terraform) is **not**
 needed on the VPS at runtime; the Python application code lives inside the
@@ -44,9 +44,9 @@ cp infra/vps/Caddyfile .
 cp infra/vps/vector.toml .
 
 # 3. Fill in secrets
-cp infra/vps/.env.example .env
-nano .env   # set POSTGRES_PASSWORD, R2_*, BETTER_STACK_*, etc.
-chmod 600 .env
+cp infra/vps/.env.docker.example .env.docker
+nano .env.docker   # set POSTGRES_PASSWORD, R2_*, BETTER_STACK_*, etc.
+chmod 600 .env.docker
 
 # 4. Bring it up
 docker compose up -d
@@ -80,11 +80,39 @@ docker compose logs vector --tail 20   # should show "Vector has started."
 curl -sf https://scheduler.paynepew.dev/healthz
 ```
 
+## Migrating an existing `.env` deploy to `.env.docker`
+
+For deploys created before the `.env` → `.env.docker` rename, run this one-time
+migration to keep your secrets intact:
+
+```bash
+sudo -iu deploy
+cd /opt/task_scheduler_mcp
+
+# 1. Copy secrets to the new filename FIRST (before pulling new compose,
+#    otherwise `docker compose up -d` errors with "env file not found").
+cp .env .env.docker
+chmod 600 .env.docker
+
+# 2. Pull repo + restage the runtime files (compose now references .env.docker).
+git pull
+cp infra/vps/docker-compose.yml .
+grep env_file ./docker-compose.yml   # confirm all lines say .env.docker
+
+# 3. Recreate the stack — picks up the new env_file reference.
+docker compose up -d --force-recreate
+curl -sf https://scheduler.paynepew.dev/healthz
+
+# 4. After a day or two of stable operation, clean up the legacy file.
+mv .env .env.legacy.$(date +%Y%m%d)
+# rm .env.legacy.* once you trust the new setup
+```
+
 ## Adding a new env var
 
-1. Document it in `infra/vps/.env.example` (committed).
-2. On the VPS, append it to `/opt/task_scheduler_mcp/.env` (gitignored).
-3. `docker compose up -d` — recreates any service that reads `.env`.
+1. Document it in `infra/vps/.env.docker.example` (committed).
+2. On the VPS, append it to `/opt/task_scheduler_mcp/.env.docker` (gitignored).
+3. `docker compose up -d` — recreates any service that reads `.env.docker`.
 
 ## Single-service operations
 
