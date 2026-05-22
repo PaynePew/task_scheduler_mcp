@@ -297,6 +297,51 @@ def _make_prm_endpoint() -> Route:
     return Route("/.well-known/oauth-protected-resource", endpoint=_prm, methods=["GET"])
 
 
+def _make_as_metadata_endpoint() -> Route:
+    """Return the /.well-known/oauth-authorization-server route (RFC 8414).
+
+    MCP clients fall back to fetching AS metadata at the resource server's own
+    domain when the authorization_servers entry in PRM is unreachable
+    (observed with WorkOS Production without a paid AuthKit custom domain).
+    We hand-craft a metadata document pointing at WorkOS /sso/* endpoints so
+    the discovery chain can at least continue past this step.
+
+    Caveat: this does NOT include a registration_endpoint — WorkOS /sso/* does
+    not expose DCR. Clients that require DCR (e.g. Claude Desktop's connector)
+    will still fail at the registration step, but with a clearer error than
+    the silent 404 we returned before.
+    """
+
+    async def _as_metadata(_request: Request) -> JSONResponse:
+        if not settings.workos_issuer or not settings.workos_client_id:
+            return JSONResponse(
+                {"error": "as_metadata_unavailable"},
+                status_code=404,
+            )
+        issuer = settings.workos_issuer
+        body: dict[str, object] = {
+            "issuer": issuer,
+            "authorization_endpoint": f"{issuer}/sso/authorize",
+            "token_endpoint": f"{issuer}/sso/token",
+            "jwks_uri": f"{issuer}/sso/jwks/{settings.workos_client_id}",
+            "response_types_supported": ["code"],
+            "grant_types_supported": ["authorization_code"],
+            "code_challenge_methods_supported": ["S256"],
+            "token_endpoint_auth_methods_supported": [
+                "client_secret_post",
+                "client_secret_basic",
+            ],
+            "scopes_supported": ["openid", "profile", "email"],
+        }
+        return JSONResponse(body)
+
+    return Route(
+        "/.well-known/oauth-authorization-server",
+        endpoint=_as_metadata,
+        methods=["GET"],
+    )
+
+
 # ---------------------------------------------------------------------------
 # Health check
 # ---------------------------------------------------------------------------
@@ -384,6 +429,7 @@ def build_app(
             Route("/healthz", endpoint=healthz, methods=["GET"]),
             Route("/healthz/shed", endpoint=shed, methods=["GET"]),
             _make_prm_endpoint(),
+            _make_as_metadata_endpoint(),
             *connections_routes,
         ],
     )
