@@ -330,6 +330,19 @@ def make_routes(
                     logger.warning("WorkOS id_token signature verification failed")
                     user_id = ""
         if not user_id:
+            # SSO providers (GitHubOAuth / GoogleOAuth / MicrosoftOAuth) return
+            # the verified identity in the `profile` field of the token-exchange
+            # response rather than as a JWT claim. This branch is reached when
+            # both JWT paths above gave up — typical for /sso/token responses
+            # where access_token is opaque.
+            #
+            # Trust posture: profile.id arrives over TLS in the response body of
+            # a request we made with our client_secret. Unlike issue #160 (which
+            # was about accepting an unverified JWT from the *client*), here the
+            # value is sourced from WorkOS directly, so no signature is needed.
+            profile = token_data.get("profile") or {}
+            user_id = profile.get("id") or ""
+        if not user_id:
             return HTMLResponse("Could not determine user identity from token", status_code=502)
 
         resp = RedirectResponse("/connections", status_code=302)
