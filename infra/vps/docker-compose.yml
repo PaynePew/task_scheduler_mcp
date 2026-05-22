@@ -9,7 +9,7 @@ services:
   mcp-server:
     image: ghcr.io/paynepew/task_scheduler_mcp:${IMAGE_TAG:-latest}
     command: ["python", "-m", "app.entrypoints.mcp_http"]
-    env_file: .env
+    env_file: .env.docker
     restart: unless-stopped
     depends_on:
       migrate:
@@ -24,7 +24,7 @@ services:
   watcher:
     image: ghcr.io/paynepew/task_scheduler_mcp:${IMAGE_TAG:-latest}
     command: ["python", "-m", "app.entrypoints.watcher"]
-    env_file: .env
+    env_file: .env.docker
     restart: unless-stopped
     depends_on:
       migrate:
@@ -33,7 +33,7 @@ services:
   worker:
     image: ghcr.io/paynepew/task_scheduler_mcp:${IMAGE_TAG:-latest}
     command: ["python", "-m", "app.entrypoints.worker"]
-    env_file: .env
+    env_file: .env.docker
     restart: unless-stopped
     depends_on:
       migrate:
@@ -42,7 +42,7 @@ services:
   recurring-watcher:
     image: ghcr.io/paynepew/task_scheduler_mcp:${IMAGE_TAG:-latest}
     command: ["python", "-m", "app.entrypoints.recurring_watcher"]
-    env_file: .env
+    env_file: .env.docker
     restart: unless-stopped
     depends_on:
       migrate:
@@ -51,7 +51,7 @@ services:
   chain-watcher:
     image: ghcr.io/paynepew/task_scheduler_mcp:${IMAGE_TAG:-latest}
     command: ["python", "-m", "app.entrypoints.chain_watcher"]
-    env_file: .env
+    env_file: .env.docker
     restart: unless-stopped
     depends_on:
       migrate:
@@ -60,7 +60,7 @@ services:
   migrate:
     image: ghcr.io/paynepew/task_scheduler_mcp:${IMAGE_TAG:-latest}
     command: ["python", "-m", "app.entrypoints.migrate"]
-    env_file: .env
+    env_file: .env.docker
     depends_on:
       postgres:
         condition: service_healthy
@@ -68,7 +68,7 @@ services:
 
   postgres:
     image: postgres:16
-    env_file: .env
+    env_file: .env.docker
     restart: unless-stopped
     volumes:
       - pgdata:/var/lib/postgresql/data
@@ -105,7 +105,7 @@ services:
   vector:
     image: timberio/vector:0.40.0-alpine
     restart: unless-stopped
-    env_file: .env
+    env_file: .env.docker
     # Explicit --config flag: timberio/vector image ships with a default
     # /etc/vector/*.yaml that auto-loads demo_logs + console sink. Without
     # this, both configs merge and you get fake demo data flooding stdout.
