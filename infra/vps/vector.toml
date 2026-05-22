@@ -1,0 +1,36 @@
+# Vector → Better Stack Telemetry
+# Collects stdout/stderr from every container in this compose project and
+# forwards as JSON over HTTPS. See docs/agents/observability.md (TBD).
+
+[api]
+enabled = false
+
+# ── Source: Docker container logs ────────────────────────────────────────────
+[sources.docker]
+type = "docker_logs"
+# Drop vector's own logs to prevent feedback loop.
+exclude_containers = ["vector"]
+
+# ── Transform: tag with compose project + service ────────────────────────────
+[transforms.enrich]
+type = "remap"
+inputs = ["docker"]
+source = '''
+.service = .label."com.docker.compose.service"
+.project = .label."com.docker.compose.project"
+del(.label)
+'''
+
+# ── Sink: Better Stack HTTP ingestion ────────────────────────────────────────
+[sinks.better_stack]
+type = "http"
+method = "post"
+inputs = ["enrich"]
+uri = "https://${BETTER_STACK_INGESTING_HOST}/"
+encoding.codec = "json"
+compression = "gzip"
+auth.strategy = "bearer"
+auth.token = "${BETTER_STACK_SOURCE_TOKEN}"
+
+[sinks.better_stack.request]
+retry_attempts = 5

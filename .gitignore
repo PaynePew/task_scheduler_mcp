@@ -42,6 +42,7 @@ dist/
 # Environment / secrets
 # ─────────────────────────────────────────────
 .env
+.env.docker
 .env.local
 .env.*.local
 *.pem

@@ -102,6 +102,20 @@ services:
     depends_on:
       - mcp-server
 
+  vector:
+    image: timberio/vector:0.40.0-alpine
+    restart: unless-stopped
+    env_file: .env
+    # Explicit --config flag: timberio/vector image ships with a default
+    # /etc/vector/*.yaml that auto-loads demo_logs + console sink. Without
+    # this, both configs merge and you get fake demo data flooding stdout.
+    command: ["--config", "/etc/vector/vector.toml"]
+    volumes:
+      - ./vector.toml:/etc/vector/vector.toml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - vector_data:/var/lib/vector
+
 volumes:
   pgdata:
   caddy_data:
+  vector_data:
