@@ -97,3 +97,43 @@ async def test_prm_endpoint_reachable(auth_enabled_app):
     body = resp.json()
     assert "resource" in body
     assert "bearer_methods_supported" in body
+
+
+@pytest.mark.integration
+async def test_prm_resource_is_url_not_client_id(auth_enabled_app, monkeypatch):
+    """RFC 9728: ``resource`` is a URL even when ``WORKOS_AUDIENCE`` is a Client ID (issue #189)."""
+    from app.config import settings as settings_mod
+
+    monkeypatch.setattr(settings_mod.settings, "workos_audience", "client_01ABCDEF")
+    monkeypatch.setattr(settings_mod.settings, "workos_resource_url", None)
+    monkeypatch.setattr(
+        settings_mod.settings, "connections_base_url", "https://scheduler.example.com"
+    )
+
+    transport = httpx.ASGITransport(app=auth_enabled_app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/.well-known/oauth-protected-resource")
+
+    body = resp.json()
+    assert body["resource"] == "https://scheduler.example.com/mcp"
+
+
+@pytest.mark.integration
+async def test_prm_resource_uses_override_when_set(auth_enabled_app, monkeypatch):
+    """``WORKOS_RESOURCE_URL`` overrides the ``connections_base_url``-derived default."""
+    from app.config import settings as settings_mod
+
+    monkeypatch.setattr(settings_mod.settings, "workos_audience", "client_01ABCDEF")
+    monkeypatch.setattr(
+        settings_mod.settings, "workos_resource_url", "https://custom.example.com/api"
+    )
+    monkeypatch.setattr(
+        settings_mod.settings, "connections_base_url", "https://scheduler.example.com"
+    )
+
+    transport = httpx.ASGITransport(app=auth_enabled_app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/.well-known/oauth-protected-resource")
+
+    body = resp.json()
+    assert body["resource"] == "https://custom.example.com/api"

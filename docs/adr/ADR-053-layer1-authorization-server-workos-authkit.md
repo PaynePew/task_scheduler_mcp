@@ -65,3 +65,27 @@ portfolio signal live):
 - Cost: $0 within the free tier.
 - Does **not** solve Layer-2 downstream-token storage / encryption-at-rest —
   the next open node.
+
+## Addendum (2026-05-23, issue #189): JWT `aud` ≠ PRM `resource` under SSO
+
+The original decision assumed a single `WORKOS_AUDIENCE` value would
+simultaneously satisfy the JWT `aud` check and the RFC 9728 PRM `resource`
+field. That assumption holds under the AuthKit **User Management** flow
+(`/user_management/*`), where RFC 8707 resource indicators bind both ends to
+the same URL.
+
+In practice the integration landed on the **SSO** flow (`/sso/*`), where
+WorkOS issues tokens whose `aud` claim equals the **Client ID** (e.g.
+`client_01...`), not a URL. Forcing `WORKOS_AUDIENCE` to a URL would break
+JWT validation; leaving it as the Client ID makes the PRM `resource` field
+spec-non-compliant (it MUST be a URL).
+
+**Interim fix:** split into two env vars (`WORKOS_AUDIENCE` for JWT validation,
+`WORKOS_RESOURCE_URL` for PRM advertisement). PRM defaults to
+`${CONNECTIONS_BASE_URL}/mcp` when the override is unset.
+
+**Proper fix (future):** migrate `/sso/authorize` → `/user_management/authorize`
+and `/sso/token` → `/user_management/authenticate`, register the MCP URL as a
+Resource Indicator in the WorkOS dashboard, and collapse back to a single
+`WORKOS_AUDIENCE=<url>`. Deferred until an MCP client we care about fails
+RFC 8707 audience binding or the codebase has bandwidth for the migration.
