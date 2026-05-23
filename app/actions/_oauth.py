@@ -40,7 +40,12 @@ from app.db.models import OAuthConnection
 logger = logging.getLogger(__name__)
 
 
-def _make_missing_connection(provider: str) -> ActionResult:
+def missing_connection_result(provider: str) -> ActionResult:
+    """Canonical MISSING_CONNECTION ActionResult (matches preflight envelope wording).
+
+    Used both internally by check_oauth_for_execute and by the OAuth-gated handlers'
+    ConnectionMiss fallback so every code path emits the same message and code.
+    """
     connect_url = f"{settings.connections_base_url}/connections"
     return ActionResult(
         ok=False,
@@ -98,7 +103,7 @@ async def check_oauth_for_execute(
         row = result.scalar_one_or_none()
 
     if row is None:
-        return _make_missing_connection(provider)
+        return missing_connection_result(provider)
 
     now = _now or datetime.now(UTC)
     if row.expires_at is not None and row.expires_at <= now:
@@ -116,9 +121,9 @@ async def check_oauth_for_execute(
                     user_id,
                     provider,
                 )
-        return _make_missing_connection(provider)
+        return missing_connection_result(provider)
 
     return None  # Connection is present and not expired.
 
 
-__all__ = ["check_oauth_for_execute"]
+__all__ = ["check_oauth_for_execute", "missing_connection_result"]

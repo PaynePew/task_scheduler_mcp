@@ -36,7 +36,7 @@ from typing import Any, ClassVar
 import httpx
 from pydantic import BaseModel
 
-from app.actions._oauth import check_oauth_for_execute
+from app.actions._oauth import check_oauth_for_execute, missing_connection_result
 from app.actions.base import ActionResult, CredentialMode
 from app.chain.upstream_reader import resolve_for_display
 from app.connections.store import ConnectionMiss, get_token
@@ -149,18 +149,7 @@ class SlackPostHandler:
         try:
             token = await get_token(run.user_id, "slack")
         except ConnectionMiss:
-            from app.config.settings import settings  # noqa: PLC0415
-
-            connect_url = f"{settings.connections_base_url}/connections"
-            return ActionResult(
-                ok=False,
-                result=None,
-                error=(
-                    f"Your Slack connection has expired or been revoked. Reconnect at {connect_url}"
-                ),
-                error_code="MISSING_CONNECTION",
-                retryable=False,
-            )
+            return missing_connection_result("slack")
 
         message_text = await self._build_message(params=params)
         if isinstance(message_text, ActionResult):
