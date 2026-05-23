@@ -117,11 +117,14 @@ class EmailSendHandler:
         "Use from_run_id to chain from a prior handler's output. "
         "Templates: raw (default), digest_v1."
     )
+    summary_line: ClassVar[str] = (
+        "Sends an email via the user's Gmail (or operator SMTP); supports digest_v1 chaining."
+    )
     params_model: ClassVar[type[BaseModel]] = EmailSendParams
     timeout_seconds: ClassVar[int] = 30
     requires_operator: ClassVar[bool] = False
     credential_mode: ClassVar[CredentialMode] = CredentialMode.oauth_connection
-    required_provider: ClassVar[str] = "google"
+    required_provider: ClassVar[str | None] = "google"
 
     async def execute(self, run: Any, params: EmailSendParams) -> ActionResult:
         # Resolve any ${VAR} references (ADR-032) in subject/body.

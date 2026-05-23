@@ -28,10 +28,14 @@ class HttpCallHandler:
         "Response body is truncated to 2 KB. Server errors (5xx) are retried automatically; "
         "client errors (4xx) are permanent failures."
     )
+    summary_line: ClassVar[str] = (
+        "Operator-only generic HTTP call (any method) with ${VAR} env substitution."
+    )
     params_model: ClassVar[type[BaseModel]] = HttpCallParams
     timeout_seconds: ClassVar[int] = 30
     requires_operator: ClassVar[bool] = True
     credential_mode: ClassVar[CredentialMode] = CredentialMode.operator_env
+    required_provider: ClassVar[str | None] = None
 
     async def execute(self, run: Any, params: HttpCallParams) -> ActionResult:
         whitelist = build_effective_whitelist()

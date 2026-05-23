@@ -130,11 +130,14 @@ class SlackPostHandler:
         "Use from_run_id to chain from a prior handler's output. "
         "Templates: raw (default), digest_v1, interview_brief."
     )
+    summary_line: ClassVar[str] = (
+        "Posts a message to a Slack channel using the user's connected workspace."
+    )
     params_model: ClassVar[type[BaseModel]] = SlackPostParams
     timeout_seconds: ClassVar[int] = 30
     requires_operator: ClassVar[bool] = False
     credential_mode: ClassVar[CredentialMode] = CredentialMode.oauth_connection
-    required_provider: ClassVar[str] = "slack"
+    required_provider: ClassVar[str | None] = "slack"
 
     async def execute(self, run: Any, params: SlackPostParams) -> ActionResult:
         try:

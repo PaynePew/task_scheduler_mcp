@@ -106,10 +106,14 @@ class LlmSummarizeHandler:
         "Set from_run_id to chain from a prior handler's output, or text for direct input. "
         "Operator-funded; subject to per-user daily and global monthly token budgets."
     )
+    summary_line: ClassVar[str] = (
+        "Summarizes text or upstream run output using the operator-funded LLM."
+    )
     params_model: ClassVar[type[BaseModel]] = LlmSummarizeParams
     timeout_seconds: ClassVar[int] = 120
     requires_operator: ClassVar[bool] = False
     credential_mode: ClassVar[CredentialMode] = CredentialMode.none
+    required_provider: ClassVar[str | None] = None
 
     def __init__(
         self,
