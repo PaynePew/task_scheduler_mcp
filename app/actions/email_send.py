@@ -42,6 +42,7 @@ import aiosmtplib
 import httpx
 from pydantic import BaseModel, EmailStr
 
+from app.actions._oauth import check_oauth_for_execute, missing_connection_result
 from app.actions.base import ActionResult, CredentialMode
 from app.chain.upstream_reader import resolve_for_display
 from app.config.settings import settings
@@ -282,19 +283,16 @@ class EmailSendHandler:
                 retryable=False,
             )
 
+        # Check connection validity (expiry + missing) before attempting the action.
+        refresher = _make_google_refresher()
+        oauth_err = await check_oauth_for_execute(user_id, "google", refresher=refresher)
+        if oauth_err is not None:
+            return oauth_err
+
         try:
-            token = await get_token(user_id, "google", refresher=_make_google_refresher())
+            token = await get_token(user_id, "google", refresher=refresher)
         except ConnectionMiss:
-            connect_url = f"{settings.connections_base_url}/connections"
-            return ActionResult(
-                ok=False,
-                result=None,
-                error=(
-                    f"No Google connection for this user. "
-                    f"Connect your Google account at {connect_url}"
-                ),
-                retryable=False,
-            )
+            return missing_connection_result("google")
 
         # Build RFC 2822 message and encode as base64url for the Gmail API.
         msg = EmailMessage()

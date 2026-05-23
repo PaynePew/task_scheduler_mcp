@@ -29,11 +29,16 @@ class ActionResult:
                                   DeleteMessage'd. *No* retry. Use for permanent
                                   failures (HTTP 4xx, validation errors). Issue
                                   #26 fixed the bug where these used to loop.
+
+    error_code: when set, propagated into JobRun.error_code so task.status.v1
+    can surface the canonical error envelope (code + message) instead of a
+    freeform string. Must be from the 7-code vocabulary (CONTEXT.md §6, ADR-060).
     """
 
     ok: bool
     result: dict | None
     error: str | None
+    error_code: str | None = None
     retryable: bool = True
 
 

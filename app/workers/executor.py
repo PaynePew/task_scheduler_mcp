@@ -100,6 +100,7 @@ async def _write_terminal(
             updated_at=now,
             result=json.dumps(action_result.result) if action_result.result is not None else None,
             error_message=action_result.error,
+            error_code=action_result.error_code,
         )
     )
     session.add(
