@@ -172,7 +172,6 @@ def fake_envelope():
 
 
 @pytest.mark.integration
-@pytest.mark.asyncio
 async def test_user_with_slack_connection_connected_github_not_connected(
     session_factory, fake_envelope
 ):
@@ -217,7 +216,6 @@ async def test_user_with_slack_connection_connected_github_not_connected(
 
 
 @pytest.mark.integration
-@pytest.mark.asyncio
 async def test_user_with_no_connections_all_oauth_not_connected(session_factory, fake_envelope):
     """User has no connections: every OAuth action returns not_connected."""
     with patch("app.mcp.server._make_server_kms_envelope", return_value=fake_envelope):
@@ -240,7 +238,6 @@ async def test_user_with_no_connections_all_oauth_not_connected(session_factory,
 
 
 @pytest.mark.integration
-@pytest.mark.asyncio
 async def test_batch_load_single_query_for_multiple_oauth_actions(session_factory, fake_envelope):
     """_load_user_connected_providers issues one DB query regardless of action count."""
     async with session_factory() as session:
@@ -267,7 +264,6 @@ async def test_batch_load_single_query_for_multiple_oauth_actions(session_factor
 
 
 @pytest.mark.integration
-@pytest.mark.asyncio
 async def test_expired_connection_treated_as_not_connected(session_factory, fake_envelope):
     """A connection whose expires_at is in the past should not appear in connected set."""
     past = datetime.now(UTC) - timedelta(hours=1)
