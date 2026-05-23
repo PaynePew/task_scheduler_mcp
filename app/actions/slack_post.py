@@ -156,8 +156,7 @@ class SlackPostHandler:
                 ok=False,
                 result=None,
                 error=(
-                    f"Your Slack connection has expired or been revoked. "
-                    f"Reconnect at {connect_url}"
+                    f"Your Slack connection has expired or been revoked. Reconnect at {connect_url}"
                 ),
                 error_code="MISSING_CONNECTION",
                 retryable=False,
