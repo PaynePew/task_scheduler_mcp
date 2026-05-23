@@ -11,6 +11,11 @@ COPY pyproject.toml uv.lock ./
 # Install production dependencies (no dev extras)
 RUN uv sync --frozen --no-dev
 
+# Stamp the git SHA at build time. Placed after uv-sync so a new SHA does not
+# bust the expensive dependency-install layer above.
+ARG GIT_SHA=unknown
+ENV GIT_SHA=${GIT_SHA}
+
 # Copy application source and migration files
 COPY app/ ./app/
 COPY alembic.ini ./
