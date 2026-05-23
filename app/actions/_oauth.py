@@ -25,6 +25,7 @@ loop" errors on subsequent tests).
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 from typing import Any
 
@@ -35,6 +36,8 @@ from app.config.settings import settings
 from app.connections.store import ConnectionStore, TokenRefresher
 from app.crypto.envelope_factory import kms_envelope_from_settings
 from app.db.models import OAuthConnection
+
+logger = logging.getLogger(__name__)
 
 
 def _make_missing_connection(provider: str) -> ActionResult:
@@ -100,14 +103,19 @@ async def check_oauth_for_execute(
     now = _now or datetime.now(UTC)
     if row.expires_at is not None and row.expires_at <= now:
         if refresher is not None:
-            # Best-effort refresh: on any failure, fall through to MISSING_CONNECTION.
+            # Best-effort refresh: log + fall through to MISSING_CONNECTION on any failure
+            # (revoked refresh token, provider outage). The user must reconnect either way.
             try:
                 async with _session_factory() as session:
                     store = ConnectionStore(session=session, envelope=envelope)
                     await store.get_fresh_token(user_id, provider, refresher=refresher)
                 return None  # Refresh succeeded; caller proceeds normally.
             except Exception:
-                pass
+                logger.exception(
+                    "oauth refresh failed for user=%s provider=%s; returning MISSING_CONNECTION",
+                    user_id,
+                    provider,
+                )
         return _make_missing_connection(provider)
 
     return None  # Connection is present and not expired.
