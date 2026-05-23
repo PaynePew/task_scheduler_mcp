@@ -67,6 +67,16 @@ This ADR covers Layer 1 only. Layer 2 (`task_list_actions_v1` carries `auth_stat
 
 **Reversibility:** Low cost to revert. The Protocol additions are additive; deleting them would only break callers that hard-depend on the new attributes (i.e. this ADR's own changes).
 
+## Layer 2 amendment (issue #210)
+
+Layer 2 has been implemented. The contract is:
+
+- **No new error codes.** The existing `MISSING_CONNECTION` envelope and 7-code vocabulary (ADR-060) are unchanged. This is purely additive metadata on the discovery surface.
+- **Three new fields per action** in the `task.list_actions.v1` response: `auth_required` (bool), `auth_status` (`"connected" | "not_connected" | "n/a"`), and `connect_url` (string or null).
+- **Batch-loaded.** A single `ConnectionStore.list()` call per `task.list_actions.v1` request fetches the user's full connection set; N registered actions do not produce N DB queries.
+- **`_check_oauth_connection` preflight is unchanged.** `task.create.v1` still issues its own per-action token fetch as before (that path requires a valid token, not just presence of a row).
+- **No separate `tasks://auth-status` resource was needed.** Inlining the fields into the existing action list is sufficient for LLM routing decisions and avoids adding a new resource endpoint.
+
 ## Open
 
-Future Layer 2 / Layer 3 work would invalidate parts of this ADR's "today's scope" framing, but not the core decisions (source-of-truth shape, error vocabulary, load-bearing status). Layer 2 may also need to broadcast `auth_status` via a separate MCP resource (`tasks://auth-status`) — that decision belongs to its own ADR.
+Future Layer 3 work (push `MISSING_CONNECTION` from preflight into `execute()` paths) would not invalidate the core decisions in this ADR. That decision belongs to its own ADR when implemented.

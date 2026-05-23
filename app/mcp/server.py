@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -74,6 +75,29 @@ SYSTEM_INSTRUCTION: str = build_system_instruction(
     ACTION_REGISTRY,
     _SYSTEM_INSTRUCTION_FILE.read_text(encoding="utf-8").strip(),
 )
+
+
+async def _load_user_connected_providers(
+    user_id: str,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> set[str]:
+    """Return the set of provider names that *user_id* has a non-expired connection for.
+
+    Returns an empty set if KMS is not configured (dev/CI mode) or on any error.
+    This is a single DB query regardless of how many OAuth actions are in the registry.
+    """
+    envelope = _make_server_kms_envelope()
+    if envelope is None:
+        return set()
+    try:
+        async with session_factory() as session:
+            store = ConnectionStore(session, envelope)
+            infos = await store.list(user_id)
+        now = datetime.now(UTC)
+        return {info.provider for info in infos if info.expires_at is None or info.expires_at > now}
+    except Exception:
+        logger.exception("failed to load connected providers for user %s", user_id)
+        return set()
 
 
 async def _check_oauth_connection(
@@ -244,16 +268,42 @@ _RESOURCE_RECENT_RESULTS = types.Resource(
 )
 
 
-def _build_action_list() -> list[dict[str, Any]]:
-    return [
-        {
-            "name": handler.name,
-            "description": handler.description,
-            "timeout_seconds": handler.timeout_seconds,
-            "params_schema": handler.params_model.model_json_schema(),
-        }
-        for handler in ACTION_REGISTRY.values()
-    ]
+def _build_action_list(
+    connected_providers: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Build the action list payload, enriched with auth metadata (Layer 2, ADR-061).
+
+    *connected_providers* is the set of provider names the calling user already
+    has a valid connection for. Pass ``None`` (or an empty set) when connection
+    status is unavailable — OAuth actions will show ``"not_connected"``.
+    """
+    if connected_providers is None:
+        connected_providers = set()
+    connect_url_base = f"{settings.connections_base_url}/connections"
+    actions = []
+    for handler in ACTION_REGISTRY.values():
+        auth_required = handler.credential_mode == CredentialMode.oauth_connection
+        if not auth_required:
+            auth_status = "n/a"
+            connect_url = None
+        elif handler.required_provider and handler.required_provider in connected_providers:
+            auth_status = "connected"
+            connect_url = connect_url_base
+        else:
+            auth_status = "not_connected"
+            connect_url = connect_url_base
+        actions.append(
+            {
+                "name": handler.name,
+                "description": handler.description,
+                "timeout_seconds": handler.timeout_seconds,
+                "params_schema": handler.params_model.model_json_schema(),
+                "auth_required": auth_required,
+                "auth_status": auth_status,
+                "connect_url": connect_url,
+            }
+        )
+    return actions
 
 
 def create_server(
@@ -329,7 +379,10 @@ def create_server(
                 name="task.list_actions.v1",
                 description=(
                     "List all registered actions with their descriptions, timeouts, "
-                    "and parameter schemas. Call once per thread before task.create.v1."
+                    "and parameter schemas. Call once per thread before task.create.v1. "
+                    "Each action also carries `auth_required`, `auth_status`, and "
+                    "`connect_url` so you can tell the user when to visit /connections "
+                    "before calling task.create.v1."
                 ),
                 inputSchema=_TASK_LIST_ACTIONS_SCHEMA,
             ),
@@ -359,7 +412,8 @@ def create_server(
     @server.call_tool()
     async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextContent]:
         if name == "task.list_actions.v1":
-            result = success({"actions": _build_action_list()})
+            connected = await _load_user_connected_providers(user_id, factory)
+            result = success({"actions": _build_action_list(connected)})
         elif name == "task.create.v1":
             result = await _handle_task_create(arguments, user_id, session_factory=factory)
         elif name == "task.status.v1":
