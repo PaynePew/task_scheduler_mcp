@@ -42,6 +42,7 @@ import aiosmtplib
 import httpx
 from pydantic import BaseModel, EmailStr
 
+from app.actions._oauth import check_oauth_for_execute
 from app.actions.base import ActionResult, CredentialMode
 from app.chain.upstream_reader import resolve_for_display
 from app.config.settings import settings
@@ -282,6 +283,13 @@ class EmailSendHandler:
                 retryable=False,
             )
 
+        # Check connection validity (expiry + missing) before attempting the action.
+        oauth_err = await check_oauth_for_execute(
+            user_id, "google", refresher=_make_google_refresher()
+        )
+        if oauth_err is not None:
+            return oauth_err
+
         try:
             token = await get_token(user_id, "google", refresher=_make_google_refresher())
         except ConnectionMiss:
@@ -290,9 +298,10 @@ class EmailSendHandler:
                 ok=False,
                 result=None,
                 error=(
-                    f"No Google connection for this user. "
-                    f"Connect your Google account at {connect_url}"
+                    f"Your Google connection has expired or been revoked. "
+                    f"Reconnect at {connect_url}"
                 ),
+                error_code="MISSING_CONNECTION",
                 retryable=False,
             )
 

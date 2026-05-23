@@ -27,6 +27,7 @@ from typing import Any, ClassVar
 import httpx
 from pydantic import BaseModel
 
+from app.actions._oauth import check_oauth_for_execute
 from app.actions.base import ActionResult, CredentialMode
 from app.connections.store import ConnectionMiss, get_token
 
@@ -77,6 +78,11 @@ class GitHubDigestHandler:
     required_provider: ClassVar[str | None] = "github"
 
     async def execute(self, run: Any, params: GitHubDigestParams) -> ActionResult:
+        # Check connection validity (expiry + missing) before attempting the action.
+        oauth_err = await check_oauth_for_execute(run.user_id, "github")
+        if oauth_err is not None:
+            return oauth_err
+
         try:
             token = await get_token(run.user_id, "github")
         except ConnectionMiss:
@@ -87,9 +93,10 @@ class GitHubDigestHandler:
                 ok=False,
                 result=None,
                 error=(
-                    f"No GitHub connection for this user. "
-                    f"Connect your GitHub account at {connect_url}"
+                    f"Your GitHub connection has expired or been revoked. "
+                    f"Reconnect at {connect_url}"
                 ),
+                error_code="MISSING_CONNECTION",
                 retryable=False,
             )
 
