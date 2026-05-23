@@ -287,8 +287,13 @@ def _make_prm_endpoint() -> Route:
 
     async def _prm(_request: Request) -> JSONResponse:
         authorization_servers = [settings.workos_issuer] if settings.workos_issuer else []
+        # RFC 9728 §2 requires ``resource`` to be a URL identifying the resource
+        # server. ``workos_audience`` is reused as the JWT ``aud`` value, which
+        # in the WorkOS SSO flow is the Client ID — not a URL (issue #189).
+        base = settings.connections_base_url.rstrip("/")
+        resource = settings.workos_resource_url or f"{base}/mcp"
         body: dict[str, object] = {
-            "resource": settings.workos_audience or "task-scheduler-mcp",
+            "resource": resource,
             "authorization_servers": authorization_servers,
             "bearer_methods_supported": ["header"],
             "resource_documentation": "https://github.com/PaynePew/task_scheduler_mcp",

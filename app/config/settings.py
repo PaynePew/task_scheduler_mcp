@@ -73,10 +73,18 @@ class Settings(BaseSettings):
     # WorkOS credentials).  Set via environment variables:
     #   WORKOS_ISSUER       — e.g. "https://api.workos.com"
     #   WORKOS_JWKS_URI     — e.g. "https://api.workos.com/sso/jwks/<client_id>"
-    #   WORKOS_AUDIENCE     — resource identifier bound to our server (RFC 8707)
+    #   WORKOS_AUDIENCE     — value compared against the JWT ``aud`` claim. In
+    #                         the WorkOS SSO flow that is the Client ID, NOT a
+    #                         URL — RFC 8707 resource-indicator binding needs
+    #                         the AuthKit /user_management/* flow (issue #189).
     workos_issuer: str | None = None
     workos_jwks_uri: str | None = None
     workos_audience: str | None = None
+
+    # PRM (RFC 9728) ``resource`` field — MUST be a URL identifying this
+    # resource server, even when ``WORKOS_AUDIENCE`` is a Client ID (issue #189).
+    # When unset, falls back to ``{connections_base_url}/mcp``.
+    workos_resource_url: str | None = None
 
     @model_validator(mode="after")
     def _validate_workos_all_or_nothing(self) -> "Settings":
