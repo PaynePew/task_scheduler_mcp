@@ -60,8 +60,11 @@ jobs:
           echo "Better Stack monitor $MONITOR_ID paused"
 
       # Sync runtime files from source clone, pull new image, run migrations,
-      # recreate stack. Rollback: IMAGE_TAG=<prev_sha> docker compose up -d
+      # recreate stack. Rollback: IMAGE_TAG=<prev_sha> docker compose up -d --force-recreate
       # on the VPS in /opt/task_scheduler_mcp.
+      # --force-recreate: prevents silent stale-container bugs (issue #204) where
+      # docker compose up -d --remove-orphans skips a service whose image-id
+      # comparison is stale, leaving the old container running under the new tag.
       - uses: appleboy/ssh-action@v1
         with:
           host: scheduler.paynepew.dev
@@ -98,7 +101,16 @@ jobs:
             export IMAGE_TAG=${{ github.sha }}
             docker compose pull
             docker compose run --rm migrate
-            docker compose up -d --remove-orphans
+            docker compose up -d --force-recreate --remove-orphans
+
+            # Log the GIT_SHA each app container actually sees so any
+            # env-var override (e.g. stale GIT_SHA in .env.docker) is
+            # visible in the GitHub Actions deploy log (issue #204).
+            echo "=== post-deploy GIT_SHA per service ==="
+            for svc in mcp-server watcher worker recurring-watcher chain-watcher; do
+              sha=$(docker compose exec -T "$svc" sh -c 'echo $GIT_SHA' 2>/dev/null || echo "exec-failed")
+              echo "  $svc: $sha"
+            done
 
       - name: Smoke test
         run: |
@@ -108,6 +120,12 @@ jobs:
               version=$(echo "$body" | python3 -c "import sys,json; print(json.load(sys.stdin).get('version',''))")
               if [ "$version" = "unknown" ] || [ -z "$version" ]; then
                 echo "Smoke test failed: version field is '$version' (expected SHA)"
+                exit 1
+              fi
+              # Verify /healthz advertises the SHA we just deployed (issue #204).
+              # A mismatch means an old container is still serving traffic.
+              if [ "$version" != "${{ github.sha }}" ]; then
+                echo "Smoke test failed: /healthz version '$version' != deployed SHA '${{ github.sha }}'"
                 exit 1
               fi
               echo "Smoke test passed on attempt $i (version=$version)"
