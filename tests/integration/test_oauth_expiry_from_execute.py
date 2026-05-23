@@ -32,7 +32,7 @@ from app.actions.base import ActionResult
 from app.connections.store import ConnectionStore
 from app.crypto.kms_envelope import KmsEnvelope
 from app.db.engine import create_async_engine
-from app.db.models import Job, JobRun, OAuthConnection
+from app.db.models import Job, JobRun
 from app.mcp.handlers.status import handle_task_status
 from app.queue.sqs import SQSClient
 from app.workers.executor import process_one
@@ -311,7 +311,7 @@ async def test_refresh_succeeds_returns_none(session_factory):
 
 @pytest.mark.integration
 async def test_refresh_fails_returns_missing_connection(session_factory):
-    """Expired connection + failing refresher → check_oauth_for_execute returns MISSING_CONNECTION."""
+    """Expired connection + failing refresher → returns MISSING_CONNECTION."""
     with mock_aws():
         kms_client = boto3.client("kms", region_name=_REGION)
         key_id = kms_client.create_key(Description="test-refresh-fail")["KeyMetadata"]["KeyId"]
