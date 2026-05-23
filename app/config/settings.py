@@ -67,19 +67,31 @@ class Settings(BaseSettings):
     quota_active_total_per_user: int = 50
     quota_global_active_recurring: int = 500
 
-    # WorkOS AuthKit / OAuth 2.1 resource-server settings (ADR-053).
+    # WorkOS AuthKit / OAuth 2.1 resource-server settings (ADR-053, ADR-063).
     # All three must be set together for HTTP auth to be enforced; when any
     # is absent the server runs in trust-only mode (for local dev / CI without
     # WorkOS credentials).  Set via environment variables:
-    #   WORKOS_ISSUER       — e.g. "https://api.workos.com"
-    #   WORKOS_JWKS_URI     — e.g. "https://api.workos.com/sso/jwks/<client_id>"
-    #   WORKOS_AUDIENCE     — value compared against the JWT ``aud`` claim. In
-    #                         the WorkOS SSO flow that is the Client ID, NOT a
-    #                         URL — RFC 8707 resource-indicator binding needs
-    #                         the AuthKit /user_management/* flow (issue #189).
+    #   WORKOS_ISSUER       — e.g. "https://<tenant>.authkit.app"
+    #   WORKOS_JWKS_URI     — e.g. "https://<tenant>.authkit.app/oauth2/jwks/..."
+    #   WORKOS_AUDIENCE     — value compared against the JWT ``aud`` claim.
+    #                         AuthKit User Management mints `aud = client_id`
+    #                         (a Client ID, not a URL). RFC 8707 resource-
+    #                         indicator binding into a single URL is still
+    #                         tracked separately under issue #189.
     workos_issuer: str | None = None
     workos_jwks_uri: str | None = None
     workos_audience: str | None = None
+
+    # WorkOS REST API base URL. Used to construct AuthKit User Management
+    # endpoints (e.g. /user_management/authorize, /user_management/authenticate).
+    # IMPORTANT: this is NOT the same as ``workos_issuer``.  The AuthKit
+    # subdomain ('<tenant>.authkit.app') aliases legacy /sso/* paths for
+    # backward compatibility but does NOT serve /user_management/* — those
+    # live only on api.workos.com (verified empirically on 2026-05-23 during
+    # the issue #203 sandbox probe: AuthKit subdomain returns 404 for
+    # /user_management/authorize, api.workos.com returns 302).  Override only
+    # for testing / sandbox WorkOS hosts.  No trailing slash.
+    workos_api_base_url: str = "https://api.workos.com"
 
     # PRM (RFC 9728) ``resource`` field — MUST be a URL identifying this
     # resource server, even when ``WORKOS_AUDIENCE`` is a Client ID (issue #189).
