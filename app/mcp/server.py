@@ -14,7 +14,7 @@ from mcp.types import INVALID_PARAMS, ErrorData
 from pydantic import AnyUrl
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.actions.base import CredentialMode
+from app.actions.base import ActionHandler, CredentialMode
 from app.actions.registry import ACTION_REGISTRY
 from app.config.settings import settings
 from app.connections.store import ConnectionMiss, ConnectionStore
@@ -43,23 +43,31 @@ logger = logging.getLogger(__name__)
 _SYSTEM_INSTRUCTION_FILE = Path(__file__).parent / "system_instruction.md"
 
 
-def build_system_instruction(registry: dict[str, Any], template: str) -> str:
+_ACTIONS_BLOCK_PLACEHOLDER = "{ACTIONS_BLOCK}"
+
+
+def build_system_instruction(registry: dict[str, ActionHandler], template: str) -> str:
     """Compose the MCP `instructions` string by injecting an action listing into the template.
 
-    The template must contain the placeholder `{ACTIONS_BLOCK}`. Each registered
-    action contributes one bullet line; the listing is sorted by action name for
-    deterministic output (so the same registry always produces the same string).
+    The template must contain the placeholder ``{ACTIONS_BLOCK}``; absence raises
+    ``ValueError`` so a typo in the markdown surfaces at import time, not as a
+    silently-empty instructions string. Each registered action contributes one
+    bullet line; the listing is sorted by action name for deterministic output
+    (so the same registry always produces the same string).
 
     See ADR-061. Derived rather than hand-maintained — adding a handler to
-    ACTION_REGISTRY automatically surfaces it here without a separate edit.
+    ``ACTION_REGISTRY`` automatically surfaces it here without a separate edit.
     """
 
+    if _ACTIONS_BLOCK_PLACEHOLDER not in template:
+        raise ValueError(
+            f"system instruction template missing {_ACTIONS_BLOCK_PLACEHOLDER} placeholder"
+        )
     lines: list[str] = []
     for handler in sorted(registry.values(), key=lambda h: h.name):
-        provider = getattr(handler, "required_provider", None)
-        suffix = f" (needs {provider} OAuth)" if provider else ""
+        suffix = f" (needs {handler.required_provider} OAuth)" if handler.required_provider else ""
         lines.append(f"- {handler.name}{suffix} -- {handler.summary_line}")
-    return template.replace("{ACTIONS_BLOCK}", "\n".join(lines))
+    return template.replace(_ACTIONS_BLOCK_PLACEHOLDER, "\n".join(lines))
 
 
 SYSTEM_INSTRUCTION: str = build_system_instruction(
