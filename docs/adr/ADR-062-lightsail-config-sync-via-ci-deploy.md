@@ -37,7 +37,8 @@ The surplus ~35 items (source code, tests, docs, terraform, build artifacts) cre
 ### Option A — two-path layout
 
 - `/opt/task_scheduler_mcp_src/` — full git clone (where `git pull` runs)
-- `/opt/task_scheduler_mcp/` — runtime dir with 6 files + symlink for `static/`
+- `/opt/task_scheduler_mcp/` — runtime dir with 6 entries (4 config files + `static/` as
+  a symlink to `_src/static/` + `.env.docker`)
 - `deploy-vps.yml` unchanged
 
 Rejected: source still fully exposed at `_src/`; symlink for `static/` adds operational
