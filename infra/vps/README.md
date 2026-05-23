@@ -1,84 +1,95 @@
-# Lightsail Tokyo manual deployment
+# Lightsail Tokyo deployment
 
 Interim deployment to a Lightsail Tokyo VPS until the W3 Fargate Terraform
 migration lands (see [[project_w3-design-pivot]] / ADR-024..030).
 
-## Layout
+## Two-path layout (ADR-062)
 
-The VPS expects a single working directory (default `/opt/task_scheduler_mcp/`)
-containing **these 6 runtime files** at the root:
+The VPS uses two directories with separate responsibilities:
 
-| File                | Source in repo                | Notes                                   |
-|---------------------|-------------------------------|-----------------------------------------|
-| `docker-compose.yml`| `infra/vps/docker-compose.yml`| pulls ghcr.io image; restart policies   |
-| `Caddyfile`         | `infra/vps/Caddyfile`         | TLS termination + reverse proxy         |
-| `vector.toml`       | `infra/vps/vector.toml`       | Docker logs → Better Stack              |
-| `elasticmq.conf`    | `elasticmq.conf` (repo root)  | shared with local dev                   |
-| `static/`           | `static/` (repo root)         | served at `/` by Caddy                  |
-| `.env.docker`       | `infra/vps/.env.docker.example` → | **secrets — gitignored**            |
+| Path | Role | Written by |
+|---|---|---|
+| `/opt/task_scheduler_mcp_src/` | Full git clone — source of truth for config files | CI only (`git reset --hard`) |
+| `/opt/task_scheduler_mcp/` | Runtime dir — only the 6 files docker compose needs | CI only (file copy) |
 
-Everything else in the repo (app code, tests, docs, terraform) is **not**
-needed on the VPS at runtime; the Python application code lives inside the
-docker image `ghcr.io/paynepew/task_scheduler_mcp:<tag>`.
+**Operators never `ssh` in to `git pull`.** CI is the only writer to both
+directories. On every push to `main`, the deploy workflow:
 
-In practice the deploy directory ends up holding the whole repo (because the
-operator clones the repo there for convenience and copies the 6 files to the
-root). That works but is not the minimum-surface-area setup. Don't rely on
-files outside the table above being present.
+1. Resets `_src/` to `origin/main`
+2. Copies the 6 runtime files from `_src/` into the runtime dir
+3. Runs `docker compose pull && migrate && up -d` from the runtime dir
+
+### Runtime dir contents (`/opt/task_scheduler_mcp/`)
+
+Exactly 6–8 items — never more:
+
+| Entry | Source in repo |
+|---|---|
+| `docker-compose.yml` | `infra/vps/docker-compose.yml` |
+| `Caddyfile` | `infra/vps/Caddyfile` |
+| `vector.toml` | `infra/vps/vector.toml` |
+| `elasticmq.conf` | `elasticmq.conf` (repo root) |
+| `static/` | `static/` (repo root) |
+| `.env.docker` | operator-managed, **gitignored** — secrets live here |
+| `.env.legacy.*` | optional, present only during migration windows |
+
+Everything else (app code, tests, docs, terraform, build artifacts) belongs
+inside the Docker image or the `_src/` clone — **never** in the runtime dir.
 
 ## First-time bootstrap
 
-Assumes Ubuntu, Docker installed, ports 80/443 open, DNS pointing at the VPS.
+Assumes Ubuntu, Docker + rsync installed, ports 80/443 open, DNS pointing at the VPS.
 
 ```bash
-# 1. SSH as the deploy user (created out-of-band)
-sudo -iu deploy
-cd /opt
-sudo git clone https://github.com/PaynePew/task_scheduler_mcp.git
-sudo chown -R deploy:deploy /opt/task_scheduler_mcp
-cd /opt/task_scheduler_mcp
+# 1. SSH as an admin user (sudo access required for directory creation)
+sudo mkdir -p /opt/task_scheduler_mcp_src /opt/task_scheduler_mcp
+sudo git clone https://github.com/PaynePew/task_scheduler_mcp.git /opt/task_scheduler_mcp_src
+sudo chown -R deploy:deploy /opt/task_scheduler_mcp_src /opt/task_scheduler_mcp
 
-# 2. Stage the 6 runtime files at the root
-cp infra/vps/docker-compose.yml .
-cp infra/vps/Caddyfile .
-cp infra/vps/vector.toml .
+# 2. Populate the runtime dir with the initial 6 config files
+sudo -u deploy bash -c '
+  cd /opt/task_scheduler_mcp_src
+  cp infra/vps/docker-compose.yml /opt/task_scheduler_mcp/
+  cp infra/vps/Caddyfile /opt/task_scheduler_mcp/
+  cp infra/vps/vector.toml /opt/task_scheduler_mcp/
+  cp elasticmq.conf /opt/task_scheduler_mcp/
+  rsync -a static/ /opt/task_scheduler_mcp/static/
+'
 
-# 3. Fill in secrets
-cp infra/vps/.env.docker.example .env.docker
-nano .env.docker   # set POSTGRES_PASSWORD, R2_*, BETTER_STACK_*, etc.
-chmod 600 .env.docker
+# 3. Fill in secrets (use root .env.docker.example as the template)
+sudo -u deploy bash -c '
+  cp /opt/task_scheduler_mcp_src/.env.docker.example /opt/task_scheduler_mcp/.env.docker
+  nano /opt/task_scheduler_mcp/.env.docker   # set all required values
+  chmod 600 /opt/task_scheduler_mcp/.env.docker
+'
 
-# 4. Bring it up
-docker compose up -d
-docker compose ps
+# 4. Bring it up (first IMAGE_TAG — pick any recent SHA from GHCR)
+sudo -u deploy bash -c '
+  cd /opt/task_scheduler_mcp
+  export IMAGE_TAG=<commit-sha>
+  docker compose pull
+  docker compose run --rm migrate
+  docker compose up -d
+  docker compose ps
+'
 ```
 
-## Updating an existing deploy
+From this point on, **do not manually edit files in `/opt/task_scheduler_mcp/`** except
+`.env.docker`. All config changes flow through a commit to `main` → CI deploy.
 
-When the repo's `infra/vps/*` files change, mirror those into the working
-directory and reload:
+## Updating config
 
-```bash
-sudo -iu deploy
-cd /opt/task_scheduler_mcp
-git pull
+Config file changes (`docker-compose.yml`, `Caddyfile`, `vector.toml`, `elasticmq.conf`,
+`static/`) should be committed to the repo and pushed to `main`. The CI deploy workflow
+will sync them to the VPS automatically on the next push.
 
-# Re-copy any file that changed (`git diff HEAD@{1} -- infra/vps/` lists them):
-cp infra/vps/docker-compose.yml .
-cp infra/vps/vector.toml .
-# cp infra/vps/Caddyfile .  # only if changed
+There is no manual update procedure for config files. This is intentional.
 
-# Apply.  `up -d` recreates only services whose definition or env_file changed.
-# DO NOT use `restart` after editing .env — restart skips env_file re-read.
-docker compose up -d
-```
+## Adding a new env var
 
-Verify:
-```bash
-docker compose ps
-docker compose logs vector --tail 20   # should show "Vector has started."
-curl -sf https://scheduler.paynepew.dev/healthz
-```
+1. Document it in the root `.env.docker.example` (committed).
+2. On the VPS, append it to `/opt/task_scheduler_mcp/.env.docker` (gitignored).
+3. `docker compose up -d` — recreates any service that reads `.env.docker`.
 
 ## Migrating an existing `.env` deploy to `.env.docker`
 
@@ -94,9 +105,8 @@ cd /opt/task_scheduler_mcp
 cp .env .env.docker
 chmod 600 .env.docker
 
-# 2. Pull repo + restage the runtime files (compose now references .env.docker).
-git pull
-cp infra/vps/docker-compose.yml .
+# 2. The next CI deploy will copy the updated docker-compose.yml that
+#    references .env.docker. Trigger a push or wait for the next deploy.
 grep env_file ./docker-compose.yml   # confirm all lines say .env.docker
 
 # 3. Recreate the stack — picks up the new env_file reference.
@@ -108,21 +118,17 @@ mv .env .env.legacy.$(date +%Y%m%d)
 # rm .env.legacy.* once you trust the new setup
 ```
 
-## Adding a new env var
-
-1. Document it in `infra/vps/.env.docker.example` (committed).
-2. On the VPS, append it to `/opt/task_scheduler_mcp/.env.docker` (gitignored).
-3. `docker compose up -d` — recreates any service that reads `.env.docker`.
-
 ## Single-service operations
 
-| Goal                         | Command                              |
-|------------------------------|--------------------------------------|
-| Restart one service in place | `docker compose restart <service>`   |
-| Recreate one service         | `docker compose up -d <service>`     |
-| Recreate all that changed    | `docker compose up -d`               |
-| Stop everything (data safe)  | `docker compose down`                |
-| Stop + wipe volumes          | `docker compose down -v`  ⚠ destroys postgres data |
+| Goal | Command |
+|---|---|
+| Restart one service in place | `docker compose restart <service>` |
+| Recreate one service | `docker compose up -d <service>` |
+| Recreate all that changed | `docker compose up -d` |
+| Stop everything (data safe) | `docker compose down` |
+| Stop + wipe volumes | `docker compose down -v`  ⚠ destroys postgres data |
+
+All commands run from `/opt/task_scheduler_mcp/`.
 
 ## Pitfalls observed
 
@@ -131,8 +137,6 @@ mv .env .env.legacy.$(date +%Y%m%d)
   ["--config", "/etc/vector/vector.toml"]` in the compose service, Vector
   loads both configs and floods stdout with fake syslog data.
 - **`docker compose restart` does NOT re-read `env_file`** after you edit
-  `.env`. Use `docker compose up -d` instead.
-- **The root `docker-compose.yml` and the `infra/vps/docker-compose.yml`
-  must be kept in sync manually.** A future improvement is to use
-  `docker compose -f infra/vps/docker-compose.yml` directly and stop copying
-  files; not done now because Lightsail is being retired in W3.
+  `.env.docker`. Use `docker compose up -d` instead.
+- **Do not edit config files directly in the runtime dir** — they are
+  overwritten on the next CI deploy. Commit the change to the repo instead.
