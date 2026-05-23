@@ -84,8 +84,6 @@ jobs:
             docker compose up -d --remove-orphans
 
       - name: Smoke test
-        env:
-          EXPECTED_SHA: ${{ github.sha }}
         run: |
           for i in 1 2 3 4 5; do
             body=$(curl -fsS --max-time 10 https://scheduler.paynepew.dev/healthz) && {
