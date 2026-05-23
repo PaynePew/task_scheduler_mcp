@@ -7,6 +7,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.config.settings import settings
 from app.db.engine import async_session_factory as default_session_factory
 from app.domain.jobs import JobNotFoundError, get_job_with_runs
 from app.mcp.envelope import error, success
@@ -85,6 +86,16 @@ async def handle_task_status(
         "status": to_external(view.internal_status),
     }
 
+    # Surface structured error info when the latest run has an error_code
+    # (matches the preflight MISSING_CONNECTION envelope shape per ADR-060).
+    if view.error_code:
+        err_data: dict[str, Any] = {"code": view.error_code}
+        if view.error_message:
+            err_data["message"] = view.error_message
+        if view.error_code == "MISSING_CONNECTION":
+            err_data["connect_url"] = f"{settings.connections_base_url}/connections"
+        data["error"] = err_data
+
     if include_runs and view.runs is not None:
         data["runs"] = [
             {
@@ -93,6 +104,7 @@ async def handle_task_status(
                 "scheduled_at": r.scheduled_at.isoformat(),
                 "start_at": r.start_at.isoformat() if r.start_at else None,
                 "finish_at": r.finish_at.isoformat() if r.finish_at else None,
+                **({"error_code": r.error_code} if r.error_code else {}),
             }
             for r in view.runs
         ]

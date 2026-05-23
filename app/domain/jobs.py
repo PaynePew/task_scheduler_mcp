@@ -277,6 +277,8 @@ class RunView:
     scheduled_at: datetime
     start_at: datetime | None
     finish_at: datetime | None
+    error_code: str | None = None
+    error_message: str | None = None
 
 
 @dataclass
@@ -288,6 +290,9 @@ class JobView:
     description: str | None = None
     job_type: str | None = None
     created_at: datetime | None = None
+    # Set from the latest run regardless of include_runs, for surfacing in status responses.
+    error_code: str | None = None
+    error_message: str | None = None
 
 
 async def get_job_with_runs(
@@ -318,7 +323,8 @@ async def get_job_with_runs(
     )
     db_runs = runs_result.scalars().all()
 
-    internal_status = db_runs[0].status if db_runs else "PENDING"
+    latest = db_runs[0] if db_runs else None
+    internal_status = latest.status if latest else "PENDING"
     run_views = [
         RunView(
             run_id=r.run_id,
@@ -326,6 +332,8 @@ async def get_job_with_runs(
             scheduled_at=r.scheduled_at,
             start_at=r.start_at,
             finish_at=r.finish_at,
+            error_code=r.error_code,
+            error_message=r.error_message,
         )
         for r in db_runs
     ]
@@ -338,6 +346,8 @@ async def get_job_with_runs(
         description=job.description,
         job_type=job.job_type,
         created_at=job.created_at,
+        error_code=latest.error_code if latest else None,
+        error_message=latest.error_message if latest else None,
     )
 
 
