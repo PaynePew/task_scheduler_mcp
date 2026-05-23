@@ -346,6 +346,19 @@ async def _dispatch(
         sqs.delete_message(receipt)
         return
 
+    # Auto-wire from_run_id from wait_for_run_id for recurring chains (issue #202).
+    # One-shot chains set from_run_id explicitly at job create time (is None check skips).
+    # Non-chained jobs have wait_for_run_id=None (no injection). Only the recurring chain
+    # case (from_run_id unset, wait_for_run_id present) needs runtime injection.
+    if hasattr(params, "from_run_id") and params.from_run_id is None:
+        if run.wait_for_run_id is not None:
+            params = params.model_copy(update={"from_run_id": run.wait_for_run_id})
+            logger.debug(
+                "run_id=%s: auto-wired from_run_id=%s from wait_for_run_id",
+                run_id,
+                run.wait_for_run_id,
+            )
+
     # Phase 3: dispatch with per-action timeout
     try:
         async with _heartbeat(sqs, receipt, interval=heartbeat_interval):
