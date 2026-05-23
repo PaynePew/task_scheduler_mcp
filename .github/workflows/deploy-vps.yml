@@ -82,15 +82,16 @@ jobs:
             git fetch origin
             git reset --hard origin/main
 
-            # Sync the 5 runtime config files into the runtime dir.
-            # CI is the only writer; manual edits are intentionally overwritten.
+            # Sync the 4 config files + static/ from the source clone into
+            # the runtime dir. CI is the only writer; manual edits are
+            # intentionally overwritten.
             cp infra/vps/docker-compose.yml /opt/task_scheduler_mcp/
             cp infra/vps/Caddyfile /opt/task_scheduler_mcp/
             cp infra/vps/vector.toml /opt/task_scheduler_mcp/
             cp elasticmq.conf /opt/task_scheduler_mcp/
             rsync -a --delete static/ /opt/task_scheduler_mcp/static/
 
-            # Deploy from the runtime dir (contains only .env.docker + the 6 files above).
+            # Deploy from the runtime dir (now holds the 5 entries above + .env.docker).
             cd /opt/task_scheduler_mcp
             export IMAGE_TAG=${{ github.sha }}
             docker compose pull

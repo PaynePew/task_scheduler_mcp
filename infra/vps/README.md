@@ -46,7 +46,8 @@ sudo mkdir -p /opt/task_scheduler_mcp_src /opt/task_scheduler_mcp
 sudo git clone https://github.com/PaynePew/task_scheduler_mcp.git /opt/task_scheduler_mcp_src
 sudo chown -R deploy:deploy /opt/task_scheduler_mcp_src /opt/task_scheduler_mcp
 
-# 2. Populate the runtime dir with the initial 6 config files
+# 2. Populate the runtime dir with the 4 config files + static/
+#    (.env.docker is added in step 3 — total 6 entries.)
 sudo -u deploy bash -c '
   cd /opt/task_scheduler_mcp_src
   cp infra/vps/docker-compose.yml /opt/task_scheduler_mcp/
