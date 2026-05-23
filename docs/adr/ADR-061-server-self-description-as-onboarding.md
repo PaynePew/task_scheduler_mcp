@@ -49,9 +49,18 @@ The regex is narrow enough to fail if the directive is removed but loose enough 
 
 The draft PRD initially proposed a new error code `AUTH_REQUIRED` for OAuth-gated failure. **Rejected.** ADR-060 fixed the vocabulary at 7 codes; `MISSING_CONNECTION` is already the canonical code for "OAuth missing" and already carries an optional `connect_url` field. Future Layer 3 work (push `MISSING_CONNECTION` from preflight into `execute()` paths) reuses the existing code.
 
-## Layer 2 / Layer 3 are deliberately deferred
+## Layer 2 is deliberately deferred; Layer 3 is implemented
 
-This ADR covers Layer 1 only. Layer 2 (`task_list_actions_v1` carries `auth_status`) and Layer 3 (`execute()` returns `MISSING_CONNECTION` on runtime token miss) are listed in the parent PRD (#196) as backlog. They would each warrant their own ADR if/when implemented — they introduce new response shapes and runtime behavior, not just a string rewrite.
+This ADR covers Layer 1 only. Layer 2 (`task_list_actions_v1` carries `auth_status`) is listed in the parent PRD (#196) as backlog and would warrant its own ADR.
+
+**Layer 3 has been implemented** (issue #211). OAuth-gated handlers (`slack_post`, `github_digest`, `email_send`) now call `check_oauth_for_execute()` at the top of `execute()`, which:
+- Skips the check in dev/CI (no KMS configured) so existing unit tests are unaffected.
+- Loads the `OAuthConnection` row and inspects the plaintext `expires_at` column (no decryption needed).
+- Returns `ActionResult(error_code="MISSING_CONNECTION")` on a missing row or an expired token with no refresher.
+- Attempts a token refresh when a `refresher` is supplied; returns `MISSING_CONNECTION` only on refresh failure.
+- Returns `None` on success so the handler falls through to the normal `get_token()` path.
+
+`JobRun` gained an `error_code` column (migration `0009`). The worker executor writes `error_code` from the `ActionResult` into the run row. `task.status.v1` now surfaces a structured `{"code": ..., "message": ..., "connect_url": ...}` error block in its response when `error_code` is set, matching the shape already used by `task.create` preflight (ADR-058, ADR-060).
 
 ## Consequences
 
@@ -79,4 +88,8 @@ Layer 2 has been implemented. The contract is:
 
 ## Open
 
-Future Layer 3 work (push `MISSING_CONNECTION` from preflight into `execute()` paths) would not invalidate the core decisions in this ADR. That decision belongs to its own ADR when implemented.
+Layers 1, 2, and 3 of the parent PRD (#196) are now implemented. Remaining backlog items would not invalidate the core decisions in this ADR:
+
+- **S4 — end-to-end integration walk** (#212): scenario test that exercises discovery → preflight error → connect → success → expiry → execute() error → reconnect → success in a single test, pinning the cross-layer contract.
+- **Token-refresh telemetry surfaced to the user** for recurring jobs whose connection expires between ticks. Would be a separate concern (notification side-channel, not a new error code).
+- **`tasks://auth-status` MCP resource** as an alternative to the inline fields on `task.list_actions.v1`. Not currently needed; Layer 2's inline shape is sufficient. Belongs to its own ADR if revisited.
