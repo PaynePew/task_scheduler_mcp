@@ -91,7 +91,7 @@ jobs:
             cp infra/vps/Caddyfile /opt/task_scheduler_mcp/
             cp infra/vps/vector.toml /opt/task_scheduler_mcp/
             cp elasticmq.conf /opt/task_scheduler_mcp/
-            rsync -a --delete static/ /opt/task_scheduler_mcp/static/
+            rsync -a --delete infra/vps/static/ /opt/task_scheduler_mcp/static/
 
             # Deploy from the runtime dir (now holds the 5 entries above + .env.docker).
             cd /opt/task_scheduler_mcp
