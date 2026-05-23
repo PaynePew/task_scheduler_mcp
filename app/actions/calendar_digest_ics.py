@@ -31,10 +31,14 @@ class CalendarDigestICSHandler:
         "title_contains filters events by a case-insensitive substring of the event title. "
         "401/403/404 responses are permanent failures (DLQ); 5xx and timeouts are retried."
     )
+    summary_line: ClassVar[str] = (
+        "Fetches an iCal/ICS calendar and returns events for the requested window."
+    )
     params_model: ClassVar[type[BaseModel]] = CalendarDigestICSParams
     timeout_seconds: ClassVar[int] = 30
     requires_operator: ClassVar[bool] = True
     credential_mode: ClassVar[CredentialMode] = CredentialMode.operator_env
+    required_provider: ClassVar[str | None] = None
 
     async def execute(self, run: Any, params: CalendarDigestICSParams) -> ActionResult:
         # Resolve ${VAR} tokens in the URL before making any network calls

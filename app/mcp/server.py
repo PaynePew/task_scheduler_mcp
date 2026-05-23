@@ -41,7 +41,31 @@ from app.secrets.literal_detection import detect_literal_secret
 logger = logging.getLogger(__name__)
 
 _SYSTEM_INSTRUCTION_FILE = Path(__file__).parent / "system_instruction.md"
-SYSTEM_INSTRUCTION: str = _SYSTEM_INSTRUCTION_FILE.read_text(encoding="utf-8").strip()
+
+
+def build_system_instruction(registry: dict[str, Any], template: str) -> str:
+    """Compose the MCP `instructions` string by injecting an action listing into the template.
+
+    The template must contain the placeholder `{ACTIONS_BLOCK}`. Each registered
+    action contributes one bullet line; the listing is sorted by action name for
+    deterministic output (so the same registry always produces the same string).
+
+    See ADR-061. Derived rather than hand-maintained — adding a handler to
+    ACTION_REGISTRY automatically surfaces it here without a separate edit.
+    """
+
+    lines: list[str] = []
+    for handler in sorted(registry.values(), key=lambda h: h.name):
+        provider = getattr(handler, "required_provider", None)
+        suffix = f" (needs {provider} OAuth)" if provider else ""
+        lines.append(f"- {handler.name}{suffix} -- {handler.summary_line}")
+    return template.replace("{ACTIONS_BLOCK}", "\n".join(lines))
+
+
+SYSTEM_INSTRUCTION: str = build_system_instruction(
+    ACTION_REGISTRY,
+    _SYSTEM_INSTRUCTION_FILE.read_text(encoding="utf-8").strip(),
+)
 
 
 async def _check_oauth_connection(

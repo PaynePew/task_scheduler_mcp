@@ -19,10 +19,12 @@ class EchoHandler:
         "Returns the input message unchanged. "
         "Use as a smoke-test to verify task creation and worker dispatch."
     )
+    summary_line: ClassVar[str] = "Echoes the input message back; smoke test for create + dispatch."
     params_model: ClassVar[type[BaseModel]] = EchoParams
     timeout_seconds: ClassVar[int] = 10
     requires_operator: ClassVar[bool] = False
     credential_mode: ClassVar[CredentialMode] = CredentialMode.none
+    required_provider: ClassVar[str | None] = None
 
     async def execute(self, run: Any, params: EchoParams) -> ActionResult:
         return ActionResult(ok=True, result={"echoed": params.message}, error=None)

@@ -67,11 +67,14 @@ class GitHubDigestHandler:
         "Result is stored in JobRun.result for downstream chaining (e.g., slack_post). "
         "Requires a GitHub OAuth connection — connect at /connections."
     )
+    summary_line: ClassVar[str] = (
+        "Queries GitHub Issues + PRs for a repo; ideal upstream for slack_post / email_send."
+    )
     params_model: ClassVar[type[BaseModel]] = GitHubDigestParams
     timeout_seconds: ClassVar[int] = 30
     requires_operator: ClassVar[bool] = False
     credential_mode: ClassVar[CredentialMode] = CredentialMode.oauth_connection
-    required_provider: ClassVar[str] = "github"
+    required_provider: ClassVar[str | None] = "github"
 
     async def execute(self, run: Any, params: GitHubDigestParams) -> ActionResult:
         try:

@@ -60,13 +60,21 @@ class ActionHandler(Protocol):
 
     ``requires_operator`` and ``credential_mode`` implement action-surface tiering
     (ADR-051): ``task.create`` rejects operator-only actions for non-operator callers.
+
+    ``summary_line`` is a one-line capability blurb (<=80 chars) injected into
+    the MCP ``instructions`` string at server startup. ``required_provider`` names
+    the OAuth provider the action needs (``"slack"``, ``"github"``, ``"google"``);
+    ``None`` for actions that don't need a per-user OAuth connection. Together they
+    make the server self-describe at handshake time (ADR-061).
     """
 
     name: ClassVar[str]
     description: ClassVar[str]
+    summary_line: ClassVar[str]
     params_model: ClassVar[type[BaseModel]]
     timeout_seconds: ClassVar[int]
     requires_operator: ClassVar[bool]
     credential_mode: ClassVar[CredentialMode]
+    required_provider: ClassVar[str | None]
 
     async def execute(self, run: Any, params: BaseModel) -> ActionResult: ...
