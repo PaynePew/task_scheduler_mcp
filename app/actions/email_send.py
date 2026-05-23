@@ -284,14 +284,13 @@ class EmailSendHandler:
             )
 
         # Check connection validity (expiry + missing) before attempting the action.
-        oauth_err = await check_oauth_for_execute(
-            user_id, "google", refresher=_make_google_refresher()
-        )
+        refresher = _make_google_refresher()
+        oauth_err = await check_oauth_for_execute(user_id, "google", refresher=refresher)
         if oauth_err is not None:
             return oauth_err
 
         try:
-            token = await get_token(user_id, "google", refresher=_make_google_refresher())
+            token = await get_token(user_id, "google", refresher=refresher)
         except ConnectionMiss:
             return missing_connection_result("google")
 
