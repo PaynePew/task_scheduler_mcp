@@ -245,17 +245,27 @@ def make_routes(
                 "response_type": "code",
                 "client_id": settings.workos_client_id,
                 "redirect_uri": cb,
+                # `scope=openid` keeps id_token issuance enabled so the
+                # callback's preferred signed-JWT path still works; if it
+                # ever drops out, we fall back to the (TLS-protected) user.id
+                # body field — see _workos_auth_callback below.
                 "scope": "openid profile email",
                 "state": state,
-                # WorkOS /sso/authorize requires a connection selector.
-                # Use "GitHubOAuth" (not "authkit") so the code-exchange step
-                # below stays on /sso/token. "authkit" routes through User
-                # Management API and the returned code can only be exchanged
-                # via /user_management/authenticate (see issue #189).
-                "provider": "GitHubOAuth",
+                # AuthKit User Management flow (issue #203). provider=authkit
+                # lets the hosted AuthKit UI handle the login chooser; the
+                # returned code is exchanged below at /user_management/authenticate
+                # and yields a `user_*` sub matching what the MCP bearer flow
+                # (CIMD/DCR) resolves.  Replaces the prior /sso/authorize +
+                # provider=GitHubOAuth combination, which issued `prof_*` subs
+                # divergent from MCP's `user_*` subs.
+                "provider": "authkit",
             }
             qs = urllib.parse.urlencode(params)
-            authorize_url = f"{settings.workos_issuer}/sso/authorize?{qs}"
+            # NB: User Management endpoints are hosted on api.workos.com,
+            # NOT on the AuthKit subdomain (workos_issuer).  AuthKit aliases
+            # /sso/* for legacy SSO but returns 404 for /user_management/*.
+            # See ADR-063 and settings.workos_api_base_url.
+            authorize_url = f"{settings.workos_api_base_url}/user_management/authorize?{qs}"
             resp = RedirectResponse(authorize_url, status_code=302)
             resp.set_cookie(_STATE_COOKIE, state, httponly=True, samesite="lax", max_age=600)
             return resp
@@ -277,16 +287,17 @@ def make_routes(
         if stored_state and state != stored_state:
             return HTMLResponse("Invalid state parameter", status_code=400)
 
-        # Exchange code for token
-        redirect_uri = f"{settings.connections_base_url}/connections/auth/callback"
+        # Exchange code via AuthKit User Management /authenticate (issue #203).
+        # Hosted on api.workos.com (settings.workos_api_base_url), NOT on the
+        # AuthKit subdomain — see ADR-063 host-distinction note.
+        # Returns `user.id` in the `user_*` schema — matches MCP bearer sub.
         try:
             async with httpx.AsyncClient(timeout=10) as client:
                 resp = await client.post(
-                    f"{settings.workos_issuer}/sso/token",
+                    f"{settings.workos_api_base_url}/user_management/authenticate",
                     data={
                         "grant_type": "authorization_code",
                         "code": code,
-                        "redirect_uri": redirect_uri,
                         "client_id": settings.workos_client_id,
                         "client_secret": settings.workos_client_secret,
                     },
@@ -330,18 +341,17 @@ def make_routes(
                     logger.warning("WorkOS id_token signature verification failed")
                     user_id = ""
         if not user_id:
-            # SSO providers (GitHubOAuth / GoogleOAuth / MicrosoftOAuth) return
-            # the verified identity in the `profile` field of the token-exchange
-            # response rather than as a JWT claim. This branch is reached when
-            # both JWT paths above gave up — typical for /sso/token responses
-            # where access_token is opaque.
+            # AuthKit User Management /authenticate returns the verified user
+            # identity in the top-level `user` object (User Management) rather
+            # than as a JWT claim. This branch is reached when both JWT paths
+            # above gave up — typical when access_token is opaque.
             #
-            # Trust posture: profile.id arrives over TLS in the response body of
+            # Trust posture: user.id arrives over TLS in the response body of
             # a request we made with our client_secret. Unlike issue #160 (which
             # was about accepting an unverified JWT from the *client*), here the
             # value is sourced from WorkOS directly, so no signature is needed.
-            profile = token_data.get("profile") or {}
-            user_id = profile.get("id") or ""
+            user_obj = token_data.get("user") or {}
+            user_id = user_obj.get("id") or ""
         if not user_id:
             return HTMLResponse("Could not determine user identity from token", status_code=502)
 

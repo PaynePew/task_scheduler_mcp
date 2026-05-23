@@ -790,3 +790,235 @@ async def test_workos_callback_tampered_id_token_returns_502():
 
     assert resp.status_code == 502
     assert "session" not in resp.cookies
+
+
+# ---------------------------------------------------------------------------
+# Issue #203 — Migrate from /sso/* to /user_management/*
+#
+# Background: The SSO flow issues `prof_*` subs (Profile entities) while the
+# MCP bearer flow (CIMD/DCR) issues `user_*` subs (User entities). Writing
+# under one schema and reading under the other causes every OAuth-gated MCP
+# call to return MISSING_CONNECTION despite the /connections UI showing
+# "Connected".  These tests pin the AuthKit User Management contract so the
+# divergence cannot reappear silently.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_connections_login_uses_user_management_authorize_endpoint():
+    """`/connections/login` MUST redirect to /user_management/authorize (not /sso/authorize)."""
+    app = _make_app()
+    transport = httpx.ASGITransport(app=app)
+    with patch("app.web.connections.settings") as mock_settings:
+        mock_settings.workos_client_id = _WORKOS_CLIENT_ID
+        mock_settings.workos_client_secret = "secret"
+        mock_settings.workos_issuer = _WORKOS_ISSUER
+        mock_settings.workos_api_base_url = "https://api.workos.test"
+        mock_settings.connections_base_url = "http://localhost:8000"
+        mock_settings.web_session_secret = "dev-secret-32-bytes-long-exactly!"
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test", follow_redirects=False
+        ) as client:
+            resp = await client.get("/connections/login")
+
+    assert resp.status_code == 302
+    location = resp.headers["location"]
+    assert "/user_management/authorize" in location, (
+        f"login must use /user_management/authorize, got: {location}"
+    )
+    assert "/sso/authorize" not in location, (
+        f"login must not use /sso/authorize anymore, got: {location}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_user_management_authorize_url_host_is_workos_api_base_not_issuer():
+    """Regression net for the 404 caught during the #203 sandbox probe.
+
+    The authorize URL host MUST come from ``settings.workos_api_base_url``
+    (api.workos.com), not from ``settings.workos_issuer`` (the AuthKit
+    subdomain, which 404s on /user_management/*).
+    """
+    app = _make_app()
+    transport = httpx.ASGITransport(app=app)
+    issuer = "https://tenant-abc.authkit.test"
+    api_base = "https://api.workos.test"
+    with patch("app.web.connections.settings") as mock_settings:
+        mock_settings.workos_client_id = _WORKOS_CLIENT_ID
+        mock_settings.workos_client_secret = "secret"
+        mock_settings.workos_issuer = issuer
+        mock_settings.workos_api_base_url = api_base
+        mock_settings.connections_base_url = "http://localhost:8000"
+        mock_settings.web_session_secret = "dev-secret-32-bytes-long-exactly!"
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test", follow_redirects=False
+        ) as client:
+            resp = await client.get("/connections/login")
+
+    location = resp.headers["location"]
+    assert location.startswith(api_base + "/user_management/authorize"), (
+        f"authorize URL must be hosted on workos_api_base_url ({api_base}), got: {location}"
+    )
+    assert not location.startswith(issuer), (
+        f"authorize URL must NOT be hosted on workos_issuer ({issuer}) — "
+        f"AuthKit subdomain does not serve /user_management/*. Got: {location}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_connections_login_uses_provider_authkit():
+    """`/connections/login` passes provider=authkit (WorkOS official recommendation).
+
+    Background: with /sso/authorize we had to use provider=GitHubOAuth to route the
+    code-exchange to /sso/token; under User Management, provider=authkit lets the
+    AuthKit hosted UI handle the chooser.
+    """
+    app = _make_app()
+    transport = httpx.ASGITransport(app=app)
+    with patch("app.web.connections.settings") as mock_settings:
+        mock_settings.workos_client_id = _WORKOS_CLIENT_ID
+        mock_settings.workos_client_secret = "secret"
+        mock_settings.workos_issuer = _WORKOS_ISSUER
+        mock_settings.workos_api_base_url = "https://api.workos.test"
+        mock_settings.connections_base_url = "http://localhost:8000"
+        mock_settings.web_session_secret = "dev-secret-32-bytes-long-exactly!"
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test", follow_redirects=False
+        ) as client:
+            resp = await client.get("/connections/login")
+
+    location = resp.headers["location"]
+    assert "provider=authkit" in location, f"login must pass provider=authkit, got: {location}"
+    assert "provider=GitHubOAuth" not in location, (
+        f"GitHubOAuth provider hint must be removed, got: {location}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_workos_callback_posts_to_user_management_authenticate_endpoint():
+    """WorkOS code exchange MUST POST to api.workos.com/user_management/authenticate.
+
+    Pins both the path (User Management migration, #203) and the host
+    (api.workos.com, NOT the AuthKit subdomain — see ADR-063).
+    """
+    from app.auth.token_validation import AuthContext
+
+    app = _make_app()
+    transport = httpx.ASGITransport(app=app)
+
+    captured_url: list[str] = []
+
+    async def _capture_post(self, url, *args, **kwargs):  # noqa: ARG001
+        captured_url.append(url)
+        return MagicMock(
+            is_success=True,
+            json=MagicMock(
+                return_value={
+                    "access_token": "fake.access.token",
+                    "user": {"id": "user_01TEST_FROM_AUTHKIT"},
+                }
+            ),
+        )
+
+    api_base = "https://api.workos.test"
+    issuer = "https://tenant-abc.authkit.test"
+    with patch("app.web.connections.settings") as mock_settings:
+        mock_settings.workos_client_id = _WORKOS_CLIENT_ID
+        mock_settings.workos_client_secret = "secret"
+        mock_settings.workos_issuer = issuer
+        mock_settings.workos_api_base_url = api_base
+        mock_settings.workos_jwks_uri = f"{issuer}/oauth2/jwks/client"
+        mock_settings.workos_audience = _WORKOS_CLIENT_ID
+        mock_settings.connections_base_url = "http://localhost:8000"
+        mock_settings.web_session_secret = "dev-secret-32-bytes-long-exactly!"
+
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test", follow_redirects=False
+        ) as client:
+            with (
+                patch(
+                    "app.web.connections.validate_token",
+                    return_value=AuthContext(user_id="user_01TEST_FROM_AUTHKIT"),
+                ),
+                patch("httpx.AsyncClient.post", new=_capture_post),
+            ):
+                resp = await client.get(
+                    "/connections/auth/callback",
+                    params={"code": "auth-code-123", "state": ""},
+                )
+
+    assert resp.status_code == 302
+    assert len(captured_url) == 1, "callback should POST exactly once for code exchange"
+    expected_url = f"{api_base}/user_management/authenticate"
+    assert captured_url[0] == expected_url, (
+        f"code exchange must POST to {expected_url}, got: {captured_url[0]}"
+    )
+    assert not captured_url[0].startswith(issuer), (
+        f"code exchange must NOT post to the AuthKit subdomain ({issuer}), got: {captured_url[0]}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_workos_callback_extracts_user_id_from_user_object():
+    """When access_token+id_token both fail, callback MUST fall back to response.user.id.
+
+    User Management returns `{user: {id: "user_..."}}` (not `{profile: {id: "prof_..."}}`).
+    This is the failure mode that caused issue #203 (rows written under prof_*).
+    """
+    from app.auth.token_validation import TokenValidationError
+
+    app = _make_app()
+    transport = httpx.ASGITransport(app=app)
+
+    expected_user_id = "user_01TEST_FROM_AUTHKIT_USER_OBJECT"
+    fake_token_response = {
+        "access_token": "opaque_token_no_jwt",
+        "user": {"id": expected_user_id, "email": "test@example.com"},
+    }
+
+    with patch("app.web.connections.settings") as mock_settings:
+        mock_settings.workos_client_id = _WORKOS_CLIENT_ID
+        mock_settings.workos_client_secret = "secret"
+        mock_settings.workos_issuer = _WORKOS_ISSUER
+        mock_settings.workos_api_base_url = "https://api.workos.test"
+        mock_settings.workos_jwks_uri = "https://api.workos.test/oauth2/jwks/client"
+        mock_settings.workos_audience = _WORKOS_CLIENT_ID
+        mock_settings.connections_base_url = "http://localhost:8000"
+        mock_settings.web_session_secret = "dev-secret-32-bytes-long-exactly!"
+
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test", follow_redirects=False
+        ) as client:
+            with (
+                patch(
+                    "app.web.connections.validate_token",
+                    side_effect=TokenValidationError("opaque token has no JWT claims"),
+                ),
+                patch(
+                    "httpx.AsyncClient.post",
+                    new=AsyncMock(
+                        return_value=MagicMock(
+                            is_success=True,
+                            json=MagicMock(return_value=fake_token_response),
+                        )
+                    ),
+                ),
+            ):
+                resp = await client.get(
+                    "/connections/auth/callback",
+                    params={"code": "auth-code-123", "state": ""},
+                )
+
+    assert resp.status_code == 302
+    assert resp.headers["location"] == "/connections"
+
+    # Decode the session cookie and assert the sub is user_01..., NOT prof_01...
+    session_cookie = resp.cookies.get("session")
+    assert session_cookie is not None, "callback must set a session cookie"
+    decoded = jwt.decode(session_cookie, "dev-secret-32-bytes-long-exactly!", algorithms=["HS256"])
+    assert decoded["sub"] == expected_user_id, (
+        f"session sub must equal user.id from User Management response, got: {decoded['sub']}"
+    )
+    assert decoded["sub"].startswith("user_"), (
+        f"session sub must be a User Management ID (user_*), got: {decoded['sub']}"
+    )

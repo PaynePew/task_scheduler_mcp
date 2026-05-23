@@ -89,3 +89,10 @@ and `/sso/token` → `/user_management/authenticate`, register the MCP URL as a
 Resource Indicator in the WorkOS dashboard, and collapse back to a single
 `WORKOS_AUDIENCE=<url>`. Deferred until an MCP client we care about fails
 RFC 8707 audience binding or the codebase has bandwidth for the migration.
+
+**Resolved 2026-05-23 (issue #203, ADR-063):** the deferred risk materialised
+in production — SSO issued `prof_*` subs while MCP CIMD/DCR issued `user_*`
+subs, so every real-user MCP OAuth call returned `MISSING_CONNECTION`. The
+web `/connections` flow has been migrated to `/user_management/*` per the plan
+above. See `ADR-063` for the migration decision record and the data-migration
+procedure for pre-existing `prof_*` rows.
