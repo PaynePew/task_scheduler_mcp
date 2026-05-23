@@ -37,6 +37,8 @@ jobs:
           tags: |
             ghcr.io/paynepew/task_scheduler_mcp:latest
             ghcr.io/paynepew/task_scheduler_mcp:${{ github.sha }}
+          build-args: |
+            GIT_SHA=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -84,11 +86,16 @@ jobs:
       - name: Smoke test
         run: |
           for i in 1 2 3 4 5; do
-            if curl -fsS --max-time 10 https://scheduler.paynepew.dev/healthz; then
-              echo ""
-              echo "Smoke test passed on attempt $i"
+            body=$(curl -fsS --max-time 10 https://scheduler.paynepew.dev/healthz) && {
+              echo "$body"
+              version=$(echo "$body" | python3 -c "import sys,json; print(json.load(sys.stdin).get('version',''))")
+              if [ "$version" = "unknown" ] || [ -z "$version" ]; then
+                echo "Smoke test failed: version field is '$version' (expected SHA)"
+                exit 1
+              fi
+              echo "Smoke test passed on attempt $i (version=$version)"
               exit 0
-            fi
+            }
             echo "Attempt $i failed, retrying in 5s..."
             sleep 5
           done
