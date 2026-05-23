@@ -40,17 +40,45 @@ The MCP server persists `Job` + `JobRun` rows. The **Watcher** claims due runs v
 
 ## §3 How to use
 
-### Self-host (recommended)
+Three deployment paths. They use **different MCP transports** and **different OAuth scopes** — mixing them is the #1 setup pitfall. Pick one and follow it end-to-end.
+
+|                          | **A. Hosted**                                      | **B. Self-host (HTTP)**                          | **C. Self-host (stdio)**                                    |
+|--------------------------|----------------------------------------------------|--------------------------------------------------|-------------------------------------------------------------|
+| MCP transport            | streamable-http over TLS                           | streamable-http                                  | stdio child process                                         |
+| MCP endpoint             | `https://scheduler.paynepew.dev/mcp`               | `http://localhost:8000/mcp`                      | spawned: `uv run python -m app.entrypoints.mcp_stdio`       |
+| `user_id` source         | WorkOS Bearer JWT (`sub` claim) — ADR-053          | `X-User-Id` header (trust-only) — ADR-015        | `MCP_USER_ID` env var (trust-only) — ADR-015                |
+| OAuth dashboard          | `https://scheduler.paynepew.dev/connections`       | `http://localhost:8000/connections`              | `http://localhost:8000/connections` *(same web tier)*       |
+| What to launch locally   | nothing                                            | `docker compose --profile full up -d`            | `docker compose --profile full up -d` *(for `/connections`)* + on-demand stdio spawn |
+| `CONNECTIONS_BASE_URL`   | (operator-managed)                                 | `http://localhost:8000`                          | `http://localhost:8000`                                     |
+
+> **Why this matters.** When an action (`github_digest`, `slack_post`, `email_send`) can't find an upstream OAuth token, the server replies with `MISSING_CONNECTION` + `connect_url` built from **its own `CONNECTIONS_BASE_URL`**. If you point your MCP client at Path A but try to OAuth on Path B/C (or vice versa), the two sides hold different `user_id`s, the connect_url shows the wrong host, and every action call silently fails.
+
+### A. Hosted — zero install, try in 2 min
+
+```jsonc
+// Claude Desktop / Claude Code / Cursor MCP config
+{ "mcpServers": { "task-scheduler": {
+  "url": "https://scheduler.paynepew.dev/mcp",
+  "transport": "streamable-http"
+}}}
+```
+
+1. Restart your MCP client; the first tool call triggers the WorkOS OAuth flow ([RFC 9728 Protected Resource Metadata](https://www.rfc-editor.org/rfc/rfc9728)).
+2. After signing in, open `https://scheduler.paynepew.dev/connections` and click Connect for each upstream provider you need (GitHub / Slack / Google).
+3. Inspector quick-check: `curl https://scheduler.paynepew.dev/healthz` → `{"ok":true,"db":"connected"}`.
+
+### B. Self-host (HTTP) — recommended for production
 
 ```bash
 git clone https://github.com/PaynePew/task_scheduler_mcp
-cd task_scheduler_mcp && cp .env.example .env
+cd task_scheduler_mcp
+cp .env.docker.example .env.docker     # ← compose reads THIS, not .env
+cp .env.example .env                   # only for host-side `uv run` (tests, alembic)
 docker compose --profile full up -d
 ```
 
-Claude Desktop config (`~/Library/Application Support/Claude/claude_desktop_config.json`):
-
-```json
+```jsonc
+// MCP client config (Claude Desktop / Code / Cursor)
 { "mcpServers": { "task-scheduler": {
   "url": "http://localhost:8000/mcp",
   "transport": "streamable-http",
@@ -58,20 +86,46 @@ Claude Desktop config (`~/Library/Application Support/Claude/claude_desktop_conf
 }}}
 ```
 
-**BYO LLM via `http_call` + `${ANTHROPIC_API_KEY}`:** set `action: "http_call"` and reference `${ANTHROPIC_API_KEY}` in headers or body — substituted from env at run time ([ADR-032](docs/adr/ADR-032-secrets-aware-action-handlers-and-env-var-substitution.md)); add the key name to `HTTP_CALL_ENV_WHITELIST`. Rate limit: **1 000 creates/24h · 10/min burst** — env-configurable ([ADR-042](docs/adr/ADR-042-postgres-backed-rate-limiting.md)).
+OAuth dashboard: open `http://localhost:8000/connections` → verify the page shows `Signed in as me` (matches your `X-User-Id` header) → click Connect for each provider. For an internet-facing deployment, edit `.env.docker`:
 
-For always-on hosting: `bin/setup-vps.sh` on a fresh Ubuntu 24.04 box (Docker + Caddy + ufw + nightly Postgres backup + systemd restart on reboot).
+- Set `CONNECTIONS_BASE_URL=https://yourdomain.tld` so OAuth callback URLs and PRM resource URLs use the public host.
+- Fill in §7 (WorkOS Bearer auth) — **never expose trust-only `X-User-Id` to the public internet** (anyone can read jobs by guessing the header).
+- Run `bin/setup-vps.sh` on a fresh Ubuntu 24.04 box for Docker + Caddy + ufw + nightly Postgres backup + systemd auto-restart.
 
-### Public demo (click-through only)
+**BYO LLM via `http_call`:** set `action: "http_call"`, reference `${ANTHROPIC_API_KEY}` in headers/body — substituted at run time ([ADR-032](docs/adr/ADR-032-secrets-aware-action-handlers-and-env-var-substitution.md)); add the var name to `ALLOWED_TEMPLATE_VARS`. Rate limit: **1 000 creates/24h · 10/min burst** — env-configurable ([ADR-042](docs/adr/ADR-042-postgres-backed-rate-limiting.md)).
 
-`scheduler.paynepew.dev/` serves a landing page ([ADR-041](docs/adr/ADR-041-static-landing-page-and-caddy-path-routing.md)). The live MCP endpoint:
+### C. Self-host (stdio) — MCP Inspector / dev convenience
+
+Stdio MCP is a child process that dies with the chat ([§4](#§4-why-http-not-stdio) for why this is usually a bad idea). Use it only for MCP Inspector debugging or short-lived dev runs. **The OAuth dashboard still lives in the HTTP web tier**, so you still bring up the stack:
 
 ```bash
-curl https://scheduler.paynepew.dev/healthz   # → {"ok":true,"db":"connected"}
-MCP_USER_ID=demo npx @modelcontextprotocol/inspector https://scheduler.paynepew.dev/mcp
+cp .env.docker.example .env.docker
+cp .env.example .env
+docker compose --profile full up -d    # web tier (for /connections) + Postgres + queue
 ```
 
-No auth — anyone can read your jobs by guessing your `X-User-Id`. Self-host for anything that matters. Browse: [ADRs](docs/adr/) · [PRDs](docs/PRD/) · [Design Decisions](#design-decisions-adrs)
+```jsonc
+// MCP client config — client spawns the stdio process on demand
+{ "mcpServers": { "task-scheduler": {
+  "type": "stdio",
+  "command": "uv",
+  "args": ["run", "python", "-m", "app.entrypoints.mcp_stdio"],
+  "env": { "MCP_USER_ID": "me", "MCP_USER_TZ": "UTC" }
+}}}
+```
+
+OAuth: open `http://localhost:8000/connections` → connect providers. Verify `Signed in as me` matches the `MCP_USER_ID` you passed to the stdio process.
+
+> **The stdio gotcha.** Two processes read `MCP_USER_ID` from their own environment: the stdio process (from your MCP client's `env` block above) and the web tier (from `.env.docker`). They MUST resolve to the same string. If they differ, you OAuth as one user and the stdio process queries another — silent miss, error envelope returns `connect_url=http://localhost:8000/connections` even though the connection is already stored under a different user_id.
+
+Inspector quick-check:
+
+```bash
+MCP_USER_ID=local-dev MCP_USER_TZ=UTC \
+  npx @modelcontextprotocol/inspector uv run python -m app.entrypoints.mcp_stdio
+```
+
+Browse: [ADRs](docs/adr/) · [PRDs](docs/PRD/) · [Design Decisions](#design-decisions-adrs)
 
 ---
 
@@ -178,16 +232,15 @@ W4 action sprint cohort:
 
 ## §9 Local Development
 
+Host-side test loop (no full stack):
+
 ```bash
-uv sync && cp .env.example .env
-docker compose up -d postgres elasticmq
+uv sync
+cp .env.example .env
+docker compose up -d postgres elasticmq             # Postgres + queue only
+uv run alembic upgrade head
 uv run pytest -m "not integration" && uv run pytest -m integration
 uv run ruff check . && uv run ruff format --check .
 ```
 
-```bash
-MCP_USER_ID=local-dev MCP_USER_TZ=UTC \
-  npx @modelcontextprotocol/inspector uv run python -m app.entrypoints.mcp_stdio
-```
-
-Expected in inspector: **5 tools · 4 resources · 2 prompts** (W4 complete). See [docs/W2-VERIFICATION.md](docs/W2-VERIFICATION.md).
+For MCP Inspector against the stdio entrypoint, see [§3 Path C](#§3-how-to-use). Expected surface: **5 tools · 4 resources · 2 prompts** (W4 complete). Full click-through verification: [docs/W2-VERIFICATION.md](docs/W2-VERIFICATION.md).

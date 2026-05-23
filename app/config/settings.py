@@ -190,9 +190,24 @@ class Settings(BaseSettings):
     google_client_id: str | None = None
     google_client_secret: str | None = None
 
-    # Base URL of this server — used to construct OAuth redirect URIs and the
-    # connect_url hint in task.create error envelopes (ADR-058).
-    # E.g. "https://scheduler.paynepew.dev" in production, "http://localhost:8000" locally.
+    # Base URL of THIS server — the URL a BROWSER hits (not the container's
+    # internal hostname). Used to construct:
+    #   1. OAuth provider callback URLs (GitHub / Slack / Google / WorkOS).
+    #      MUST match the redirect URI registered in each provider's dashboard.
+    #   2. The `connect_url` hint in task.create / action error envelopes
+    #      (ADR-058) — e.g. `MISSING_CONNECTION` returns
+    #      `connect_url = f"{connections_base_url}/connections"`.
+    #   3. The `resource` field in PRM (RFC 9728) — falls back to
+    #      `${connections_base_url}/mcp` when WORKOS_RESOURCE_URL is unset.
+    #
+    # Values by deployment path (README §3):
+    #   Path A (hosted)             — operator-managed, e.g. https://scheduler.paynepew.dev
+    #   Path B (self-host HTTP)     — http://localhost:8000 local, or your TLS domain
+    #   Path C (self-host stdio)    — http://localhost:8000 (the web tier's value)
+    #
+    # ⚠ Mis-set in production → MISSING_CONNECTION errors point users at a
+    #   URL they can't reach. The localhost default is correct only for local
+    #   dev; override in `.env.docker` for any internet-facing deployment.
     connections_base_url: str = "http://localhost:8000"
 
     # Secret key for signing the web session JWT cookie (ADR-058).

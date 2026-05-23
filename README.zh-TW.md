@@ -44,17 +44,45 @@ MCP 伺服器持久化 `Job` 與 `JobRun` 資料列。**Watcher** 透過 `FOR UP
 
 ## §3 使用方式
 
-### 自行托管（推薦）
+三條部署路徑。它們使用**不同的 MCP transport**，OAuth 也走**不同的範疇** — 混用是最常見的踩雷點。選一條走到底，不要中途交叉。
+
+|                          | **A. Hosted（線上）**                              | **B. 自行托管（HTTP）**                          | **C. 自行托管（stdio）**                                  |
+|--------------------------|----------------------------------------------------|--------------------------------------------------|-----------------------------------------------------------|
+| MCP transport            | streamable-http over TLS                           | streamable-http                                  | stdio 子行程                                              |
+| MCP 端點                 | `https://scheduler.paynepew.dev/mcp`               | `http://localhost:8000/mcp`                      | spawn：`uv run python -m app.entrypoints.mcp_stdio`       |
+| `user_id` 來源           | WorkOS Bearer JWT 的 `sub` 欄位（ADR-053）         | `X-User-Id` header（trust-only，ADR-015）        | `MCP_USER_ID` 環境變數（trust-only，ADR-015）             |
+| OAuth 儀表板             | `https://scheduler.paynepew.dev/connections`       | `http://localhost:8000/connections`              | `http://localhost:8000/connections`（同一個 web tier）    |
+| 本機要先啟動什麼         | 不用                                               | `docker compose --profile full up -d`            | `docker compose --profile full up -d`（為了 `/connections`）+ MCP 客戶端按需 spawn stdio |
+| `CONNECTIONS_BASE_URL`   | （Operator 管理）                                  | `http://localhost:8000`                          | `http://localhost:8000`                                   |
+
+> **為什麼這張表很重要。** 當 action（`github_digest` / `slack_post` / `email_send`）找不到對應的上游 OAuth token，server 會回 `MISSING_CONNECTION` 加上 `connect_url`，這個 URL 是用**它自己的 `CONNECTIONS_BASE_URL`** 組出來的。如果你 MCP 客戶端指向 Path A、但你跑去 Path B/C 做 OAuth（或反過來），兩邊的 `user_id` 不一樣、connect_url 指向錯誤的 host，每次 action 呼叫都會默默失敗。
+
+### A. Hosted — 不用安裝，兩分鐘上手
+
+```jsonc
+// Claude Desktop / Claude Code / Cursor 的 MCP 設定
+{ "mcpServers": { "task-scheduler": {
+  "url": "https://scheduler.paynepew.dev/mcp",
+  "transport": "streamable-http"
+}}}
+```
+
+1. 重啟 MCP 客戶端；首次呼叫工具會觸發 WorkOS OAuth 授權流程（依 [RFC 9728 Protected Resource Metadata](https://www.rfc-editor.org/rfc/rfc9728)）。
+2. 登入完成後開啟 `https://scheduler.paynepew.dev/connections`，依需要點各個 Connect（GitHub / Slack / Google）。
+3. 健康檢查：`curl https://scheduler.paynepew.dev/healthz` → `{"ok":true,"db":"connected"}`。
+
+### B. 自行托管（HTTP）— 上線部署推薦這條
 
 ```bash
 git clone https://github.com/PaynePew/task_scheduler_mcp
-cd task_scheduler_mcp && cp .env.example .env
+cd task_scheduler_mcp
+cp .env.docker.example .env.docker     # ← compose 讀的是這份，不是 .env
+cp .env.example .env                   # 僅供 host-side `uv run`（測試、alembic）
 docker compose --profile full up -d
 ```
 
-Claude Desktop 設定（`~/Library/Application Support/Claude/claude_desktop_config.json`）：
-
-```json
+```jsonc
+// MCP 客戶端設定（Claude Desktop / Code / Cursor）
 { "mcpServers": { "task-scheduler": {
   "url": "http://localhost:8000/mcp",
   "transport": "streamable-http",
@@ -62,20 +90,46 @@ Claude Desktop 設定（`~/Library/Application Support/Claude/claude_desktop_con
 }}}
 ```
 
-持續運行托管：在全新的 Ubuntu 24.04 主機上執行 `bin/setup-vps.sh`（Docker + Caddy + ufw + 每夜 Postgres 備份 + systemd 重開機自動重啟）。
+OAuth 儀表板：開啟 `http://localhost:8000/connections` → 確認頁面顯示 `Signed in as me`（要跟你 `X-User-Id` header 一致）→ 點各個 Connect。要對外開放時，編輯 `.env.docker`：
 
-### 公開示範（僅供瀏覽）
+- 設 `CONNECTIONS_BASE_URL=https://yourdomain.tld`，OAuth callback 跟 PRM resource URL 才會用公開 host。
+- 把 §7 的 WorkOS Bearer auth 填好 — **絕對不要把 trust-only `X-User-Id` 模式暴露在公開網路上**（任何人猜到 header 就能讀你的任務）。
+- 全新 Ubuntu 24.04 機器：`bin/setup-vps.sh` 一鍵裝 Docker + Caddy + ufw + 每夜 Postgres 備份 + systemd 重開機自動重啟。
+
+**透過 `http_call` 自帶 LLM：** `action: "http_call"`，在 headers/body 引用 `${ANTHROPIC_API_KEY}`，執行時會從環境變數展開（[ADR-032](docs/adr/ADR-032-secrets-aware-action-handlers-and-env-var-substitution.md)）；變數名稱要加進 `ALLOWED_TEMPLATE_VARS`。速率限制：**1 000 次建立/24h · 每分鐘 10 次爆衝** — 可透過 env 調整（[ADR-042](docs/adr/ADR-042-postgres-backed-rate-limiting.md)）。
+
+### C. 自行托管（stdio）— MCP Inspector / 開發便利路徑
+
+Stdio MCP 是子行程，對話結束就消失（為什麼通常不推薦：[§4](#§4-為什麼用-http而非-stdio)）。只在 MCP Inspector 除錯、短期 dev 用。**OAuth 儀表板還是在 HTTP web tier 上**，所以整個 stack 仍要起來：
 
 ```bash
-curl https://scheduler.paynepew.dev/healthz   # → {"ok":true,"db":"connected"}
-MCP_USER_ID=demo npx @modelcontextprotocol/inspector https://scheduler.paynepew.dev/mcp
+cp .env.docker.example .env.docker
+cp .env.example .env
+docker compose --profile full up -d    # web tier（給 /connections 用）+ Postgres + queue
 ```
 
-無驗證 — 任何人都可以透過猜測你的 `X-User-Id` 讀取你的任務。凡是重要的資料請自行托管。
+```jsonc
+// MCP 客戶端設定 — 客戶端按需 spawn stdio 進程
+{ "mcpServers": { "task-scheduler": {
+  "type": "stdio",
+  "command": "uv",
+  "args": ["run", "python", "-m", "app.entrypoints.mcp_stdio"],
+  "env": { "MCP_USER_ID": "me", "MCP_USER_TZ": "UTC" }
+}}}
+```
 
-### 瀏覽設計（作品集路徑）
+OAuth：開啟 `http://localhost:8000/connections` → 連接 provider。**確認 `Signed in as me` 跟你傳給 stdio 進程的 `MCP_USER_ID` 是同一個字串。**
 
-[`docs/adr/`](docs/adr/) — 42 個 ADR · [`docs/PRD/`](docs/PRD/) — 衝刺規格 · 設計決策（詳見下方 §7）
+> **stdio 的隱形坑。** 兩個進程各自讀自己的 `MCP_USER_ID`：stdio 進程讀你 MCP 客戶端設定 `env` 區塊；web tier 讀 `.env.docker`。**兩邊必須解析成同一個字串**。如果不一樣，你會用一個 user OAuth、stdio 進程查另一個 user — 看起來像連線沒做，其實做了但對不上，error envelope 仍然吐 `connect_url=http://localhost:8000/connections`。
+
+Inspector 快速驗證：
+
+```bash
+MCP_USER_ID=local-dev MCP_USER_TZ=UTC \
+  npx @modelcontextprotocol/inspector uv run python -m app.entrypoints.mcp_stdio
+```
+
+延伸閱讀：[ADRs](docs/adr/) · [PRDs](docs/PRD/) · 設計決策（下方 §7）
 
 ---
 
@@ -198,21 +252,16 @@ W4 行動衝刺群組：
 
 ## §9 本地開發
 
-完整的 11 步驟點選流程請見 [docs/W2-VERIFICATION.md](docs/W2-VERIFICATION.md)。
+Host-side 測試迴圈（不啟動 full stack）：
 
 ```bash
-uv sync                             # 安裝依賴
+uv sync                                    # 安裝依賴
 cp .env.example .env
-docker compose up -d postgres elasticmq
-uv run pytest -m "not integration"  # 單元測試
-uv run pytest -m integration        # 需要運行中的服務
+docker compose up -d postgres elasticmq    # 只起 Postgres + queue
+uv run alembic upgrade head
+uv run pytest -m "not integration"         # 單元測試
+uv run pytest -m integration               # 需要運行中的服務
 uv run ruff check . && uv run ruff format --check .
 ```
 
-```bash
-# stdio 檢查器（不需要 compose 堆疊）
-MCP_USER_ID=local-dev MCP_USER_TZ=UTC \
-  npx @modelcontextprotocol/inspector uv run python -m app.entrypoints.mcp_stdio
-```
-
-在檢查器中預期顯示：**7 個工具 · 4 個資源 · 2 個提示詞**（W4 完成）/ **5 個工具 · 3 個資源 · 2 個提示詞**（W3 基線）。
+MCP Inspector 對 stdio 入口的用法，請見 [§3 Path C](#§3-使用方式)。預期介面：**5 個工具 · 4 個資源 · 2 個提示詞**（W4 完成）。完整 11 步驟點選流程：[docs/W2-VERIFICATION.md](docs/W2-VERIFICATION.md)。
