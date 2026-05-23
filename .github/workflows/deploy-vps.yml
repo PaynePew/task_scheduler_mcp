@@ -57,8 +57,9 @@ jobs:
             -d '{"paused": true}' > /dev/null
           echo "Better Stack monitor $MONITOR_ID paused"
 
-      # Pull new image, run migrations, recreate stack.
-      # Rollback: IMAGE_TAG=<prev_sha> docker compose up -d on the VPS.
+      # Sync runtime files from source clone, pull new image, run migrations,
+      # recreate stack. Rollback: IMAGE_TAG=<prev_sha> docker compose up -d
+      # on the VPS in /opt/task_scheduler_mcp.
       - uses: appleboy/ssh-action@v1
         with:
           host: scheduler.paynepew.dev
@@ -75,6 +76,21 @@ jobs:
           script: |
             #!/usr/bin/env bash
             set -euo pipefail
+
+            # Pull latest source into the source clone (never touched by runtime).
+            cd /opt/task_scheduler_mcp_src
+            git fetch origin
+            git reset --hard origin/main
+
+            # Sync the 5 runtime config files into the runtime dir.
+            # CI is the only writer; manual edits are intentionally overwritten.
+            cp infra/vps/docker-compose.yml /opt/task_scheduler_mcp/
+            cp infra/vps/Caddyfile /opt/task_scheduler_mcp/
+            cp infra/vps/vector.toml /opt/task_scheduler_mcp/
+            cp elasticmq.conf /opt/task_scheduler_mcp/
+            rsync -a --delete static/ /opt/task_scheduler_mcp/static/
+
+            # Deploy from the runtime dir (contains only .env.docker + the 6 files above).
             cd /opt/task_scheduler_mcp
             export IMAGE_TAG=${{ github.sha }}
             docker compose pull
