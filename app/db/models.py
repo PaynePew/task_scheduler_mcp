@@ -117,6 +117,7 @@ class JobRun(Base):
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default="PENDING")
     result: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_code: Mapped[str | None] = mapped_column(Text, nullable=True)
     retry_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     max_retries: Mapped[int] = mapped_column(Integer, nullable=False, server_default="3")
     # W2 bonus column landed in W1 schema
