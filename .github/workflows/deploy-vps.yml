@@ -60,11 +60,15 @@ jobs:
           echo "Better Stack monitor $MONITOR_ID paused"
 
       # Sync runtime files from source clone, pull new image, run migrations,
-      # recreate stack. Rollback: IMAGE_TAG=<prev_sha> docker compose up -d --force-recreate
-      # on the VPS in /opt/task_scheduler_mcp.
-      # --force-recreate: prevents silent stale-container bugs (issue #204) where
-      # docker compose up -d --remove-orphans skips a service whose image-id
-      # comparison is stale, leaving the old container running under the new tag.
+      # recreate the app stack. Rollback: IMAGE_TAG=<prev_sha> docker compose up -d
+      # --force-recreate --no-deps mcp-server watcher worker recurring-watcher
+      # chain-watcher on the VPS in /opt/task_scheduler_mcp.
+      # --force-recreate is scoped to the app services (NOT the shared caddy): it
+      # prevents silent stale-container bugs (issue #204) where docker compose
+      # up -d skips a service whose image-id comparison is stale, leaving the old
+      # container running under the new tag. caddy is converged separately without
+      # --force-recreate so app deploys no longer bounce the shared :80/:443
+      # ingress (platform-team request — ADR-0014 Phase 0).
       - uses: appleboy/ssh-action@v1
         with:
           host: scheduler.paynepew.dev
@@ -101,7 +105,18 @@ jobs:
             export IMAGE_TAG=${{ github.sha }}
             docker compose pull
             docker compose run --rm migrate
-            docker compose up -d --force-recreate --remove-orphans
+
+            # Converge the full stack (postgres / elasticmq / caddy / vector) and
+            # clean orphans WITHOUT --force-recreate. caddy's image + config are
+            # unchanged, so this line does NOT rebuild it: the shared :80/:443
+            # ingress stays up across the deploy instead of dropping for 10-30s.
+            docker compose up -d --remove-orphans
+
+            # Force-recreate ONLY the app services. --no-deps stops compose from
+            # re-running migrate (already done above) or touching caddy, and keeps
+            # the issue #204 stale-container protection for the app containers.
+            docker compose up -d --force-recreate --no-deps \
+              mcp-server watcher worker recurring-watcher chain-watcher
 
             # Log the GIT_SHA each app container actually sees so any
             # env-var override (e.g. stale GIT_SHA in .env.docker) is
