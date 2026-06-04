@@ -99,8 +99,15 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - ./static:/var/www:ro
       - caddy_data:/data
-    depends_on:
-      - mcp-server
+    # No depends_on: mcp-server — intentionally. Caddy dials its static upstream
+    # (mcp-server:8000) per request and tolerates a down backend (502/503; the
+    # /mcp* block has active health checks), so it does not need mcp-server at
+    # startup. The edge only ever bought start-ordering, and it cost us this:
+    # docker compose propagates --recreate to dependents, so every app deploy
+    # that recreated mcp-server also bounced the shared caddy (:80/:443) — even
+    # after scoping --force-recreate to the app services (deploy-vps.yml).
+    # Dropping the edge keeps the shared ingress up across app deploys.
+    # See ADR-0014 Phase 0 / platform-team request.
 
   vector:
     image: timberio/vector:0.40.0-alpine
