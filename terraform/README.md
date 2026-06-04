@@ -13,8 +13,7 @@ terraform/
 ├── vpc/         # VPC, subnets, IGW, route tables, S3 Gateway endpoint
 ├── iam/         # ECS execution role, task role, AWS Budgets alerts
 ├── ecr/         # ECR repository + lifecycle policy
-├── cw_logs/     # CloudWatch Log Groups per ECS service
-└── cloudflare/  # Cloudflare DNS — A record scheduler.paynepew.dev → Lightsail IP
+└── cw_logs/     # CloudWatch Log Groups per ECS service
 ```
 
 ## Apply order
@@ -84,42 +83,13 @@ terraform init -backend-config=../backend.tfvars -backend-config="key=cw_logs/te
 terraform apply
 ```
 
-## Cloudflare DNS module
+## DNS
 
-The `cloudflare/` module is independent of AWS — it uses its own Cloudflare provider and
-keeps **local state** (no S3 backend needed; the record is trivially recreatable from the
-variables, and the state file is just a thin pointer to the Cloudflare record ID).
-
-Prerequisites: `paynepew.dev` registered via Cloudflare Registrar, plus a Cloudflare API
-token with `Zone.DNS:Edit` scope on `paynepew.dev` only.
-
-```bash
-cd terraform/cloudflare
-
-# Initialise with local state
-terraform init
-
-# Set the token via TF_VAR_ env var (sensitive, do NOT commit to terraform.tfvars)
-export TF_VAR_cloudflare_api_token="<token>"
-# PowerShell: $env:TF_VAR_cloudflare_api_token = "<token>"
-
-# Copy the example tfvars and edit vps_ip
-cp terraform.tfvars.example terraform.tfvars
-# edit: zone_name = "paynepew.dev", vps_ip = "<LIGHTSAIL_STATIC_IP>"
-
-# Review the plan — proxied=false (ADR-028) so Caddy can complete the ACME challenge
-terraform plan
-
-# Apply — creates scheduler.paynepew.dev A record
-terraform apply
-```
-
-Verify propagation (globally, within ~1-5 minutes):
-
-```bash
-dig +short scheduler.paynepew.dev @1.1.1.1
-dig +short scheduler.paynepew.dev @8.8.8.8
-```
+DNS for `paynepew.dev` (the `scheduler` A record and the `status` CNAME) is owned by
+the **platform layer** (`live_sessions/platform/dns`, Cloudflare Terraform), not this
+repo. The old `terraform/cloudflare/` module was retired once platform imported those
+records into its state (DNS ownership handoff, 2026-06-05). `proxied=false` is preserved
+(ADR-028 / ADR-031). To change a record, edit `platform/dns`.
 
 ## CI validation
 
