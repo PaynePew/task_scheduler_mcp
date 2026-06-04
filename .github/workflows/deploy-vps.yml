@@ -98,7 +98,11 @@ jobs:
             cp infra/vps/Caddyfile /opt/task_scheduler_mcp/
             cp infra/vps/vector.toml /opt/task_scheduler_mcp/
             cp elasticmq.conf /opt/task_scheduler_mcp/
-            rsync -a --delete infra/vps/static/ /opt/task_scheduler_mcp/static/
+            # Landing-page assets moved into the app image (app/web/static, served
+            # by mcp-server — Phase 2 Stage A). Still rsync'd here so the in-project
+            # Caddy's ./static mount keeps serving / until the edge cutover (Stage C
+            # removes the caddy service + this line).
+            rsync -a --delete app/web/static/ /opt/task_scheduler_mcp/static/
 
             # Deploy from the runtime dir (now holds the 5 entries above + .env.docker).
             cd /opt/task_scheduler_mcp

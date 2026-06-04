@@ -46,6 +46,7 @@ from app.obs.logging import bind_user_id, configure_logging, unbind_user_id
 from app.overload.health import CapacityExceeded, ConcurrencyLimiter, should_shed
 from app.ratelimit.checker import Allow, RateLimits, check_rate_limit
 from app.web.connections import make_routes as make_connections_routes
+from app.web.landing import make_landing_mount
 
 logger = logging.getLogger(__name__)
 
@@ -433,6 +434,10 @@ def build_app(
             _make_prm_endpoint(),
             _make_as_metadata_endpoint(),
             *connections_routes,
+            # Catch-all static landing page (Phase 2 Stage A / S-A1). MUST stay
+            # last: Mount("/") matches every path, so the explicit routes above
+            # win and this only serves / + static assets.
+            make_landing_mount(),
         ],
     )
 
