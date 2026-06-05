@@ -60,9 +60,10 @@ jobs:
           echo "Better Stack monitor $MONITOR_ID paused"
 
       # Sync runtime files from source clone, pull new image, run migrations,
-      # recreate the app stack. Rollback: IMAGE_TAG=<prev_sha> docker compose up -d
-      # --force-recreate --no-deps mcp-server watcher worker recurring-watcher
-      # chain-watcher on the VPS in /opt/task_scheduler_mcp.
+      # recreate the app stack. Rollback (persist the tag too, so a later reboot
+      # doesn't revert): echo "IMAGE_TAG=<prev_sha>" > /opt/task_scheduler_mcp/.env
+      # && docker compose up -d --force-recreate --no-deps mcp-server watcher
+      # worker recurring-watcher chain-watcher on the VPS in /opt/task_scheduler_mcp.
       # --force-recreate is scoped to the app services (NOT the shared caddy): it
       # prevents silent stale-container bugs (issue #204) where docker compose
       # up -d skips a service whose image-id comparison is stale, leaving the old
@@ -106,6 +107,18 @@ jobs:
 
             # Deploy from the runtime dir (now holds the 5 entries above + .env.docker).
             cd /opt/task_scheduler_mcp
+
+            # Persist the deployed SHA to the compose substitution env file (.env,
+            # which docker compose auto-reads for ${IMAGE_TAG}). Without this,
+            # IMAGE_TAG lived only in this CD shell, so any recreate OUTSIDE this
+            # deploy — a box reboot's systemd `up -d`, or a manual `up -d` such as a
+            # cutover rollback — fell back to ${IMAGE_TAG:-latest} → the box's stale
+            # local :latest, whose Alembic lacked the DB's current revision → migrate
+            # failed → full outage (incident 2026-06-05). Pinning the immutable SHA
+            # here makes every recreate deterministic. NOTE: .env (substitution), NOT
+            # .env.docker (container env) — compose reads them for different purposes.
+            echo "IMAGE_TAG=${{ github.sha }}" > .env
+
             export IMAGE_TAG=${{ github.sha }}
             docker compose pull
             docker compose run --rm migrate
