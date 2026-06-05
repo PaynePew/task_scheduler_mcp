@@ -5,12 +5,31 @@
 # chatgpt_task_pgdata / chatgpt_task_caddy_data volumes. See ADR-044 §4.1.
 name: chatgpt_task
 
+# ─── Resource bulkhead (ADR-0015) ────────────────────────────────────────────
+# Shared 2 GB / 2 vCPU box, multiple tenants. Docker is namespacing, not resource
+# partitioning, so without explicit limits one tenant can OOM-kill (RAM) or starve
+# (CPU) another. qrcode + edge already set limits; scheduler was the only tenant
+# with NEITHER wall — this adds both.
+#
+#  • mem_limit — HARD ceiling (OOM-kills the container, not its neighbours). Sized
+#    from the 2026-06-05 docker-stats profile (whole stack ~427 MiB resident idle)
+#    with growth headroom; sums to ~1.0 GiB, inside scheduler's RAM budget
+#    (VPS-DEPLOY-CONTEXT §6). These values are scheduler-local and final.
+#  • cpus  — SOFT ceiling (compressible: throttles, never OOM-kills). Goal is "no
+#    single container monopolises the 2 vCPU", not a reservation, so the per-service
+#    sum may exceed 2.0. ⚠ PROVISIONAL — pending ADR-0015 joint scheduler+qrcode
+#    sizing after qrcode's load test. Tune in one place when platform sends numbers.
+# ─────────────────────────────────────────────────────────────────────────────
+
 services:
   mcp-server:
     image: ghcr.io/paynepew/task_scheduler_mcp:${IMAGE_TAG:-latest}
     command: ["python", "-m", "app.entrypoints.mcp_http"]
     env_file: .env.docker
     restart: unless-stopped
+    # Request load + landing page → top growth/burst candidate in the stack.
+    mem_limit: 192m
+    cpus: 1.0  # PROVISIONAL (ADR-0015 joint sizing)
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -34,6 +53,9 @@ services:
     command: ["python", "-m", "app.entrypoints.watcher"]
     env_file: .env.docker
     restart: unless-stopped
+    # Cheap due-task poller (profiled ≤0.30% CPU).
+    mem_limit: 96m
+    cpus: 0.25  # PROVISIONAL (ADR-0015 joint sizing)
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -43,6 +65,9 @@ services:
     command: ["python", "-m", "app.entrypoints.worker"]
     env_file: .env.docker
     restart: unless-stopped
+    # Job executor — the real CPU peak (idle during the profile window) + leak risk.
+    mem_limit: 192m
+    cpus: 1.0  # PROVISIONAL (ADR-0015 joint sizing) — true peak unmeasured, keep generous
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -52,6 +77,9 @@ services:
     command: ["python", "-m", "app.entrypoints.recurring_watcher"]
     env_file: .env.docker
     restart: unless-stopped
+    # Cheap recurring enqueuer (profiled ≤0.31% CPU).
+    mem_limit: 96m
+    cpus: 0.25  # PROVISIONAL (ADR-0015 joint sizing)
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -61,6 +89,9 @@ services:
     command: ["python", "-m", "app.entrypoints.chain_watcher"]
     env_file: .env.docker
     restart: unless-stopped
+    # Cheap from_run_id chain enqueuer (profiled ≤0.33% CPU).
+    mem_limit: 96m
+    cpus: 0.25  # PROVISIONAL (ADR-0015 joint sizing)
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -69,6 +100,10 @@ services:
     image: ghcr.io/paynepew/task_scheduler_mcp:${IMAGE_TAG:-latest}
     command: ["python", "-m", "app.entrypoints.migrate"]
     env_file: .env.docker
+    # One-shot at deploy (restart: "no"). Generous ceilings so alembic isn't
+    # throttled — it doesn't contend in steady state.
+    mem_limit: 192m
+    cpus: 1.5  # PROVISIONAL (ADR-0015 joint sizing)
     depends_on:
       postgres:
         condition: service_healthy
@@ -78,6 +113,13 @@ services:
     image: postgres:16
     env_file: .env.docker
     restart: unless-stopped
+    # Periodic checkpoint blip to ~8.6% CPU; give cache/CPU headroom.
+    # mem_limit 384m (not ~idle): postgres:16 defaults shared_buffers=128MB
+    # (lazy-mapped, so docker-stats RSS reads low ~35 MiB until buffers warm),
+    # plus per-backend + work_mem. A tight 192m would OOM-kill the live DB under
+    # load — this is a HARD ceiling, so size above the real working set, not idle.
+    mem_limit: 384m
+    cpus: 0.75  # PROVISIONAL (ADR-0015 joint sizing)
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -89,6 +131,9 @@ services:
   elasticmq:
     image: softwaremill/elasticmq-native:latest
     restart: unless-stopped
+    # GraalVM-native SQS emulation; low heap (profiled ~24 MiB / ~0.5% CPU).
+    mem_limit: 96m
+    cpus: 0.25  # PROVISIONAL (ADR-0015 joint sizing)
     volumes:
       - ./elasticmq.conf:/opt/elasticmq.conf:ro
     healthcheck:
@@ -108,6 +153,9 @@ services:
     image: timberio/vector:0.40.0-alpine
     restart: unless-stopped
     env_file: .env.docker
+    # Log shipper, negligible footprint (profiled ~12 MiB / ≤0.11% CPU).
+    mem_limit: 64m
+    cpus: 0.25  # PROVISIONAL (ADR-0015 joint sizing)
     # Explicit --config flag: timberio/vector image ships with a default
     # /etc/vector/*.yaml that auto-loads demo_logs + console sink. Without
     # this, both configs merge and you get fake demo data flooding stdout.
