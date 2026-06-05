@@ -114,7 +114,11 @@ services:
     env_file: .env.docker
     restart: unless-stopped
     # Periodic checkpoint blip to ~8.6% CPU; give cache/CPU headroom.
-    mem_limit: 192m
+    # mem_limit 384m (not ~idle): postgres:16 defaults shared_buffers=128MB
+    # (lazy-mapped, so docker-stats RSS reads low ~35 MiB until buffers warm),
+    # plus per-backend + work_mem. A tight 192m would OOM-kill the live DB under
+    # load — this is a HARD ceiling, so size above the real working set, not idle.
+    mem_limit: 384m
     cpus: 0.75  # PROVISIONAL (ADR-0015 joint sizing)
     volumes:
       - pgdata:/var/lib/postgresql/data
