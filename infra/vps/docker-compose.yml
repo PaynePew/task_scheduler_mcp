@@ -97,25 +97,12 @@ services:
       timeout: 5s
       retries: 10
 
-  caddy:
-    image: caddy:2-alpine
-    restart: unless-stopped
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - ./static:/var/www:ro
-      - caddy_data:/data
-    # No depends_on: mcp-server — intentionally. Caddy dials its static upstream
-    # (mcp-server:8000) per request and tolerates a down backend (502/503; the
-    # /mcp* block has active health checks), so it does not need mcp-server at
-    # startup. The edge only ever bought start-ordering, and it cost us this:
-    # docker compose propagates --recreate to dependents, so every app deploy
-    # that recreated mcp-server also bounced the shared caddy (:80/:443) — even
-    # after scoping --force-recreate to the app services (deploy-vps.yml).
-    # Dropping the edge keeps the shared ingress up across app deploys.
-    # See ADR-0014 Phase 0 / platform-team request.
+  # Phase 2 Stage C (ADR-0014): the in-project `caddy` service was REMOVED here.
+  # The platform-owned neutral `edge` Caddy now owns :80/:443 and reverse_proxies
+  # mcp-server by name over the external `edge` network (joined above). mcp-server
+  # serves the landing page at `/` itself (Stage A), so nothing in this project
+  # terminates TLS or serves static assets anymore. The cutover reused the existing
+  # cert store, so there was zero Let's Encrypt re-issue.
 
   vector:
     image: timberio/vector:0.40.0-alpine
@@ -140,5 +127,9 @@ networks:
 
 volumes:
   pgdata:
-  caddy_data:
   vector_data:
+  # NOTE: `caddy_data` is intentionally NOT declared here after Stage C. The
+  # underlying docker volume `chatgpt_task_caddy_data` still exists on the box and
+  # is now mounted by the platform `edge` Caddy as its cert store. ⚠ NEVER run
+  # `docker compose down -v` / `docker volume rm chatgpt_task_caddy_data` on this
+  # project — it would wipe edge's live Let's Encrypt certificates.
