@@ -63,8 +63,9 @@ install_docker() {
 }
 
 # ── 3. Caddy ──────────────────────────────────────────────────────────────────
-# Caddy is fully containerised (see compose stack + ADR-028/ADR-029); no host
-# installation is performed.
+# Ingress (Caddy) is no longer part of this project. The platform-owned neutral
+# `edge` Caddy terminates TLS and owns :80/:443 (ADR-0014 Phase 2; ADR-028/029).
+# No host installation is performed here.
 
 # ── 4. Docker daemon hardening ────────────────────────────────────────────────
 configure_docker_daemon() {
@@ -127,15 +128,12 @@ setup_repo() {
 
     # Copy infra/vps files into deploy dir root (idempotent).
     # elasticmq.conf already lives at repo root after clone, so no copy needed.
+    # Phase 2 Stage C: no Caddyfile copy / static rsync — the in-project Caddy is
+    # gone; the platform edge Caddy owns ingress and mcp-server serves the landing
+    # page from the app image.
     cp "$DEPLOY_DIR/$INFRA_SRC/docker-compose.yml" "$DEPLOY_DIR/docker-compose.yml"
-    cp "$DEPLOY_DIR/$INFRA_SRC/Caddyfile" "$DEPLOY_DIR/Caddyfile"
-    # Sync static landing-page assets so Caddy's ./static:/var/www mount resolves.
-    # Source moved to app/web/static (now served by mcp-server too — Phase 2 Stage A).
-    rsync -a --delete "$DEPLOY_DIR/app/web/static/" "$DEPLOY_DIR/static/"
-    chown -R "$DEPLOY_USER:$DEPLOY_USER" "$DEPLOY_DIR/static"
     chown "$DEPLOY_USER:$DEPLOY_USER" \
         "$DEPLOY_DIR/docker-compose.yml" \
-        "$DEPLOY_DIR/Caddyfile" \
         "$DEPLOY_DIR/$ELASTICMQ_CONF"
 }
 

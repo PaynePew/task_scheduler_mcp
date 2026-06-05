@@ -64,12 +64,13 @@ jobs:
       # doesn't revert): echo "IMAGE_TAG=<prev_sha>" > /opt/task_scheduler_mcp/.env
       # && docker compose up -d --force-recreate --no-deps mcp-server watcher
       # worker recurring-watcher chain-watcher on the VPS in /opt/task_scheduler_mcp.
-      # --force-recreate is scoped to the app services (NOT the shared caddy): it
-      # prevents silent stale-container bugs (issue #204) where docker compose
-      # up -d skips a service whose image-id comparison is stale, leaving the old
-      # container running under the new tag. caddy is converged separately without
-      # --force-recreate so app deploys no longer bounce the shared :80/:443
-      # ingress (platform-team request — ADR-0014 Phase 0).
+      # --force-recreate is scoped to the app services: it prevents silent
+      # stale-container bugs (issue #204) where docker compose up -d skips a
+      # service whose image-id comparison is stale, leaving the old container
+      # running under the new tag. Supporting services (postgres / elasticmq /
+      # vector) are converged separately without --force-recreate. Ingress is no
+      # longer in this project — the platform edge Caddy owns :80/:443 (ADR-0014
+      # Phase 2 Stage C).
       - uses: appleboy/ssh-action@v1
         with:
           host: scheduler.paynepew.dev
@@ -92,20 +93,16 @@ jobs:
             git fetch origin
             git reset --hard origin/main
 
-            # Sync the 4 config files + static/ from the source clone into
-            # the runtime dir. CI is the only writer; manual edits are
-            # intentionally overwritten.
+            # Sync the runtime config files from the source clone into the runtime
+            # dir. CI is the only writer; manual edits are intentionally overwritten.
+            # Phase 2 Stage C dropped `cp Caddyfile` + the static rsync: the
+            # in-project Caddy is gone, the platform edge Caddy owns ingress, and
+            # mcp-server serves the landing page from the app image (app/web/static).
             cp infra/vps/docker-compose.yml /opt/task_scheduler_mcp/
-            cp infra/vps/Caddyfile /opt/task_scheduler_mcp/
             cp infra/vps/vector.toml /opt/task_scheduler_mcp/
             cp elasticmq.conf /opt/task_scheduler_mcp/
-            # Landing-page assets moved into the app image (app/web/static, served
-            # by mcp-server — Phase 2 Stage A). Still rsync'd here so the in-project
-            # Caddy's ./static mount keeps serving / until the edge cutover (Stage C
-            # removes the caddy service + this line).
-            rsync -a --delete app/web/static/ /opt/task_scheduler_mcp/static/
 
-            # Deploy from the runtime dir (now holds the 5 entries above + .env.docker).
+            # Deploy from the runtime dir (now holds the 3 entries above + .env.docker).
             cd /opt/task_scheduler_mcp
 
             # Persist the deployed SHA to the compose substitution env file (.env,
@@ -123,15 +120,15 @@ jobs:
             docker compose pull
             docker compose run --rm migrate
 
-            # Converge the full stack (postgres / elasticmq / caddy / vector) and
-            # clean orphans WITHOUT --force-recreate. caddy's image + config are
-            # unchanged, so this line does NOT rebuild it: the shared :80/:443
-            # ingress stays up across the deploy instead of dropping for 10-30s.
+            # Converge the supporting services (postgres / elasticmq / vector)
+            # WITHOUT --force-recreate. --remove-orphans also reaps any container
+            # no longer in the compose file — e.g. the in-project caddy removed in
+            # Stage C (its image/config are unchanged so nothing else is rebuilt).
             docker compose up -d --remove-orphans
 
             # Force-recreate ONLY the app services. --no-deps stops compose from
-            # re-running migrate (already done above) or touching caddy, and keeps
-            # the issue #204 stale-container protection for the app containers.
+            # re-running migrate (already done above) and keeps the issue #204
+            # stale-container protection for the app containers.
             docker compose up -d --force-recreate --no-deps \
               mcp-server watcher worker recurring-watcher chain-watcher
 
