@@ -17,6 +17,7 @@ import pytest
 from app.db.models import Job, JobRun
 from app.domain.run_materializer import (
     ConcurrencyError,
+    has_live_run,
     materialize_initial,
     materialize_successor,
 )
@@ -285,3 +286,49 @@ async def test_spawn_derives_time_bucket():
     spawned = job_runs[0]
     expected_bucket = "2026-03-15T14:00:00+00:00"
     assert spawned.time_bucket == expected_bucket
+
+
+# ---------------------------------------------------------------------------
+# has_live_run — public predicate (shared by ChainWatcher + _spawn_run)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_has_live_run_returns_true_when_live_run_exists():
+    """has_live_run returns True when a non-terminal run exists for the job."""
+    session = _make_session(no_live_run=False)  # live run exists
+    result = await has_live_run(session, job_id=1)
+    assert result is True
+
+
+@pytest.mark.asyncio
+async def test_has_live_run_returns_false_when_no_live_run():
+    """has_live_run returns False when no non-terminal run exists."""
+    session = _make_session(no_live_run=True)  # no live run
+    result = await has_live_run(session, job_id=1)
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_has_live_run_with_exclude_run_id_filters_that_run():
+    """has_live_run(exclude_run_id=X) does not count run X in the live-run check.
+
+    This is the predicate ChainWatcher uses: the WAITING run itself is non-terminal,
+    but we want to know if there is *another* live run besides it.
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    # Build a session where the scalar result depends on whether exclude is used.
+    # We simulate the DB returning False (no OTHER live run) when exclude is set.
+    session = AsyncMock()
+    scalar_result = MagicMock()
+    # When exclude_run_id filters the WAITING run, the query finds no other live run.
+    scalar_result.scalar.return_value = False
+
+    async def _execute(stmt, *args, **kwargs):
+        return scalar_result
+
+    session.execute = _execute
+
+    result = await has_live_run(session, job_id=1, exclude_run_id=42)
+    assert result is False
