@@ -527,7 +527,10 @@ async def test_non_chained_job_no_from_run_id_injection(session_factory, sqs):
 #   c. sink*.wait_for_run_id == mid_run.run_id (current tick's mid, not stale).
 #   d. After execution, sink1 and sink2 both report received_from_run_id == mid_run.run_id.
 #
-# Self-healing (trigger_on_status=ANY): exercised because mid and sinks all use "ANY".
+# Self-healing wiring (trigger_on_status=ANY): mid and sinks all use "ANY", so a FAILED
+# upstream would still drive the downstream branch. This test only drives the SUCCEEDED
+# path each tick; the FAILED-upstream→ANY→PENDING flip itself is proven in
+# test_chain_watcher.py::test_all_9_combinations (the ("FAILED", "ANY", "PENDING") case).
 
 
 async def _get_runs_by_status_and_job(
@@ -592,7 +595,9 @@ async def test_fan_out_digest_shape_refires_per_tick(session_factory, sqs):
     - Every tick produces runs at all four levels (root, mid, sink1, sink2).
     - Fan-out: one mid run arms WAITING runs for BOTH sink1 and sink2.
     - Each run reads its own tick's direct-upstream result (not a stale one).
-    - Self-healing: trigger_on_status=ANY on mid and sinks survives failure modes.
+    - Self-healing wiring: mid and sinks use trigger_on_status=ANY (so a FAILED upstream
+      would still drive the branch). This test drives only the SUCCEEDED path per tick;
+      the FAILED→ANY flip is covered by test_chain_watcher.py::test_all_9_combinations.
     - No schema/API change (uses only existing Job fields).
     """
     now = datetime.now(tz=UTC)
