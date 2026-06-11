@@ -309,26 +309,53 @@ async def test_has_live_run_returns_false_when_no_live_run():
     assert result is False
 
 
-@pytest.mark.asyncio
-async def test_has_live_run_with_exclude_run_id_filters_that_run():
-    """has_live_run(exclude_run_id=X) does not count run X in the live-run check.
+def _make_capturing_session(scalar_value: bool):
+    """Mock session that records the statement passed to execute().
 
-    This is the predicate ChainWatcher uses: the WAITING run itself is non-terminal,
-    but we want to know if there is *another* live run besides it.
+    Lets a test assert on the *compiled SQL* of the live-run query (i.e. that
+    the exclude_run_id clause is actually built) rather than only trusting a
+    canned scalar result — the statement itself is the seam under test.
     """
-    from unittest.mock import AsyncMock, MagicMock
-
-    # Build a session where the scalar result depends on whether exclude is used.
-    # We simulate the DB returning False (no OTHER live run) when exclude is set.
     session = AsyncMock()
+    captured: list = []
     scalar_result = MagicMock()
-    # When exclude_run_id filters the WAITING run, the query finds no other live run.
-    scalar_result.scalar.return_value = False
+    scalar_result.scalar.return_value = scalar_value
 
     async def _execute(stmt, *args, **kwargs):
+        captured.append(stmt)
         return scalar_result
 
     session.execute = _execute
+    return session, captured
+
+
+@pytest.mark.asyncio
+async def test_has_live_run_with_exclude_run_id_adds_run_id_filter():
+    """has_live_run(exclude_run_id=X) builds a `run_id != X` clause in the query.
+
+    This is the predicate ChainWatcher uses: the WAITING run itself is non-terminal,
+    but we want to know if there is *another* live run besides it. Asserting on the
+    compiled SQL guards the exclusion — a test that only checks the (mocked) return
+    value would still pass if exclude_run_id were silently dropped.
+    """
+    session, captured = _make_capturing_session(scalar_value=False)
 
     result = await has_live_run(session, job_id=1, exclude_run_id=42)
+
     assert result is False
+    assert len(captured) == 1
+    sql = str(captured[0].compile(compile_kwargs={"literal_binds": True}))
+    assert "job_runs.run_id != 42" in sql
+
+
+@pytest.mark.asyncio
+async def test_has_live_run_without_exclude_omits_run_id_filter():
+    """has_live_run() with no exclude_run_id builds no run_id inequality clause."""
+    session, captured = _make_capturing_session(scalar_value=True)
+
+    result = await has_live_run(session, job_id=1)
+
+    assert result is True
+    assert len(captured) == 1
+    sql = str(captured[0].compile(compile_kwargs={"literal_binds": True}))
+    assert "run_id !=" not in sql
