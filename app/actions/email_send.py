@@ -1,24 +1,13 @@
-"""email_send action handler — dual-mode email delivery (ADR-050, ADR-051).
+"""email_send action handler — sends email via the caller's connected Gmail.
 
-Credential modes:
-  - Public users (oauth_connection): sends via Gmail API using the caller's
-    Google OAuth token via get_token(user_id, "google") (provider="google").
-  - Operator (operator env): sends via SMTP using SMTP_HOST/PORT/USER/PASSWORD
-    and EMAIL_FROM env vars (ADR-032). No Google connection required.
-
-At run time the handler inspects ``run.user_id`` against
-``settings.operator_user_id`` to select the path:
-  - operator or operator_user_id unset → SMTP path
-  - everyone else → Gmail API path
+Credential model (ADR-050, amended): email_send is OAuth/Gmail-only. It sends
+via the Gmail API using the caller's Google OAuth token, fetched with
+get_token(user_id, "google") (provider="google"). A user with no Google
+connection gets MISSING_CONNECTION (connect at /connections); there is no SMTP
+fallback.
 
 Chain-fed mode (ADR-033): set from_run_id to consume a prior handler's
 JobRun.result as the email body. Supports templates (raw, digest_v1).
-
-SMTP error classification:
-    SMTP 5.x.x (permanent failure)  → retryable=False → DLQ
-    SMTP 4.x.x (temporary failure)  → retryable=True
-    Auth failure (535 / 5.7.0)      → retryable=False → DLQ + operator action
-    TLS / connection / timeout      → retryable=True
 
 Gmail API error classification:
     401 Unauthorized                → retryable=False (reconnect at /connections)
@@ -38,7 +27,6 @@ from email.message import EmailMessage
 from enum import StrEnum
 from typing import Any, ClassVar
 
-import aiosmtplib
 import httpx
 from pydantic import BaseModel, EmailStr
 
@@ -100,26 +88,24 @@ _TEMPLATE_FORMATTERS: dict[EmailTemplate, Callable[..., str]] = {
 
 
 class EmailSendHandler:
-    """Sends email via Gmail API (public users) or SMTP (operator).
+    """Sends email via the Gmail API using the caller's Google OAuth connection.
 
-    Public users need a Google OAuth connection (provider="google") stored in
-    the connection store. The operator uses SMTP env vars (ADR-032).
+    The user must have a Google connection (provider="google") stored in the
+    connection store (connect at /connections); otherwise the send returns
+    MISSING_CONNECTION. There is no SMTP fallback (ADR-050, amended).
 
     Patch app.actions.email_send.get_token in tests to override OAuth lookup.
     """
 
     name: ClassVar[str] = "email_send"
     description: ClassVar[str] = (
-        "Sends a transactional email. "
-        "Public users: sends via Gmail using your connected Google account "
-        "(connect at /connections). "
-        "Operator: sends via SMTP using SMTP_HOST, SMTP_PORT, SMTP_USER, "
-        "SMTP_PASSWORD, EMAIL_FROM env vars. "
+        "Sends a transactional email via Gmail using your connected Google "
+        "account (connect at /connections). "
         "Use from_run_id to chain from a prior handler's output. "
         "Templates: raw (default), digest_v1."
     )
     summary_line: ClassVar[str] = (
-        "Sends an email via the user's Gmail (or operator SMTP); supports digest_v1 chaining."
+        "Sends an email via the user's connected Gmail; supports digest_v1 chaining."
     )
     params_model: ClassVar[type[BaseModel]] = EmailSendParams
     timeout_seconds: ClassVar[int] = 30
@@ -144,129 +130,9 @@ class EmailSendHandler:
         if isinstance(body_text, ActionResult):
             return body_text
 
-        # Route to SMTP (operator / no operator configured) or Gmail (public user).
-        user_id: str = run.user_id
-        operator_uid = settings.operator_user_id
-        if not operator_uid or user_id == operator_uid:
-            return await self._send_via_smtp(params, resolved_subject, body_text)
-        return await self._send_via_gmail(user_id, params, resolved_subject, body_text)
-
-    async def _send_via_smtp(
-        self,
-        params: EmailSendParams,
-        subject: str,
-        body_text: str,
-    ) -> ActionResult:
-        smtp_host = os.environ.get("SMTP_HOST")
-        smtp_port_raw = os.environ.get("SMTP_PORT", "587")
-        smtp_user = os.environ.get("SMTP_USER") or None
-        smtp_password = os.environ.get("SMTP_PASSWORD") or None
-        email_from = os.environ.get("EMAIL_FROM")
-        use_starttls = os.environ.get("SMTP_USE_STARTTLS", "true").lower() not in ("false", "0")
-
-        if not smtp_host:
-            return ActionResult(
-                ok=False,
-                result=None,
-                error="SMTP_HOST environment variable is not set",
-                retryable=False,
-            )
-        if not email_from:
-            return ActionResult(
-                ok=False,
-                result=None,
-                error="EMAIL_FROM environment variable is not set",
-                retryable=False,
-            )
-        try:
-            smtp_port = int(smtp_port_raw)
-        except ValueError:
-            return ActionResult(
-                ok=False,
-                result=None,
-                error=f"SMTP_PORT must be an integer, got: {smtp_port_raw!r}",
-                retryable=False,
-            )
-
-        msg = EmailMessage()
-        msg["From"] = email_from
-        msg["To"] = ", ".join(str(addr) for addr in params.to)
-        msg["Subject"] = subject
-        msg.set_content(body_text)
-
-        try:
-            await aiosmtplib.send(
-                msg,
-                hostname=smtp_host,
-                port=smtp_port,
-                username=smtp_user,
-                password=smtp_password,
-                start_tls=use_starttls,
-                timeout=float(self.timeout_seconds),
-            )
-        except aiosmtplib.SMTPAuthenticationError as exc:
-            return ActionResult(
-                ok=False,
-                result=None,
-                error=f"SMTP auth failure (code {exc.code}): {exc.message}",
-                retryable=False,
-            )
-        except aiosmtplib.SMTPRecipientsRefused as exc:
-            codes = [r.code for r in exc.recipients]
-            retryable = bool(codes) and all(400 <= c < 500 for c in codes)
-            return ActionResult(
-                ok=False,
-                result=None,
-                error=f"All recipients refused: {[r.recipient for r in exc.recipients]}",
-                retryable=retryable,
-            )
-        except aiosmtplib.SMTPSenderRefused as exc:
-            retryable = 400 <= exc.code < 500
-            return ActionResult(
-                ok=False,
-                result=None,
-                error=f"Sender refused (code {exc.code}): {exc.message}",
-                retryable=retryable,
-            )
-        except aiosmtplib.SMTPDataError as exc:
-            retryable = 400 <= exc.code < 500
-            return ActionResult(
-                ok=False,
-                result=None,
-                error=f"SMTP data error (code {exc.code}): {exc.message}",
-                retryable=retryable,
-            )
-        except (
-            aiosmtplib.SMTPConnectError,
-            aiosmtplib.SMTPServerDisconnected,
-            aiosmtplib.SMTPTimeoutError,
-        ) as exc:
-            return ActionResult(
-                ok=False,
-                result=None,
-                error=f"SMTP connection/timeout error: {exc}",
-                retryable=True,
-            )
-        except aiosmtplib.SMTPException as exc:
-            code = getattr(exc, "code", None)
-            retryable = True if code is None else (400 <= code < 500)
-            return ActionResult(
-                ok=False,
-                result=None,
-                error=f"SMTP error: {exc}",
-                retryable=retryable,
-            )
-
-        return ActionResult(
-            ok=True,
-            result={
-                "recipients": [str(addr) for addr in params.to],
-                "subject": subject,
-                "provider": "smtp",
-            },
-            error=None,
-            retryable=False,
-        )
+        # Send via the caller's connected Gmail. Returns MISSING_CONNECTION when
+        # the user has no Google connection — there is no SMTP fallback.
+        return await self._send_via_gmail(run.user_id, params, resolved_subject, body_text)
 
     async def _send_via_gmail(
         self,

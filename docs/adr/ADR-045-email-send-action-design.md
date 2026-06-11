@@ -1,9 +1,20 @@
 # ADR-045: `email_send` Action — SMTP vs API-Service Design
 
-- **Status**: Accepted
+- **Status**: Superseded in part (2026-06-11) — `email_send` is now OAuth/Gmail-only; the SMTP path below has been removed. See Amendment.
 - **Date**: 2026-05-19
 - **Deciders**: PaynePew
-- **Related**: ADR-032 (secrets convention), ADR-033 (inter-handler data flow), #103
+- **Related**: ADR-032 (secrets convention), ADR-033 (inter-handler data flow), ADR-050 (dual-credential model), #103
+
+## Amendment (2026-06-11): SMTP removed — Gmail-only
+
+This deployment only ever sends via the user's connected Google account, and a
+per-user SMTP-configuration surface was never built (there is no web flow for a
+user to enter SMTP credentials). The SMTP path (`_send_via_smtp`, `aiosmtplib`,
+`SMTP_*` / `EMAIL_FROM` env vars) has been **removed**. `email_send` now sends
+exclusively via the Gmail API using the caller's Google OAuth connection
+(`provider="google"`, scope `gmail.send`); a user with no Google connection
+receives `MISSING_CONNECTION` (connect at `/connections`). The original SMTP
+decision below is retained for historical context.
 
 ## Context
 

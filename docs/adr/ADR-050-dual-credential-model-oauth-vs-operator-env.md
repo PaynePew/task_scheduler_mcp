@@ -6,6 +6,16 @@
 - **Source**: Grilling Session #6 (grill-with-docs, 2026-05-20)
 - **Related**: ADR-032 (secrets `${VAR}` convention — scoped down here), ADR-049 (multi-tenant pivot), ADR-051 (action tiering), ADR-046 (r2_upload), ADR-045 (email_send)
 
+## Amendment (2026-06-11): `email_send` is Gmail-only
+
+The dual-credential model stands, but its **operator-env (SMTP) half no longer
+applies to `email_send`**. The operator-SMTP delivery path has been removed (see
+the ADR-045 amendment): `email_send` now routes solely through the caller's
+Google OAuth connection, with no operator/SMTP fallback — a user without a Google
+connection gets `MISSING_CONNECTION`. The operator-`${VAR}`-env credential mode
+remains in force for the operator-only actions (`http_call`,
+`calendar_digest_ics`).
+
 ## Context
 
 ADR-032 made every secret-using action read its credential from the **server

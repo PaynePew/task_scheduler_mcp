@@ -18,7 +18,6 @@ dependencies = [
     "httpx",
     "croniter>=6.2.2",
     "icalendar>=6.0",
-    "aiosmtplib>=3.0",
     "email-validator>=2.0",
     "psutil>=7.2.2",
     "pyjwt[crypto]>=2.12.1",

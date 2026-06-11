@@ -1,10 +1,9 @@
-"""Unit tests for email_send dual-mode handler (issue #140).
+"""Unit tests for the email_send Gmail send path (issue #140; ADR-050 amended).
 
 Exercises:
-  - Operator path: routes to SMTP (no Google connection needed)
-  - Public path: routes to Gmail API using Google OAuth token
-  - Public path without Google connection → non-retryable error
-  - Gmail API error classifications (401, 403, 429, 5xx)
+  - Routes to the Gmail API using the caller's Google OAuth token
+  - No Google connection → MISSING_CONNECTION (non-retryable)
+  - Gmail API error classifications (401, 403, 429, 5xx, network)
   - Registry: email_send is public, oauth_connection, provider=google
 """
 
@@ -58,61 +57,7 @@ def test_email_send_is_public_oauth():
 
 
 # ---------------------------------------------------------------------------
-# Operator path → SMTP
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_operator_routes_to_smtp():
-    """When operator_user_id is set and run.user_id matches, SMTP path is used."""
-    handler = EmailSendHandler()
-    params = EmailSendParams(to=["dest@example.com"], subject="Hello", body="World")
-    run = FakeRun(user_id="operator-uid")
-
-    with (
-        patch("app.actions.email_send.settings") as mock_settings,
-        patch("app.actions.email_send.aiosmtplib") as mock_smtp,
-    ):
-        mock_settings.operator_user_id = "operator-uid"
-        mock_settings.connections_base_url = "http://localhost:8000"
-        mock_smtp.send = AsyncMock()
-
-        with patch.dict(
-            "os.environ",
-            {
-                "SMTP_HOST": "smtp.example.com",
-                "SMTP_PORT": "587",
-                "EMAIL_FROM": "from@example.com",
-            },
-        ):
-            result = await handler.execute(run=run, params=params)
-
-    assert result.ok is True
-    assert result.result is not None
-    assert result.result.get("provider") == "smtp"
-    mock_smtp.send.assert_called_once()
-
-
-@pytest.mark.asyncio
-async def test_operator_smtp_missing_host_returns_error():
-    handler = EmailSendHandler()
-    params = EmailSendParams(to=["dest@example.com"], subject="Hello", body="World")
-    run = FakeRun(user_id="operator-uid")
-
-    with (
-        patch("app.actions.email_send.settings") as mock_settings,
-        patch.dict("os.environ", {}, clear=True),
-    ):
-        mock_settings.operator_user_id = "operator-uid"
-        result = await handler.execute(run=run, params=params)
-
-    assert result.ok is False
-    assert result.retryable is False
-    assert "SMTP_HOST" in (result.error or "")
-
-
-# ---------------------------------------------------------------------------
-# Public path → Gmail
+# Gmail send path
 # ---------------------------------------------------------------------------
 
 
@@ -320,34 +265,29 @@ async def test_gmail_network_error_is_retryable():
 
 
 # ---------------------------------------------------------------------------
-# operator_user_id not set → SMTP path (backward compat for dev/no-operator mode)
+# Routing — Gmail-only (no operator/SMTP branch)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_no_operator_user_id_set_routes_to_smtp():
-    """When operator_user_id is None (dev mode), SMTP path is used regardless of user."""
+async def test_routes_to_gmail_regardless_of_operator_status():
+    """email_send is Gmail-only: even the operator routes to Gmail (ADR-050 amended)."""
     handler = EmailSendHandler()
-    params = EmailSendParams(to=["dest@example.com"], subject="Hello", body="World")
-    run = FakeRun(user_id="some-public-user")
+    params = EmailSendParams(to=["dest@example.com"], subject="Hi", body="Body")
+    run = FakeRun(user_id="operator-uid")  # the operator themselves
 
+    success_resp = httpx.Response(200, json={"id": "msg-1"})
     with (
         patch("app.actions.email_send.settings") as mock_settings,
-        patch("app.actions.email_send.aiosmtplib") as mock_smtp,
+        patch("app.actions.email_send.get_token", AsyncMock(return_value="ya29.tok")),
+        patch(
+            "app.actions.email_send.httpx.AsyncClient",
+            return_value=_build_mock_http_client(success_resp),
+        ),
     ):
-        mock_settings.operator_user_id = None  # not set
-        mock_smtp.send = AsyncMock()
-
-        with patch.dict(
-            "os.environ",
-            {
-                "SMTP_HOST": "smtp.example.com",
-                "SMTP_PORT": "587",
-                "EMAIL_FROM": "from@example.com",
-            },
-        ):
-            result = await handler.execute(run=run, params=params)
+        mock_settings.operator_user_id = "operator-uid"  # this user IS the operator
+        mock_settings.connections_base_url = "http://localhost:8000"
+        result = await handler.execute(run=run, params=params)
 
     assert result.ok is True
-    assert result.result is not None
-    assert result.result.get("provider") == "smtp"
+    assert result.result.get("provider") == "gmail"

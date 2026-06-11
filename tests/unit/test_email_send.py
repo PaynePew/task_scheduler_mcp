@@ -1,27 +1,18 @@
-"""Unit tests for the email_send action handler (no real network or DB)."""
+"""Unit tests for the email_send action handler (Gmail-only, no SMTP).
+
+The Gmail send path itself is covered in test_email_send_gmail.py; this file
+covers body building (direct input + from_run_id chaining) and registry wiring.
+"""
 
 from __future__ import annotations
 
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import aiosmtplib
 import pytest
 
 from app.actions.email_send import EmailSendHandler, EmailSendParams, EmailTemplate
 from app.actions.registry import ACTION_REGISTRY
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-_SMTP_ENV = {
-    "SMTP_HOST": "smtp.example.com",
-    "SMTP_PORT": "587",
-    "SMTP_USER": "user@example.com",
-    "SMTP_PASSWORD": "secret",
-    "EMAIL_FROM": "noreply@example.com",
-}
 
 
 def _make_mock_session_factory():
@@ -37,317 +28,92 @@ def _make_mock_session_factory():
     return MagicMock(return_value=mock_factory_ctx)
 
 
-def _patch_smtp_send(side_effect=None):
-    """Patch aiosmtplib.send to succeed (or raise side_effect)."""
-    if side_effect is not None:
-        return patch("app.actions.email_send.aiosmtplib.send", AsyncMock(side_effect=side_effect))
-    return patch(
-        "app.actions.email_send.aiosmtplib.send",
-        AsyncMock(return_value=({}, "250 OK")),
-    )
-
-
-def _make_run(user_id: str = "operator-id") -> Any:
-    """Minimal run stub with a user_id attribute."""
+def _make_run(user_id: str = "user-abc") -> Any:
     run = MagicMock()
     run.user_id = user_id
     return run
 
 
 # ---------------------------------------------------------------------------
-# Happy path — single and multi-recipient
+# Body building — direct input
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_email_send_single_recipient_ok():
-    handler = EmailSendHandler()
-    params = EmailSendParams(to=["alice@example.com"], subject="Hello", body="World")
-
-    with patch.dict("os.environ", _SMTP_ENV):
-        with _patch_smtp_send():
-            result = await handler.execute(run=_make_run(), params=params)
-
-    assert result.ok is True
-    assert result.error is None
-    assert result.retryable is False
-    assert result.result is not None
-    assert "alice@example.com" in result.result["recipients"]
-
-
-@pytest.mark.asyncio
-async def test_email_send_multi_recipient_ok():
-    handler = EmailSendHandler()
-    params = EmailSendParams(
-        to=["alice@example.com", "bob@example.com"],
-        subject="Digest",
-        body="Daily summary",
-    )
-
-    with patch.dict("os.environ", _SMTP_ENV):
-        with _patch_smtp_send():
-            result = await handler.execute(run=_make_run(), params=params)
-
-    assert result.ok is True
-    assert "alice@example.com" in result.result["recipients"]
-    assert "bob@example.com" in result.result["recipients"]
-
-
-# ---------------------------------------------------------------------------
-# Error classification
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_smtp_4xx_recipient_is_retryable():
-    """SMTP 4xx temporary rejection → retryable=True."""
-    handler = EmailSendHandler()
-    params = EmailSendParams(to=["a@x.com"], subject="s", body="b")
-
-    refused = [aiosmtplib.SMTPRecipientRefused(452, "Mailbox full", "a@x.com")]
-    exc = aiosmtplib.SMTPRecipientsRefused(refused)
-
-    with patch.dict("os.environ", _SMTP_ENV):
-        with _patch_smtp_send(side_effect=exc):
-            result = await handler.execute(run=_make_run(), params=params)
-
-    assert result.ok is False
-    assert result.retryable is True
-
-
-@pytest.mark.asyncio
-async def test_smtp_5xx_recipient_not_retryable():
-    """SMTP 5xx permanent rejection → retryable=False → DLQ."""
-    handler = EmailSendHandler()
-    params = EmailSendParams(to=["a@x.com"], subject="s", body="b")
-
-    refused = [aiosmtplib.SMTPRecipientRefused(550, "No such user", "a@x.com")]
-    exc = aiosmtplib.SMTPRecipientsRefused(refused)
-
-    with patch.dict("os.environ", _SMTP_ENV):
-        with _patch_smtp_send(side_effect=exc):
-            result = await handler.execute(run=_make_run(), params=params)
-
-    assert result.ok is False
-    assert result.retryable is False
-
-
-@pytest.mark.asyncio
-async def test_smtp_auth_failure_not_retryable():
-    """SMTP 5.7.0 auth failure → retryable=False → DLQ + operator action."""
-    handler = EmailSendHandler()
-    params = EmailSendParams(to=["a@x.com"], subject="s", body="b")
-
-    exc = aiosmtplib.SMTPAuthenticationError(535, "5.7.0 Authentication credentials invalid")
-
-    with patch.dict("os.environ", _SMTP_ENV):
-        with _patch_smtp_send(side_effect=exc):
-            result = await handler.execute(run=_make_run(), params=params)
-
-    assert result.ok is False
-    assert result.retryable is False
-    assert "auth" in (result.error or "").lower()
-
-
-@pytest.mark.asyncio
-async def test_smtp_tls_handshake_failure_is_retryable():
-    """TLS handshake failure → retryable=True."""
-    handler = EmailSendHandler()
-    params = EmailSendParams(to=["a@x.com"], subject="s", body="b")
-
-    exc = aiosmtplib.SMTPConnectError("TLS handshake failed")
-
-    with patch.dict("os.environ", _SMTP_ENV):
-        with _patch_smtp_send(side_effect=exc):
-            result = await handler.execute(run=_make_run(), params=params)
-
-    assert result.ok is False
-    assert result.retryable is True
-
-
-@pytest.mark.asyncio
-async def test_smtp_connect_timeout_is_retryable():
-    """Connection timeout → retryable=True."""
-    handler = EmailSendHandler()
-    params = EmailSendParams(to=["a@x.com"], subject="s", body="b")
-
-    exc = aiosmtplib.SMTPConnectTimeoutError("Connection timed out")
-
-    with patch.dict("os.environ", _SMTP_ENV):
-        with _patch_smtp_send(side_effect=exc):
-            result = await handler.execute(run=_make_run(), params=params)
-
-    assert result.ok is False
-    assert result.retryable is True
-
-
-@pytest.mark.asyncio
-async def test_smtp_server_disconnected_is_retryable():
-    """Server disconnect → retryable=True."""
-    handler = EmailSendHandler()
-    params = EmailSendParams(to=["a@x.com"], subject="s", body="b")
-
-    exc = aiosmtplib.SMTPServerDisconnected("Server closed connection unexpectedly")
-
-    with patch.dict("os.environ", _SMTP_ENV):
-        with _patch_smtp_send(side_effect=exc):
-            result = await handler.execute(run=_make_run(), params=params)
-
-    assert result.ok is False
-    assert result.retryable is True
-
-
-# ---------------------------------------------------------------------------
-# Missing env vars
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_missing_smtp_host_fails():
-    handler = EmailSendHandler()
-    params = EmailSendParams(to=["a@x.com"], subject="s", body="b")
-
-    env = {k: v for k, v in _SMTP_ENV.items() if k != "SMTP_HOST"}
-    with patch.dict("os.environ", env, clear=True):
-        result = await handler.execute(run=_make_run(), params=params)
-
-    assert result.ok is False
-    assert result.retryable is False
-    assert "SMTP_HOST" in (result.error or "")
-
-
-@pytest.mark.asyncio
-async def test_missing_email_from_fails():
-    handler = EmailSendHandler()
-    params = EmailSendParams(to=["a@x.com"], subject="s", body="b")
-
-    env = {k: v for k, v in _SMTP_ENV.items() if k != "EMAIL_FROM"}
-    with patch.dict("os.environ", env, clear=True):
-        result = await handler.execute(run=_make_run(), params=params)
-
-    assert result.ok is False
-    assert result.retryable is False
-    assert "EMAIL_FROM" in (result.error or "")
 
 
 @pytest.mark.asyncio
 async def test_neither_body_nor_from_run_id_fails():
+    """No body and no from_run_id → non-retryable error, before any send."""
     handler = EmailSendHandler()
     params = EmailSendParams(to=["a@x.com"], subject="s")  # no body, no from_run_id
 
-    with patch.dict("os.environ", _SMTP_ENV):
-        result = await handler.execute(run=_make_run(), params=params)
+    result = await handler.execute(run=_make_run(), params=params)
 
     assert result.ok is False
     assert result.retryable is False
+    assert "body" in (result.error or "").lower()
 
 
 # ---------------------------------------------------------------------------
-# from_run_id — upstream variants via mocked resolve_for_display
+# Body building — from_run_id chaining (verified at _build_body)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_from_run_id_ok_uses_upstream_json_as_body():
-    """from_run_id with Ok → resolve_for_display returns formatted string used as body."""
+async def test_from_run_id_ok_uses_upstream_output_as_body():
+    """from_run_id → resolve_for_display output becomes the email body."""
     with (
         patch(
             "app.actions.email_send.resolve_for_display",
             AsyncMock(return_value="Daily Digest\n\n- summary: 5 issues closed\n- prs: 2"),
         ),
         patch("app.db.engine.async_session_factory", _make_mock_session_factory()),
-        patch.dict("os.environ", _SMTP_ENV),
     ):
-        captured: list[Any] = []
+        handler = EmailSendHandler()
+        params = EmailSendParams(
+            to=["user@example.com"],
+            subject="Digest",
+            from_run_id=42,
+            template=EmailTemplate.digest_v1,
+        )
+        body = await handler._build_body(params, None)
 
-        async def fake_send(msg, **kwargs):
-            captured.append(msg)
-            return {}, "250 OK"
-
-        with patch("app.actions.email_send.aiosmtplib.send", fake_send):
-            handler = EmailSendHandler()
-            params = EmailSendParams(
-                to=["user@example.com"],
-                subject="Digest",
-                from_run_id=42,
-                template=EmailTemplate.digest_v1,
-            )
-            result = await handler.execute(run=_make_run(), params=params)
-
-    assert result.ok is True
-    assert captured
-    body = captured[0].get_content()
+    assert isinstance(body, str)
     assert "5 issues closed" in body
 
 
 @pytest.mark.asyncio
-async def test_from_run_id_upstream_error_alerts_in_body():
-    """from_run_id with UpstreamError → resolve_for_display returns error string used as body."""
+async def test_from_run_id_upstream_error_passed_through_to_body():
+    """An upstream error is surfaced in the body (resolve_for_display formats it)."""
     with (
         patch(
             "app.actions.email_send.resolve_for_display",
             AsyncMock(return_value="Upstream error: github API rate limited"),
         ),
         patch("app.db.engine.async_session_factory", _make_mock_session_factory()),
-        patch.dict("os.environ", _SMTP_ENV),
     ):
-        captured: list[Any] = []
+        handler = EmailSendHandler()
+        params = EmailSendParams(to=["user@example.com"], subject="Alert", from_run_id=99)
+        body = await handler._build_body(params, None)
 
-        async def fake_send(msg, **kwargs):
-            captured.append(msg)
-            return {}, "250 OK"
-
-        with patch("app.actions.email_send.aiosmtplib.send", fake_send):
-            handler = EmailSendHandler()
-            params = EmailSendParams(
-                to=["user@example.com"],
-                subject="Alert",
-                from_run_id=99,
-            )
-            result = await handler.execute(run=_make_run(), params=params)
-
-    assert result.ok is True
-    assert captured
-    body = captured[0].get_content()
+    assert isinstance(body, str)
     assert "error" in body.lower() or "rate limited" in body
 
 
 @pytest.mark.asyncio
-async def test_from_run_id_no_result():
-    """from_run_id with NoResult → email is still sent with placeholder body."""
+async def test_from_run_id_placeholder_body_is_still_a_string():
+    """NoResult / InvalidJson upstream → placeholder string body (email still sendable)."""
     with (
         patch(
             "app.actions.email_send.resolve_for_display",
             AsyncMock(return_value="Upstream error: (no result)"),
         ),
         patch("app.db.engine.async_session_factory", _make_mock_session_factory()),
-        patch.dict("os.environ", _SMTP_ENV),
-        _patch_smtp_send(),
     ):
         handler = EmailSendHandler()
         params = EmailSendParams(to=["user@example.com"], subject="Digest", from_run_id=1)
-        result = await handler.execute(run=_make_run(), params=params)
+        body = await handler._build_body(params, None)
 
-    assert result.ok is True
-
-
-@pytest.mark.asyncio
-async def test_from_run_id_invalid_json():
-    """from_run_id with InvalidJson → email is still sent with placeholder body."""
-    with (
-        patch(
-            "app.actions.email_send.resolve_for_display",
-            AsyncMock(return_value='Upstream error: (invalid JSON: {"bad": })'),
-        ),
-        patch("app.db.engine.async_session_factory", _make_mock_session_factory()),
-        patch.dict("os.environ", _SMTP_ENV),
-        _patch_smtp_send(),
-    ):
-        handler = EmailSendHandler()
-        params = EmailSendParams(to=["user@example.com"], subject="Digest", from_run_id=1)
-        result = await handler.execute(run=_make_run(), params=params)
-
-    assert result.ok is True
+    assert isinstance(body, str)
+    assert body  # non-empty placeholder
 
 
 # ---------------------------------------------------------------------------
