@@ -264,8 +264,14 @@ async def test_batch_load_single_query_for_multiple_oauth_actions(session_factor
 
 
 @pytest.mark.integration
-async def test_expired_connection_treated_as_not_connected(session_factory, fake_envelope):
-    """A connection whose expires_at is in the past should not appear in connected set."""
+async def test_expired_connection_still_treated_as_connected(session_factory, fake_envelope):
+    """A present-but-expired connection still counts as connected (presence-based).
+
+    Expiry is recovered via transparent refresh at execute time, so reporting
+    'not_connected' here is a false negative (it told users to reconnect a Google
+    connection that actually works — see ADR-050/061). This matches the
+    /connections web dashboard, which is also presence-based.
+    """
     past = datetime.now(UTC) - timedelta(hours=1)
     async with session_factory() as session:
         async with session.begin():
@@ -277,4 +283,4 @@ async def test_expired_connection_treated_as_not_connected(session_factory, fake
     with patch("app.mcp.server._make_server_kms_envelope", return_value=fake_envelope):
         connected = await _load_user_connected_providers(_USER_ID, session_factory)
 
-    assert "slack" not in connected
+    assert "slack" in connected

@@ -86,10 +86,15 @@ async def handle_task_status(
         "status": to_external(view.internal_status),
     }
 
-    # Surface structured error info when the latest run has an error_code
-    # (matches the preflight MISSING_CONNECTION envelope shape per ADR-060).
-    if view.error_code:
-        err_data: dict[str, Any] = {"code": view.error_code}
+    # Surface structured error info when the latest run failed. Always include
+    # error_message when present — even with no error_code — so failures that
+    # carry a message but no code (param validation, SMTP-config, generic
+    # ActionResult errors) are visible via the API instead of only in
+    # job_runs.error_message (ADR-060).
+    if view.error_code or view.error_message:
+        err_data: dict[str, Any] = {}
+        if view.error_code:
+            err_data["code"] = view.error_code
         if view.error_message:
             err_data["message"] = view.error_message
         if view.error_code == "MISSING_CONNECTION":

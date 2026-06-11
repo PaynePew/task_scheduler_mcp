@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -81,7 +80,7 @@ async def _load_user_connected_providers(
     user_id: str,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> set[str]:
-    """Return the set of provider names that *user_id* has a non-expired connection for.
+    """Return the set of provider names that *user_id* has a connection for.
 
     Returns an empty set if KMS is not configured (dev/CI mode) or on any error.
     This is a single DB query regardless of how many OAuth actions are in the registry.
@@ -93,8 +92,12 @@ async def _load_user_connected_providers(
         async with session_factory() as session:
             store = ConnectionStore(session, envelope)
             infos = await store.list(user_id)
-        now = datetime.now(UTC)
-        return {info.provider for info in infos if info.expires_at is None or info.expires_at > now}
+        # Presence-based: a stored connection counts as connected even if its
+        # access token has expired — expiry is recovered via transparent refresh
+        # at execute time (ADR-050/061). The prior `expires_at > now` filter gave
+        # a false `not_connected` for Google (~1h access-token TTL), contradicting
+        # both the real send path and the presence-based /connections web page.
+        return {info.provider for info in infos}
     except Exception:
         logger.exception("failed to load connected providers for user %s", user_id)
         return set()

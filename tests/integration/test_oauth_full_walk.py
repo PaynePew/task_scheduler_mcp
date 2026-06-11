@@ -276,9 +276,12 @@ async def test_oauth_full_walk(session_factory, sqs):
             # -----------------------------------------------------------------
             await _mark_connection_expired(session_factory, "slack")
 
-            # Layer 2 should now report this as not_connected (expired filtered out).
+            # Layer 2 is presence-based: an expired-but-present connection still
+            # reports 'connected' (expiry is recovered via refresh at execute time,
+            # and this matches the presence-based /connections web dashboard). The
+            # real expiry signal is enforced at execute() — see PHASE 8 below.
             connected = await _load_user_connected_providers(_USER, session_factory)
-            assert "slack" not in connected
+            assert "slack" in connected
 
             # -----------------------------------------------------------------
             # PHASE 8 — next dispatch surfaces MISSING_CONNECTION from execute (S3).
