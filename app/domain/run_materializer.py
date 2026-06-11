@@ -62,17 +62,31 @@ class ConcurrencyError(Exception):
     """
 
 
-async def _has_live_run(session: AsyncSession, job_id: int) -> bool:
-    """Return True if job_id has at least one non-terminal run."""
-    result = await session.execute(
-        select(
-            exists().where(
-                JobRun.job_id == job_id,
-                JobRun.status.in_(list(_NON_TERMINAL)),
-            )
-        )
-    )
+async def has_live_run(
+    session: AsyncSession, job_id: int, *, exclude_run_id: int | None = None
+) -> bool:
+    """Return True if job_id has at least one non-terminal run.
+
+    When *exclude_run_id* is provided, that specific run is not counted — useful
+    when ``ChainWatcher`` wants to know whether a downstream job has a *different*
+    live run (i.e. one other than the WAITING run it is currently inspecting).
+
+    Used as the shared predicate for both:
+    - ``_spawn_run`` / ``RecurringJobWatcher`` (spawn-time forbid-concurrency); and
+    - ``ChainWatcher`` (flip-time slow-consumer drop).
+    """
+    clause = [
+        JobRun.job_id == job_id,
+        JobRun.status.in_(list(_NON_TERMINAL)),
+    ]
+    if exclude_run_id is not None:
+        clause.append(JobRun.run_id != exclude_run_id)
+    result = await session.execute(select(exists().where(*clause)))
     return bool(result.scalar())
+
+
+# Internal alias kept for backward-compat callers inside this module.
+_has_live_run = has_live_run
 
 
 async def _spawn_run(

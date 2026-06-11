@@ -498,3 +498,269 @@ async def test_chain_watcher_does_not_reprocess_stamped_event(session_factory):
 
     count2 = await poll_once(session_factory)
     assert count2 == 0
+
+
+# ---------------------------------------------------------------------------
+# Slow-consumer drop (ADR-065 §4, issue #227):
+# When a downstream job already has a live run, flip WAITING → CANCELLED
+# with CANCELLED_SLOW_CONSUMER instead of PENDING.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+async def test_slow_consumer_drop_cancels_waiting_run(session_factory):
+    """Upstream outpaces downstream: WAITING run is cancelled (slow-consumer drop).
+
+    Setup:
+    - Upstream Job A (one_shot) completes → terminal RunEvent.
+    - Downstream Job B (chained to A) has:
+        (a) a pre-existing PENDING run (the "live" run — B is still processing),
+        (b) a WAITING run armed against A's terminal run (the incoming tick).
+    - ChainWatcher processes A's terminal event.
+    - Expected: B's WAITING run → CANCELLED (CANCELLED_SLOW_CONSUMER event),
+      NOT PENDING. The single-live-run invariant holds.
+    """
+    scheduled = datetime.now(tz=UTC) - timedelta(hours=1)
+
+    async with session_factory() as session:
+        async with session.begin():
+            # Job A: one_shot upstream
+            job_a = Job(
+                user_id="slow-consumer-test",
+                description="upstream job A",
+                action="echo",
+                action_params={"message": "upstream"},
+                job_type="one_shot",
+                scheduled_at=scheduled,
+            )
+            session.add(job_a)
+            await session.flush()
+
+            bucket = scheduled.replace(minute=0, second=0, microsecond=0).isoformat()
+            run_a = JobRun(
+                time_bucket=bucket,
+                job_id=job_a.job_id,
+                user_id=job_a.user_id,
+                scheduled_at=scheduled,
+                status="SUCCEEDED",
+                finish_at=datetime.now(tz=UTC),
+            )
+            session.add(run_a)
+            await session.flush()
+
+            # Job B: trigger-driven downstream
+            job_b = Job(
+                user_id="slow-consumer-test",
+                description="downstream job B",
+                action="echo",
+                action_params={"message": "downstream"},
+                job_type="one_shot",
+                scheduled_at=scheduled + timedelta(seconds=1),
+                trigger_on_job_id=job_a.job_id,
+                trigger_on_status="ANY",
+            )
+            session.add(job_b)
+            await session.flush()
+
+            # B's pre-existing PENDING run (the "slow" live run still processing)
+            run_b_live = JobRun(
+                time_bucket=bucket,
+                job_id=job_b.job_id,
+                user_id=job_b.user_id,
+                scheduled_at=scheduled + timedelta(seconds=1),
+                status="PENDING",
+            )
+            session.add(run_b_live)
+            await session.flush()
+
+            # B's NEW WAITING run armed against A's terminal run (the incoming tick)
+            run_b_waiting = JobRun(
+                time_bucket=bucket,
+                job_id=job_b.job_id,
+                user_id=job_b.user_id,
+                scheduled_at=scheduled + timedelta(seconds=2),
+                status="WAITING",
+                wait_for_run_id=run_a.run_id,
+            )
+            session.add(run_b_waiting)
+            await session.flush()
+
+            # Terminal event for A
+            terminal_event = RunEvent(
+                run_id=run_a.run_id,
+                job_id=job_a.job_id,
+                event_type="SUCCEEDED",
+                status_from="RUNNING",
+                status_to="SUCCEEDED",
+            )
+            session.add(terminal_event)
+
+    # ChainWatcher processes A's terminal event
+    count = await poll_once(session_factory)
+    assert count == 1
+
+    async with session_factory() as session:
+        async with session.begin():
+            refreshed_waiting = (
+                await session.execute(select(JobRun).where(JobRun.run_id == run_b_waiting.run_id))
+            ).scalar_one()
+
+            refreshed_live = (
+                await session.execute(select(JobRun).where(JobRun.run_id == run_b_live.run_id))
+            ).scalar_one()
+
+            # The CANCELLED_SLOW_CONSUMER event should exist
+            drop_event = (
+                await session.execute(
+                    select(RunEvent).where(
+                        RunEvent.run_id == run_b_waiting.run_id,
+                        RunEvent.event_type == "CANCELLED_SLOW_CONSUMER",
+                    )
+                )
+            ).scalar_one_or_none()
+
+    # The incoming tick was dropped: WAITING → CANCELLED
+    assert refreshed_waiting.status == "CANCELLED", (
+        f"Expected slow-consumer WAITING run to be CANCELLED, got {refreshed_waiting.status}"
+    )
+    # The live run is untouched (still PENDING)
+    assert refreshed_live.status == "PENDING", (
+        f"Live PENDING run should be unchanged, got {refreshed_live.status}"
+    )
+    # Auditable record: CANCELLED_SLOW_CONSUMER event emitted
+    assert drop_event is not None, "Expected CANCELLED_SLOW_CONSUMER RunEvent to be emitted"
+    assert drop_event.status_from == "WAITING"
+    assert drop_event.status_to == "CANCELLED"
+
+
+@pytest.mark.integration
+async def test_slow_consumer_single_live_run_invariant(session_factory):
+    """At no point do two non-terminal runs for the same job coexist.
+
+    After the slow-consumer drop, only one non-terminal run exists for Job B.
+    This is the RUNNING case — even stronger: a mid-execution run is protected.
+    """
+    scheduled = datetime.now(tz=UTC) - timedelta(hours=1)
+
+    async with session_factory() as session:
+        async with session.begin():
+            job_a = Job(
+                user_id="slow-consumer-invariant-test",
+                description="upstream",
+                action="echo",
+                action_params={"message": "up"},
+                job_type="one_shot",
+                scheduled_at=scheduled,
+            )
+            session.add(job_a)
+            await session.flush()
+
+            bucket = scheduled.replace(minute=0, second=0, microsecond=0).isoformat()
+            run_a = JobRun(
+                time_bucket=bucket,
+                job_id=job_a.job_id,
+                user_id=job_a.user_id,
+                scheduled_at=scheduled,
+                status="SUCCEEDED",
+                finish_at=datetime.now(tz=UTC),
+            )
+            session.add(run_a)
+            await session.flush()
+
+            job_b = Job(
+                user_id="slow-consumer-invariant-test",
+                description="downstream",
+                action="echo",
+                action_params={"message": "down"},
+                job_type="one_shot",
+                scheduled_at=scheduled + timedelta(seconds=1),
+                trigger_on_job_id=job_a.job_id,
+                trigger_on_status="SUCCEEDED",
+            )
+            session.add(job_b)
+            await session.flush()
+
+            # B already has a live RUNNING run (in-flight from a prior tick)
+            run_b_running = JobRun(
+                time_bucket=bucket,
+                job_id=job_b.job_id,
+                user_id=job_b.user_id,
+                scheduled_at=scheduled + timedelta(seconds=1),
+                status="RUNNING",
+            )
+            session.add(run_b_running)
+            await session.flush()
+
+            # B also has a WAITING run (the new tick — would violate single-live-run)
+            run_b_waiting = JobRun(
+                time_bucket=bucket,
+                job_id=job_b.job_id,
+                user_id=job_b.user_id,
+                scheduled_at=scheduled + timedelta(seconds=2),
+                status="WAITING",
+                wait_for_run_id=run_a.run_id,
+            )
+            session.add(run_b_waiting)
+            await session.flush()
+
+            session.add(
+                RunEvent(
+                    run_id=run_a.run_id,
+                    job_id=job_a.job_id,
+                    event_type="SUCCEEDED",
+                    status_from="RUNNING",
+                    status_to="SUCCEEDED",
+                )
+            )
+
+    await poll_once(session_factory)
+
+    # After the drop, count non-terminal runs for job B
+    _NON_TERMINAL_STATUSES = ("PENDING", "QUEUED", "WAITING", "RUNNING", "RETRYING")
+    async with session_factory() as session:
+        async with session.begin():
+            live_runs = (
+                (
+                    await session.execute(
+                        select(JobRun).where(
+                            JobRun.job_id == job_b.job_id,
+                            JobRun.status.in_(list(_NON_TERMINAL_STATUSES)),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+
+    # At most one non-terminal run for Job B at any time
+    assert len(live_runs) == 1, (
+        f"Expected at most 1 non-terminal run for job_b, got {len(live_runs)}: "
+        f"{[(r.run_id, r.status) for r in live_runs]}"
+    )
+    # The surviving live run is the RUNNING one (not the dropped WAITING)
+    assert live_runs[0].run_id == run_b_running.run_id
+    assert live_runs[0].status == "RUNNING"
+
+
+@pytest.mark.integration
+async def test_normal_flip_when_no_other_live_run(session_factory):
+    """When there is no other live run, the normal trigger-status match logic applies.
+
+    Regression test: slow-consumer check must NOT fire when the WAITING run is
+    the only non-terminal run for the job.
+    """
+    _, _, _, downstream_run, _ = await _insert_chain(
+        session_factory, event_type="SUCCEEDED", trigger_on_status="SUCCEEDED"
+    )
+    # Only one run exists for the downstream job (the WAITING run itself)
+    count = await poll_once(session_factory)
+    assert count == 1
+
+    async with session_factory() as session:
+        async with session.begin():
+            refreshed = (
+                await session.execute(select(JobRun).where(JobRun.run_id == downstream_run.run_id))
+            ).scalar_one()
+
+    # Normal flip: WAITING → PENDING (no slow-consumer drop)
+    assert refreshed.status == "PENDING", f"Expected normal flip to PENDING, got {refreshed.status}"
