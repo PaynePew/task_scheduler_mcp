@@ -285,3 +285,273 @@ async def test_spawn_derives_time_bucket():
     spawned = job_runs[0]
     expected_bucket = "2026-03-15T14:00:00+00:00"
     assert spawned.time_bucket == expected_bucket
+
+
+# ---------------------------------------------------------------------------
+# Cascade + fan-out unit tests (S2 / issue #226)
+# ---------------------------------------------------------------------------
+#
+# These tests require a smarter mock session that understands the per-job
+# downstream query and can answer for multi-level / multi-downstream topologies.
+
+
+def _make_cascade_session(
+    downstream_map: dict[int, list],
+    flushed_run_id: int = 100,
+    start_with_downstream: bool = False,
+):
+    """Build a mock session for cascade + fan-out tests.
+
+    downstream_map: {job_id: [downstream_Job, ...]}
+        Maps each job_id to the list of downstream jobs that trigger on it.
+        If a job_id has no entry, it has no downstream.
+
+    All has_live_run checks return False (no live run) so spawning always
+    succeeds.  flush() auto-assigns ascending run_ids.
+
+    start_with_downstream: set True when the first execute call comes from
+        _arm (downstream query) rather than _spawn_run (live-run check).
+        Use this when calling _arm() directly without a preceding _spawn_run.
+    """
+    session = AsyncMock()
+
+    session._added = []
+    session.add = MagicMock(side_effect=lambda obj: session._added.append(obj))
+
+    run_id_counter = [flushed_run_id]
+
+    async def _flush():
+        for obj in session._added:
+            if isinstance(obj, JobRun) and not hasattr(obj, "_flushed"):
+                obj.run_id = run_id_counter[0]
+                run_id_counter[0] += 1
+                obj._flushed = True
+
+    session.flush = _flush
+
+    # State machine: True = next execute is a live-run check; False = downstream-jobs query.
+    # When calling _spawn_run first, the first call is live-run check (start_with_downstream=False).
+    # When calling _arm directly (skipping _spawn_run for root), first call is downstream query.
+    call_is_live_run = [not start_with_downstream]
+
+    async def _execute(stmt, *args, **kwargs):
+        if call_is_live_run[0]:
+            # live-run check: return False (no live run — spawning always succeeds)
+            call_is_live_run[0] = False
+            result = MagicMock()
+            result.scalar.return_value = False
+            return result
+        else:
+            # downstream-jobs query: look up by the most recently flushed JobRun's job_id.
+            call_is_live_run[0] = True
+            last_run = None
+            for obj in reversed(session._added):
+                if isinstance(obj, JobRun) and hasattr(obj, "_flushed"):
+                    last_run = obj
+                    break
+            if last_run is None:
+                downstreams = []
+            else:
+                downstreams = downstream_map.get(last_run.job_id, [])
+            result = MagicMock()
+            result.scalars.return_value.all.return_value = downstreams
+            return result
+
+    session.execute = _execute
+    return session
+
+
+@pytest.mark.asyncio
+async def test_arm_fans_out_to_multiple_downstream_jobs():
+    """Fan-out: a single upstream PENDING run arms WAITING runs for EVERY downstream job.
+
+    Topology: root(job_id=1) → [sink_a(job_id=2), sink_b(job_id=3)]
+    Expect 1 PENDING root run + 2 WAITING downstream runs (one per sink).
+    """
+    from app.domain.run_materializer import _arm
+
+    sink_a = _make_job(job_id=2, trigger_on_job_id=1, trigger_on_status="ANY")
+    sink_b = _make_job(job_id=3, trigger_on_job_id=1, trigger_on_status="ANY")
+
+    # After we spawn the root run (job_id=1), _arm looks up downstreams of job_id=1.
+    # Neither sink has downstreams.
+    downstream_map = {1: [sink_a, sink_b], 2: [], 3: []}
+    # start_with_downstream=True because we call _arm directly (first execute = downstream query)
+    session = _make_cascade_session(downstream_map, flushed_run_id=10, start_with_downstream=True)
+
+    # Manually spawn the root run so we can call _arm on it.
+    root_run = JobRun()
+    root_run.run_id = 10
+    root_run.job_id = 1
+    root_run.user_id = "u1"
+    root_run.scheduled_at = datetime.now(tz=UTC)
+    root_run.status = "PENDING"
+    root_run._flushed = True  # already "flushed"
+    session._added.append(root_run)
+
+    await _arm(session, root_run, depth=0)
+
+    waiting_runs = [o for o in session._added if isinstance(o, JobRun) and o.status == "WAITING"]
+    assert len(waiting_runs) == 2, (
+        f"Expected 2 WAITING downstream runs (fan-out), got {len(waiting_runs)}"
+    )
+    downstream_job_ids = {r.job_id for r in waiting_runs}
+    assert downstream_job_ids == {2, 3}, f"Expected job_ids {{2, 3}}, got {downstream_job_ids}"
+    # Each WAITING run points at the root run
+    for wr in waiting_runs:
+        assert wr.wait_for_run_id == root_run.run_id
+
+
+@pytest.mark.asyncio
+async def test_arm_cascades_two_levels():
+    """Cascade: _arm recurses to arm grandchildren.
+
+    Topology: root(1) → mid(2) → sink(3)
+    Arming root(1) should create WAITING mid(2) AND WAITING sink(3).
+    """
+    from app.domain.run_materializer import _arm
+
+    root_run = JobRun()
+    root_run.run_id = 10
+    root_run.job_id = 1
+    root_run.user_id = "u1"
+    root_run.scheduled_at = datetime.now(tz=UTC)
+    root_run.status = "PENDING"
+    root_run._flushed = True
+
+    mid_job = _make_job(job_id=2, trigger_on_job_id=1, trigger_on_status="ANY")
+    sink_job = _make_job(job_id=3, trigger_on_job_id=2, trigger_on_status="ANY")
+
+    # job 1 → [mid(2)]; job 2 → [sink(3)]; job 3 → []
+    downstream_map = {1: [mid_job], 2: [sink_job], 3: []}
+    # start_with_downstream=True because we call _arm directly (first execute = downstream query)
+    session = _make_cascade_session(downstream_map, flushed_run_id=11, start_with_downstream=True)
+    session._added.append(root_run)
+
+    await _arm(session, root_run, depth=0)
+
+    waiting_runs = [o for o in session._added if isinstance(o, JobRun) and o.status == "WAITING"]
+    assert len(waiting_runs) == 2, f"Expected 2 WAITING runs (mid + sink), got {len(waiting_runs)}"
+
+    # mid WAITING run points at root
+    mid_run = next(r for r in waiting_runs if r.job_id == 2)
+    assert mid_run.wait_for_run_id == root_run.run_id
+
+    # sink WAITING run points at mid (NOT at root — cascade, not fan-out)
+    sink_run = next(r for r in waiting_runs if r.job_id == 3)
+    assert sink_run.wait_for_run_id == mid_run.run_id, (
+        f"sink's wait_for_run_id={sink_run.wait_for_run_id} should point at mid"
+        f" (run_id={mid_run.run_id}), not root (run_id={root_run.run_id})"
+    )
+
+
+@pytest.mark.asyncio
+async def test_arm_respects_max_chain_depth():
+    """_arm stops recursing at MAX_CHAIN_DEPTH.
+
+    Build a linear chain long enough to exceed MAX_CHAIN_DEPTH.  At the depth
+    limit the recursion must stop rather than producing infinitely nested WAITING
+    runs.  The assertion: exactly MAX_CHAIN_DEPTH WAITING runs are created (one
+    per level), and the deepest job's downstream is NOT armed.
+    """
+    from app.domain.chain_validation import MAX_CHAIN_DEPTH
+    from app.domain.run_materializer import _arm
+
+    # Build a chain of MAX_CHAIN_DEPTH + 1 jobs (so the last level exceeds depth).
+    # Job i triggers on job i-1.  job_ids: 0 (root already done), 1..MAX_CHAIN_DEPTH+1.
+    n = MAX_CHAIN_DEPTH + 1
+    jobs = [
+        _make_job(job_id=i, trigger_on_job_id=i - 1, trigger_on_status="ANY")
+        for i in range(1, n + 1)
+    ]
+
+    # downstream_map: job i-1 → [job i] for i in 1..n; last job has no downstream.
+    # root is job_id=0 (the run we pass to _arm directly).
+    downstream_map: dict[int, list] = {}
+    for i in range(n):
+        downstream_map[i] = [jobs[i]] if i < n else []
+    downstream_map[n] = []
+
+    root_run = JobRun()
+    root_run.run_id = 1
+    root_run.job_id = 0
+    root_run.user_id = "u1"
+    root_run.scheduled_at = datetime.now(tz=UTC)
+    root_run.status = "PENDING"
+    root_run._flushed = True
+
+    # start_with_downstream=True because we call _arm directly (first execute = downstream query)
+    session = _make_cascade_session(downstream_map, flushed_run_id=2, start_with_downstream=True)
+    session._added.append(root_run)
+
+    await _arm(session, root_run, depth=0)
+
+    waiting_runs = [o for o in session._added if isinstance(o, JobRun) and o.status == "WAITING"]
+    # depth 0 arms level 1; depth 1 arms level 2; ... depth MAX_CHAIN_DEPTH-1 arms level MAX.
+    # At depth == MAX_CHAIN_DEPTH, _arm returns early → level MAX+1 is NOT armed.
+    assert len(waiting_runs) == MAX_CHAIN_DEPTH, (
+        f"Expected exactly {MAX_CHAIN_DEPTH} WAITING runs (depth bound), got {len(waiting_runs)}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_materialize_successor_full_fanout_shape():
+    """materialize_successor arms the full 3-level fan-out: root→mid→(sink1+sink2).
+
+    Simulates the digest topology:
+      root (job_id=1, cron) → mid (job_id=2) → sink_slack (job_id=3) + sink_email (job_id=4)
+
+    After materialize_successor on root:
+      - 1 PENDING root run
+      - 1 WAITING mid run (pointing at root)
+      - 1 WAITING sink_slack run (pointing at mid)
+      - 1 WAITING sink_email run (pointing at mid)
+    Total: 4 runs.
+    """
+    root_job = _make_job(job_id=1, cron_expr="@daily", timezone="UTC")
+    mid_job = _make_job(job_id=2, trigger_on_job_id=1, trigger_on_status="ANY")
+    sink_slack = _make_job(job_id=3, trigger_on_job_id=2, trigger_on_status="ANY")
+    sink_email = _make_job(job_id=4, trigger_on_job_id=2, trigger_on_status="ANY")
+
+    downstream_map = {
+        1: [mid_job],
+        2: [sink_slack, sink_email],
+        3: [],
+        4: [],
+    }
+
+    prev_run = _make_run(
+        run_id=5,
+        job_id=1,
+        status="SUCCEEDED",
+        scheduled_at=datetime(2026, 6, 10, 9, 0, tzinfo=UTC),
+    )
+    session = _make_cascade_session(downstream_map, flushed_run_id=10)
+    occurred_at = prev_run.scheduled_at + timedelta(minutes=30)
+
+    await materialize_successor(session, root_job, prev_run=prev_run, occurred_at=occurred_at)
+
+    job_runs = [o for o in session._added if isinstance(o, JobRun)]
+    assert len(job_runs) == 4, (
+        f"Expected 4 runs (root + mid + slack + email), got {len(job_runs)}: "
+        f"{[(r.job_id, r.status) for r in job_runs]}"
+    )
+
+    root_runs = [r for r in job_runs if r.status == "PENDING"]
+    assert len(root_runs) == 1
+    root_run = root_runs[0]
+
+    mid_runs = [r for r in job_runs if r.job_id == 2]
+    assert len(mid_runs) == 1
+    mid_run = mid_runs[0]
+    assert mid_run.status == "WAITING"
+    assert mid_run.wait_for_run_id == root_run.run_id
+
+    sink_runs = [r for r in job_runs if r.job_id in (3, 4)]
+    assert len(sink_runs) == 2
+    for sr in sink_runs:
+        assert sr.status == "WAITING"
+        assert sr.wait_for_run_id == mid_run.run_id, (
+            f"sink job_id={sr.job_id} should point at mid (run_id={mid_run.run_id}), "
+            f"got wait_for_run_id={sr.wait_for_run_id}"
+        )
