@@ -1,7 +1,6 @@
 """Unit tests for app/domain/chain_validation.py.
 
-Tests V1-V5 validation rules, V6 (cron + trigger mutual exclusion), and the
-_is_match helper in chain_watcher.
+Tests V1-V5 validation rules and the _is_match helper in chain_watcher.
 CTE-based V4/V5 tests use mock sessions that return pre-canned CTE results.
 """
 
@@ -13,13 +12,11 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from app.domain.chain_validation import (
-    ChainBothCronAndTriggerError,
     ChainCycleError,
     ChainDepthError,
     ChainJobNotFoundError,
     ChainJobTerminatedError,
     validate_chain,
-    validate_chain_v6,
 )
 from app.workers.chain_watcher import _is_match
 
@@ -306,7 +303,6 @@ def test_chain_error_codes_via_map_domain_error():
         (ChainJobTerminatedError(99), "INVALID_STATE", "trigger_on_job_id", None),
         (ChainCycleError(99), "USER_INPUT", "trigger_on_job_id", "non-circular chain"),
         (ChainDepthError(99), "USER_INPUT", "trigger_on_job_id", "chain depth ≤ 10"),
-        (ChainBothCronAndTriggerError(), "USER_INPUT", "cron_expr", None),
     ]
 
     for exc, expected_code, expected_field, expected_expected in cases:
@@ -319,32 +315,3 @@ def test_chain_error_codes_via_map_domain_error():
                 f"{type(exc).__name__}: expected 'expected' {expected_expected!r}, "
                 f"got {result['error'].get('expected')!r}"
             )
-
-
-# ---------------------------------------------------------------------------
-# V6: trigger_on_job_id and cron_expr are mutually exclusive (ADR-065)
-# ---------------------------------------------------------------------------
-
-
-def test_v6_both_cron_and_trigger_raises():
-    """V6: setting both cron_expr and trigger_on_job_id raises ChainBothCronAndTriggerError."""
-    with pytest.raises(ChainBothCronAndTriggerError):
-        validate_chain_v6(cron_expr="0 8 * * *", trigger_on_job_id=5)
-
-
-def test_v6_cron_only_passes():
-    """V6: cron_expr alone is accepted."""
-    # Should not raise
-    validate_chain_v6(cron_expr="0 8 * * *", trigger_on_job_id=None)
-
-
-def test_v6_trigger_only_passes():
-    """V6: trigger_on_job_id alone is accepted."""
-    # Should not raise
-    validate_chain_v6(cron_expr=None, trigger_on_job_id=5)
-
-
-def test_v6_neither_passes():
-    """V6: neither cron_expr nor trigger_on_job_id (immediate/one-shot) is accepted."""
-    # Should not raise
-    validate_chain_v6(cron_expr=None, trigger_on_job_id=None)

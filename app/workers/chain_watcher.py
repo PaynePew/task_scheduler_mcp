@@ -9,12 +9,6 @@ Match logic (ADR-020):
   trigger_on_status == event_type   → PENDING   (literal match)
   trigger_on_status == "ANY"        → PENDING   (any terminal, including CANCELLED)
   otherwise                         → CANCELLED (mismatch)
-
-Slow-consumer drop (ADR-065):
-  If the match would yield PENDING but the downstream job already has a live
-  non-WAITING run, flip WAITING → CANCELLED instead (CANCELLED_BY_CONCURRENCY).
-  Preserves "at most one live run per job" without silently dropping the tick
-  from the audit log.
 """
 
 from __future__ import annotations
@@ -23,7 +17,7 @@ import asyncio
 import logging
 from datetime import UTC, datetime
 
-from sqlalchemy import exists, select, update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db.models import Job, JobRun, RunEvent
@@ -32,10 +26,6 @@ logger = logging.getLogger(__name__)
 
 PROCESSED_BY_KEY = "chain_watcher"
 TERMINAL_EVENTS = ("SUCCEEDED", "FAILED", "CANCELLED")
-# Live statuses that block a second PENDING run for the same job.
-# WAITING is excluded: the run we're about to flip IS a WAITING run for this job,
-# so we must not count itself as a "live run" blocker.
-_BLOCKING_STATUSES = frozenset({"PENDING", "QUEUED", "RUNNING", "RETRYING"})
 DEFAULT_BATCH_SIZE = 50
 DEFAULT_SLEEP_SECONDS = 5.0
 
@@ -46,23 +36,6 @@ def _is_match(trigger_on_status: str | None, event_type: str) -> bool:
     return effective in ("ANY", event_type)
 
 
-async def _has_live_non_waiting_run(session: AsyncSession, job_id: int) -> bool:
-    """Return True if job_id has a non-WAITING live run (PENDING/QUEUED/RUNNING/RETRYING).
-
-    Used for slow-consumer drop: if the downstream already has an active run,
-    a new PENDING flip would violate the at-most-one-live-run invariant (ADR-016).
-    """
-    result = await session.execute(
-        select(
-            exists().where(
-                JobRun.job_id == job_id,
-                JobRun.status.in_(list(_BLOCKING_STATUSES)),
-            )
-        )
-    )
-    return bool(result.scalar())
-
-
 async def _flip_waiting_run(
     session: AsyncSession,
     *,
@@ -71,28 +44,10 @@ async def _flip_waiting_run(
     event_type: str,
     now: datetime,
 ) -> None:
-    """Flip one WAITING run to PENDING or CANCELLED and emit a RunEvent.
-
-    Applies slow-consumer drop (ADR-065): if the status match would yield
-    PENDING but the downstream job already has a live blocking run, the flip
-    target becomes CANCELLED (CANCELLED_BY_CONCURRENCY) to preserve the
-    at-most-one-live-run invariant with an audit trail.
-    """
+    """Flip one WAITING run to PENDING or CANCELLED and emit a RunEvent."""
     match = _is_match(trigger_job.trigger_on_status, event_type)
-
-    if match and await _has_live_non_waiting_run(session, waiting_run.job_id):
-        # Slow-consumer drop: upstream outpaced the downstream.
-        new_status = "CANCELLED"
-        event_name = "CANCELLED_BY_CONCURRENCY"
-        logger.info(
-            "chain_watcher: slow-consumer drop run_id=%s WAITING→CANCELLED"
-            " (downstream job_id=%s already has a live run)",
-            waiting_run.run_id,
-            waiting_run.job_id,
-        )
-    else:
-        new_status = "PENDING" if match else "CANCELLED"
-        event_name = "QUEUED_BY_CHAIN" if match else "CANCELLED_BY_CHAIN_MISS"
+    new_status = "PENDING" if match else "CANCELLED"
+    event_name = "QUEUED_BY_CHAIN" if match else "CANCELLED_BY_CHAIN_MISS"
 
     await session.execute(
         update(JobRun)

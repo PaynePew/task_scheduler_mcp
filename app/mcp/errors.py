@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import Any
 
 from app.domain.chain_validation import (
-    ChainBothCronAndTriggerError,
     ChainCycleError,
     ChainDepthError,
     ChainJobNotFoundError,
@@ -104,16 +103,6 @@ def map_domain_error(exc: Exception) -> dict[str, Any]:
             f"Chain depth would exceed the maximum of 10 (trigger_on_job_id={exc}).",
             field="trigger_on_job_id",
             expected="chain depth ≤ 10",
-        )
-    # V6: run-source dichotomy — cron_expr and trigger_on_job_id are mutually exclusive (ADR-065)
-    if isinstance(exc, ChainBothCronAndTriggerError):
-        return error(
-            "USER_INPUT",
-            "A job cannot have both cron_expr and trigger_on_job_id. "
-            "A chained job inherits recurrence from its trigger — "
-            "set the schedule only on the root job.",
-            field="cron_expr",
-            expected="omit cron_expr when trigger_on_job_id is set",
         )
     if isinstance(exc, ValueError):
         return error("USER_INPUT", str(exc))

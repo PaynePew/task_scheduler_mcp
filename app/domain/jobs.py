@@ -24,7 +24,7 @@ from app.actions.registry import ACTION_REGISTRY
 from app.config.cron import next_after, validate_cron_expr
 from app.config.timezone_resolver import resolve_timezone
 from app.db.models import Job, JobRun, RunEvent
-from app.domain.chain_validation import validate_chain, validate_chain_v6
+from app.domain.chain_validation import validate_chain
 from app.domain.run_materializer import materialize_initial
 
 
@@ -172,10 +172,6 @@ async def create_job(
             f"trigger_on_status must be one of {sorted(_VALID_TRIGGER_ON_STATUS)}, "
             f"got {trigger_on_status!r}"
         )
-
-    # V6: enforce run-source dichotomy (ADR-065) — cron_expr and trigger_on_job_id
-    # are mutually exclusive. Done before DB work so the error is always USER_INPUT.
-    validate_chain_v6(cron_expr=cron_expr, trigger_on_job_id=trigger_on_job_id)
 
     if schedule_type == "recurring":
         if not cron_expr:

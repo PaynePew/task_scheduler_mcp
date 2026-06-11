@@ -1,4 +1,4 @@
-"""Chain-creation validation rules V1-V6 (ADR-020, ADR-065).
+"""Chain-creation validation rules V1-V5 (ADR-020).
 
 Called from create_job when trigger_on_job_id is set.  Pure domain — no MCP
 knowledge.  Raises typed exceptions that map_domain_error (in app.mcp.errors)
@@ -9,8 +9,6 @@ V2  Trigger Job has same user_id as caller       → ChainJobNotFoundError (404,
 V3  Trigger Job is not already fully terminated  → ChainJobTerminatedError
 V4  No cycle via trigger_on_job_id ancestry      → ChainCycleError
 V5  Chain depth ≤ 10 from new job through ancs   → ChainDepthError
-V6  trigger_on_job_id and cron_expr are mutually exclusive (ADR-065)
-                                                 → ChainBothCronAndTriggerError
 
 V4 + V5 share one recursive CTE that walks ancestors of trigger_on_job_id.
 """
@@ -42,15 +40,6 @@ class ChainCycleError(Exception):
 
 class ChainDepthError(Exception):
     """V5: ancestor chain depth would exceed MAX_CHAIN_DEPTH including the new job."""
-
-
-class ChainBothCronAndTriggerError(Exception):
-    """V6: a job cannot have both cron_expr and trigger_on_job_id set (ADR-065).
-
-    Run-source dichotomy: every job is either schedule-driven (cron_expr) or
-    trigger-driven (trigger_on_job_id), never both. Setting both is rejected
-    at task.create time with USER_INPUT.
-    """
 
 
 # Recursive CTE: walk ancestors of :start_id via trigger_on_job_id.
@@ -146,22 +135,3 @@ async def validate_chain(
         raise ChainDepthError(trigger_on_job_id)
 
     return wait_run
-
-
-def validate_chain_v6(
-    *,
-    cron_expr: str | None,
-    trigger_on_job_id: int | None,
-) -> None:
-    """V6: enforce run-source dichotomy — cron_expr and trigger_on_job_id are mutually exclusive.
-
-    Raises ChainBothCronAndTriggerError if both are set.
-    Called synchronously from create_job before any DB work.
-    Create-time only; no effect on historical rows.
-    """
-    if cron_expr is not None and trigger_on_job_id is not None:
-        raise ChainBothCronAndTriggerError(
-            "A job cannot have both cron_expr and trigger_on_job_id set. "
-            "Inherited recurrence: a chained job recurs because its trigger recurs — "
-            "set the schedule only on the root job."
-        )
