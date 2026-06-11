@@ -1,7 +1,8 @@
 """Unit tests for app/domain/chain_validation.py.
 
-Tests V1-V5 validation rules and the _is_match helper in chain_watcher.
+Tests V1-V6 validation rules and the _is_match helper in chain_watcher.
 CTE-based V4/V5 tests use mock sessions that return pre-canned CTE results.
+V6 (validate_run_source) is a pure synchronous guard — no session needed.
 """
 
 from __future__ import annotations
@@ -16,7 +17,9 @@ from app.domain.chain_validation import (
     ChainDepthError,
     ChainJobNotFoundError,
     ChainJobTerminatedError,
+    ChainRunSourceError,
     validate_chain,
+    validate_run_source,
 )
 from app.workers.chain_watcher import _is_match
 
@@ -303,6 +306,7 @@ def test_chain_error_codes_via_map_domain_error():
         (ChainJobTerminatedError(99), "INVALID_STATE", "trigger_on_job_id", None),
         (ChainCycleError(99), "USER_INPUT", "trigger_on_job_id", "non-circular chain"),
         (ChainDepthError(99), "USER_INPUT", "trigger_on_job_id", "chain depth ≤ 10"),
+        (ChainRunSourceError(), "USER_INPUT", "trigger_on_job_id", None),
     ]
 
     for exc, expected_code, expected_field, expected_expected in cases:
@@ -315,3 +319,42 @@ def test_chain_error_codes_via_map_domain_error():
                 f"{type(exc).__name__}: expected 'expected' {expected_expected!r}, "
                 f"got {result['error'].get('expected')!r}"
             )
+
+
+# ---------------------------------------------------------------------------
+# V6: both trigger_on_job_id and cron_expr set → ChainRunSourceError
+# ---------------------------------------------------------------------------
+
+
+def test_v6_both_set_raises():
+    """A job with both trigger_on_job_id and cron_expr is rejected (V6)."""
+    with pytest.raises(ChainRunSourceError):
+        validate_run_source(trigger_on_job_id=5, cron_expr="0 8 * * *")
+
+
+def test_v6_only_cron_passes():
+    """A schedule-driven job (cron only, no trigger) passes V6."""
+    # Must not raise
+    validate_run_source(trigger_on_job_id=None, cron_expr="0 8 * * *")
+
+
+def test_v6_only_trigger_passes():
+    """A trigger-driven (chained) job with no cron passes V6."""
+    # Must not raise
+    validate_run_source(trigger_on_job_id=5, cron_expr=None)
+
+
+def test_v6_neither_set_passes():
+    """An immediate/one-shot job with neither cron nor trigger passes V6."""
+    # Must not raise
+    validate_run_source(trigger_on_job_id=None, cron_expr=None)
+
+
+def test_v6_error_maps_to_user_input():
+    """map_domain_error maps ChainRunSourceError to USER_INPUT on trigger_on_job_id."""
+    from app.mcp.errors import map_domain_error
+
+    result = map_domain_error(ChainRunSourceError())
+    assert result["ok"] is False
+    assert result["error"]["code"] == "USER_INPUT"
+    assert result["error"]["field"] == "trigger_on_job_id"

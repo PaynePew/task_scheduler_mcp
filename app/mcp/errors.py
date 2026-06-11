@@ -9,6 +9,7 @@ from app.domain.chain_validation import (
     ChainDepthError,
     ChainJobNotFoundError,
     ChainJobTerminatedError,
+    ChainRunSourceError,
 )
 from app.domain.jobs import (
     InvalidCronExprError,
@@ -103,6 +104,14 @@ def map_domain_error(exc: Exception) -> dict[str, Any]:
             f"Chain depth would exceed the maximum of 10 (trigger_on_job_id={exc}).",
             field="trigger_on_job_id",
             expected="chain depth ≤ 10",
+        )
+    # Chain validation V6 (ADR-065): mutually-exclusive run sources
+    if isinstance(exc, ChainRunSourceError):
+        return error(
+            "USER_INPUT",
+            "trigger_on_job_id and cron_expr are mutually exclusive: "
+            "a chained job inherits recurrence from its trigger and must not carry its own cron.",
+            field="trigger_on_job_id",
         )
     if isinstance(exc, ValueError):
         return error("USER_INPUT", str(exc))
