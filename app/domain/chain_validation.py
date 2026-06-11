@@ -1,16 +1,19 @@
-"""Chain-creation validation rules V1-V5 (ADR-020).
+"""Chain-creation validation rules V1-V6 (ADR-020, ADR-065).
 
-Called from create_job when trigger_on_job_id is set.  Pure domain — no MCP
-knowledge.  Raises typed exceptions that map_domain_error (in app.mcp.errors)
-maps to the 6-code error vocabulary.
+Called from create_job.  Pure domain — no MCP knowledge.  Raises typed
+exceptions that map_domain_error (in app.mcp.errors) maps to the 6-code
+error vocabulary.
 
 V1  Trigger Job exists                           → ChainJobNotFoundError
 V2  Trigger Job has same user_id as caller       → ChainJobNotFoundError (404, not 403)
 V3  Trigger Job is not already fully terminated  → ChainJobTerminatedError
 V4  No cycle via trigger_on_job_id ancestry      → ChainCycleError
 V5  Chain depth ≤ 10 from new job through ancs   → ChainDepthError
+V6  trigger_on_job_id and cron_expr are mutually → ChainRunSourceError
+    exclusive run sources (ADR-065)
 
 V4 + V5 share one recursive CTE that walks ancestors of trigger_on_job_id.
+V6 is a synchronous pre-check called from create_job before V1-V5.
 """
 
 from __future__ import annotations
@@ -40,6 +43,36 @@ class ChainCycleError(Exception):
 
 class ChainDepthError(Exception):
     """V5: ancestor chain depth would exceed MAX_CHAIN_DEPTH including the new job."""
+
+
+class ChainRunSourceError(Exception):
+    """V6: trigger_on_job_id and cron_expr are mutually exclusive run sources (ADR-065).
+
+    A chained (trigger-driven) job carries no cron of its own; it recurs
+    because its trigger recurs (inherited recurrence).  Declaring both would
+    create a double-firing, half-broken job.
+    """
+
+
+def validate_run_source(
+    *,
+    trigger_on_job_id: int | None,
+    cron_expr: str | None,
+) -> None:
+    """V6: reject a job that declares both a cron_expr and a trigger_on_job_id.
+
+    These are mutually-exclusive run sources per ADR-065 (run-source dichotomy):
+    - Schedule-driven: cron_expr set, trigger_on_job_id absent.
+    - Trigger-driven:  trigger_on_job_id set, cron_expr absent (inherited recurrence).
+
+    Raises ChainRunSourceError when both are set.  No-ops otherwise.
+    This is a pure synchronous guard — no DB access required.
+    """
+    if trigger_on_job_id is not None and cron_expr:
+        raise ChainRunSourceError(
+            "trigger_on_job_id and cron_expr are mutually exclusive: "
+            "a chained job inherits recurrence from its trigger and must not carry its own cron."
+        )
 
 
 # Recursive CTE: walk ancestors of :start_id via trigger_on_job_id.
