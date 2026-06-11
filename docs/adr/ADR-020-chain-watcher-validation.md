@@ -171,6 +171,11 @@ service) inspect `trigger_on_job_id` relationships and create a fresh WAITING
 run for B whenever A's new run is scheduled.  This is flagged as "subject to
 revisit" per the W2 PRD scope decisions.
 
+> **Update (ADR-065, 2026-06-11).** This deferred "subscription" run source is now
+> implemented. The re-arm lives in the `RunMaterializer` (a fresh `WAITING`
+> downstream run per upstream run, cascading), not bolted onto `ChainWatcher` —
+> which stays a pure status flipper per ADR-033. See ADR-065.
+
 ---
 
 ## Transactional Outbox Atomicity

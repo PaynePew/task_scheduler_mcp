@@ -4,8 +4,19 @@
 **Date:** 2026-05-23  
 **Author:** Implementation Agent (issue #202)  
 **Amends:** ADR-033 (inter-handler data flow via `JobRun.result` + `from_run_id` convention)
+**Amended by:** ADR-065 (2026-06-11) — see correction note below
 
 ---
+
+> **Correction (ADR-065, 2026-06-11).** This ADR's premise is partly wrong and its
+> success claim was premature. The Context below states `wait_for_run_id` is
+> "auto-derived per tick … by `ChainWatcher`" — it is **not**: `wait_for_run_id` is
+> set once at job-create time, and `ChainWatcher` only flips status, never sets it.
+> The executor injection decided here is correct and stays in force, but it is only
+> the **data-plane** last mile. The **control plane** — re-arming a `WAITING`
+> downstream run per upstream tick — was never built, so the "daily digest works
+> end-to-end" claim under Consequences was false. The control-plane fix
+> (`RunMaterializer` + inherited recurrence) is **ADR-065**.
 
 ## Context
 

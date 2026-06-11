@@ -201,25 +201,43 @@ env secret.
 
 ## §7 Chaining & recurring
 
-### Chaining (linear only, no DAG)
+### `run source` — the single cause of a `JobRun`
 
-Set `Job.trigger_on_job_id` to make this `Job`'s runs wait for another `Job` to terminate. `Job.trigger_on_status` is one of:
+Every `JobRun` is materialized by exactly one **`run source`**. There are two kinds, and they are **mutually exclusive per `Job`**:
+
+- **`schedule-driven`** — runs come from a clock: `immediate`, `one-shot` (`scheduled_at`), or `recurring` (`cron_expr`). This is the *root* of a chain.
+- **`trigger-driven`** — runs come from another `Job`: one downstream run per upstream run, via `trigger_on_job_id`. A trigger-driven `Job` carries **no `cron_expr`** — see `inherited recurrence`.
+
+**`inherited recurrence`** — a chained (trigger-driven) `Job` recurs because *its trigger recurs*, never because it declares its own cron. Corollary: `trigger_on_job_id` and `cron_expr` are mutually exclusive on one `Job` (rejected at `task.create` with `USER_INPUT` — validation rule V6). Declaring both is the footgun that silently double-spawns a downstream.
+
+### `RunMaterializer` — the single owner of run creation
+
+All run creation routes through one stateless domain module (not a process), the **`RunMaterializer`**. It owns *what runs should exist and in what initial state*, and **arming the downstream is an internal, atomic step of materialization** — you cannot create a run without arming its downstream in the same transaction. This is what makes chain coordination structural rather than convention-based.
+
+- `create_job` → `materialize_initial` (first run: a scheduled run, or a `WAITING` run armed against the trigger's current run)
+- `RecurringJobWatcher` → `materialize_successor` (the next cron occurrence)
+- both, internally → `arm` (recursively)
+
+**`arm` / `re-arm`** — materializing a fresh `WAITING` downstream `JobRun` whose `wait_for_run_id` points at a specific upstream run. Done once per upstream run, cascading down the chain (and across `fan-out`). This is the **control plane**. `ChainWatcher` then flips `WAITING → PENDING/CANCELLED` (status only); the executor injects `from_run_id = wait_for_run_id` (the **data plane**, ADR-064). Three separate concerns: materialize *creates*, ChainWatcher *coordinates status*, executor *moves data* — never merged (ADR-033).
+
+### `trigger_on_status` — the flip predicate
 
 - `SUCCEEDED` — flip to `PENDING` only if blocker succeeded; else `CANCELLED`
 - `FAILED` — flip to `PENDING` only if blocker failed; else `CANCELLED`
-- `ANY` — flip to `PENDING` on any terminal status
+- `ANY` — flip to `PENDING` on any terminal status (including `CANCELLED`)
 
-The downstream `Job`'s initial `JobRun` is created with `status='WAITING'` and `wait_for_run_id` set. `ChainWatcher` flips it when the blocker terminates.
+Recommended **Design B**: `trigger_on_status=ANY` + downstream internal ok/error branching, so the sink always notifies (success or fallback). Do **not** create source-coupled handler classes like `slack_post_from_github_digest` — specialisation is via params, not class names (ADR-033).
 
-**Data flow in chained handlers** is a separate convention layered above `ChainWatcher`. See `chain-fed handler` and `inter-handler data plane` in §4, and ADR-033 for the full specification including the recommended Design B pattern (`trigger_on_status=ANY` + downstream internal ok-path/error-path branching) and the anti-pattern (do NOT create handlers like `slack_post_from_github_digest` — specialisation is via params, not class names).
+### `fan-out` vs `fan-in` (the real meaning of "no DAG")
 
-W1: schema in place. W2: `ChainWatcher` logic. W4: `from_run_id` convention + `upstream_reader` module.
+- **`fan-out`** — one upstream → many downstream (e.g. `llm_summarize → slack_post` **+** `email_send`). **Allowed.** Each downstream is its own linear chain off the shared upstream run, with its own `WAITING` run pointing at it.
+- **`fan-in`** — one downstream reading *many* upstreams (`from_run_ids: list[int]`). **Deferred** (ADR-033 future / ADR-040). This — not fan-out — is what "linear only, no DAG" excludes.
 
-### Recurring
+### `slow consumer`
 
-`Job.schedule_type='recurring'` + `Job.cron_expr` + `Job.timezone`. The system creates exactly one `JobRun` at a time. On terminal `RunEvent`, `RecurringJobWatcher` parses the cron expression to find the next occurrence and inserts the next `JobRun`.
+If an upstream produces runs faster than a downstream finishes, the overlapping downstream tick is **dropped** (load-shedding), preserving "at most one live `JobRun` per `Job`" — consistent with `RecurringJobWatcher`'s existing forbid-concurrency. The dropped tick's data is simply not consumed; the downstream catches the next idle tick.
 
-W1: schema + watcher skeleton. W2: cron expansion (using `croniter`).
+History: W1 schema; W2 `ChainWatcher` + cron expansion (`croniter`); W4 `from_run_id` convention + `upstream_reader`; the `RunMaterializer` + `inherited recurrence` model is ADR-065 (the realisation of the "subscription" run source ADR-020 deferred and ADR-064 mistakenly assumed already existed).
 
 ## §8 Operational vocab
 
