@@ -465,11 +465,10 @@ async def test_arm_respects_max_chain_depth():
         for i in range(1, n + 1)
     ]
 
-    # downstream_map: job i-1 → [job i] for i in 1..n; last job has no downstream.
-    # root is job_id=0 (the run we pass to _arm directly).
-    downstream_map: dict[int, list] = {}
-    for i in range(n):
-        downstream_map[i] = [jobs[i]] if i < n else []
+    # Linear chain: job_id i → job_id i+1 for i in 0..n-1; the last job (job_id n)
+    # has no downstream.  root is job_id=0 (the run we pass to _arm directly), and
+    # jobs[i] has job_id == i + 1 (the comprehension above runs over 1..n).
+    downstream_map: dict[int, list] = {i: [jobs[i]] for i in range(n)}
     downstream_map[n] = []
 
     root_run = JobRun()
