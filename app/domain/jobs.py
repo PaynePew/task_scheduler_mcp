@@ -24,7 +24,7 @@ from app.actions.registry import ACTION_REGISTRY
 from app.config.cron import next_after, validate_cron_expr
 from app.config.timezone_resolver import resolve_timezone
 from app.db.models import Job, JobRun, RunEvent
-from app.domain.chain_validation import validate_chain
+from app.domain.chain_validation import validate_chain, validate_run_source
 
 
 class UnknownActionError(Exception):
@@ -171,6 +171,11 @@ async def create_job(
             f"trigger_on_status must be one of {sorted(_VALID_TRIGGER_ON_STATUS)}, "
             f"got {trigger_on_status!r}"
         )
+
+    # V6: reject jobs that declare both a cron_expr and a trigger_on_job_id (ADR-065).
+    # Must run before cron parsing so the error is surfaced at the earliest opportunity
+    # and no DB state is written.
+    validate_run_source(trigger_on_job_id=trigger_on_job_id, cron_expr=cron_expr)
 
     if schedule_type == "recurring":
         if not cron_expr:
