@@ -1,7 +1,8 @@
 """Unit tests for app/domain/chain_validation.py.
 
-Tests V1-V5 validation rules and the _is_match helper in chain_watcher.
+Tests V1-V6 validation rules and the _is_match helper in chain_watcher.
 CTE-based V4/V5 tests use mock sessions that return pre-canned CTE results.
+V6 (validate_run_source) is a pure synchronous guard — no session needed.
 """
 
 from __future__ import annotations
