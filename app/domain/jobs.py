@@ -25,6 +25,7 @@ from app.config.cron import next_after, validate_cron_expr
 from app.config.timezone_resolver import resolve_timezone
 from app.db.models import Job, JobRun, RunEvent
 from app.domain.chain_validation import validate_chain, validate_run_source
+from app.domain.run_materializer import materialize_initial
 
 
 class UnknownActionError(Exception):
@@ -228,11 +229,6 @@ async def create_job(
                 trigger_on_job_id=trigger_on_job_id,
             )
 
-        # Hour-truncated partition key. See JobRun.time_bucket in db/models.py
-        # for the full rationale — it lets the watcher's hot query scan one
-        # bucket instead of the whole table.
-        time_bucket = run_at.replace(minute=0, second=0, microsecond=0).isoformat()
-
         effective_trigger_status = trigger_on_status or "SUCCEEDED"
 
         is_recurring = schedule_type == "recurring"
@@ -252,26 +248,11 @@ async def create_job(
         session.add(job)
         await session.flush()
 
-        initial_status = "WAITING" if wait_run is not None else "PENDING"
-        run = JobRun(
-            time_bucket=time_bucket,
-            job_id=job.job_id,
-            user_id=job.user_id,
-            scheduled_at=run_at,
-            status=initial_status,
-            wait_for_run_id=wait_run.run_id if wait_run is not None else None,
-        )
-        session.add(run)
-        await session.flush()
-
-        event = RunEvent(
-            run_id=run.run_id,
-            job_id=job.job_id,
-            event_type="CREATED",
-            status_from=None,
-            status_to=initial_status,
-        )
-        session.add(event)
+        # Delegate run creation to RunMaterializer (ADR-065).
+        # materialize_initial: PENDING for schedule-driven jobs, WAITING (armed
+        # against wait_run) for trigger-driven jobs. Emits CREATED RunEvent in
+        # the same transaction.
+        await materialize_initial(session, job, run_at=run_at, wait_run=wait_run)
 
     return job
 

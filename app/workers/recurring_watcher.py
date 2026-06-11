@@ -2,24 +2,26 @@
 
 Scans ``run_events`` for terminal events (SUCCEEDED / FAILED / CANCELLED) of
 jobs whose ``cron_expr IS NOT NULL``, stamps the ``processed_by`` JSONB cursor
-so the event is never reprocessed, and inserts the next PENDING ``JobRun``.
+so the event is never reprocessed, and inserts the next PENDING ``JobRun`` via
+``RunMaterializer.materialize_successor`` (ADR-065).
 
 Forbid-concurrency is intrinsic: terminal events drive spawning, so there is
 never more than one pending/running run for a recurring job at any time.
+Materialization also arms downstream WAITING runs in the same transaction,
+ensuring each tick of a recurring A produces a fresh WAITING run for chained B.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import UTC, datetime, timedelta
-from zoneinfo import ZoneInfo
+from datetime import UTC, datetime
 
-from sqlalchemy import exists, select, update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.config.cron import next_after
 from app.db.models import Job, JobRun, RunEvent
+from app.domain.run_materializer import ConcurrencyError, materialize_successor
 
 logger = logging.getLogger(__name__)
 
@@ -76,16 +78,10 @@ async def poll_once(
                         event.event_type,
                     )
                 else:
-                    tz = ZoneInfo(job.timezone or "UTC")
-                    # Anchor next-tick computation to max(occurred_at, prev_run.scheduled_at + 1µs).
-                    # The Watcher claims PENDING runs a few hundred ms before scheduled_at
-                    # (lookahead window), so a fast action can finish BEFORE its own
-                    # scheduled tick boundary. Using occurred_at alone in next_after()
-                    # (which has inclusive semantics) then re-spawns the SAME tick.
-                    # Clamping to prev_run.scheduled_at + 1µs guarantees we always
-                    # advance to a strictly later cron occurrence while preserving
-                    # the "skip missed ticks" behavior when occurred_at is well past
-                    # the scheduled tick (delayed-execution case).
+                    # Load prev_run to anchor the next-tick calculation.
+                    # Anchor: max(occurred_at, prev_run.scheduled_at + 1µs) — prevents
+                    # re-spawning the same tick when the action finishes BEFORE its own
+                    # scheduled_at (Watcher's lookahead window claims early).
                     prev_run = (
                         await session.execute(
                             select(JobRun).where(
@@ -94,64 +90,25 @@ async def poll_once(
                             )
                         )
                     ).scalar_one()
-                    anchor = max(
-                        event.occurred_at,
-                        prev_run.scheduled_at + timedelta(microseconds=1),
-                    )
-                    run_at = next_after(job.cron_expr, tz, anchor)
 
-                    # Forbid-concurrency pre-check (ADR-016 addendum): skip spawn
-                    # if a non-terminal run already exists for this job. Within the
-                    # same poll_once batch a prior iteration's flush (below) makes
-                    # its newly-inserted PENDING row visible to this check, so two
-                    # events that both compute the same run_at collapse to one spawn.
-                    already_live = (
-                        await session.execute(
-                            select(
-                                exists().where(
-                                    JobRun.job_id == job.job_id,
-                                    JobRun.status.in_(NON_TERMINAL_STATUSES),
-                                )
-                            )
+                    try:
+                        # materialize_successor: next cron occurrence + arm downstream
+                        # in the same transaction (ADR-065).
+                        # ConcurrencyError = non-terminal run already exists → same
+                        # skip semantics as the old already_live pre-check.
+                        await materialize_successor(
+                            session,
+                            job,
+                            prev_run=prev_run,
+                            occurred_at=event.occurred_at,
                         )
-                    ).scalar()
-
-                    if already_live:
+                    except ConcurrencyError:
                         logger.info(
                             "recurring_watcher: skipping spawn for job_id=%s"
                             " (non-terminal run already exists; run_id=%s event_type=%s)",
                             job.job_id,
                             event.run_id,
                             event.event_type,
-                        )
-                    else:
-                        time_bucket = run_at.replace(minute=0, second=0, microsecond=0).isoformat()
-
-                        new_run = JobRun(
-                            time_bucket=time_bucket,
-                            job_id=job.job_id,
-                            user_id=job.user_id,
-                            scheduled_at=run_at,
-                            status="PENDING",
-                        )
-                        session.add(new_run)
-                        await session.flush()
-
-                        new_event = RunEvent(
-                            run_id=new_run.run_id,
-                            job_id=job.job_id,
-                            event_type="CREATED",
-                        )
-                        session.add(new_event)
-
-                        logger.info(
-                            "recurring_watcher: spawned run_id=%s for job_id=%s"
-                            " scheduled_at=%s (cron=%r tz=%s)",
-                            new_run.run_id,
-                            job.job_id,
-                            run_at.isoformat(),
-                            job.cron_expr,
-                            job.timezone,
                         )
 
                 # Stamp the cursor so this event is never reprocessed on restart.
