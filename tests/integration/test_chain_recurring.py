@@ -500,3 +500,437 @@ async def test_non_chained_job_no_from_run_id_injection(session_factory, sqs):
     assert result["received_from_run_id"] is None, (
         f"expected no injection (None), got {result['received_from_run_id']}"
     )
+
+
+# ---------------------------------------------------------------------------
+# S2 / issue #226: full fan-out digest shape over multiple ticks
+# ---------------------------------------------------------------------------
+#
+# Topology mirrors the canonical daily-digest workflow from ADR-065:
+#
+#   root (job_id A, cron "@hourly") — the recurring source
+#    └─ mid  (job_id B, trigger_on_job_id=A, no cron) — e.g. llm_summarize
+#        ├─ sink1 (job_id C, trigger_on_job_id=B, no cron) — e.g. slack_post
+#        └─ sink2 (job_id D, trigger_on_job_id=B, no cron) — e.g. email_send
+#
+# Per-tick contract:
+#   1. Complete root's current run (SUCCEEDED).
+#   2. recurring_watcher: materialize_successor → PENDING root(next) + WAITING mid(next).
+#      _arm cascades: mid WAITING → arm sink1 WAITING + sink2 WAITING (same transaction).
+#   3. chain_watcher: flips mid WAITING → PENDING; then flips sink1/sink2 (after mid done).
+#   4. Execute mid; execute sink1 and sink2.
+#   5. Each run reads ITS OWN upstream result (mid reads this tick's root; sinks read mid).
+#
+# Three ticks are exercised.  Per-tick assertions:
+#   a. 1 PENDING root, 1 WAITING mid, 1 WAITING sink1, 1 WAITING sink2 armed per tick.
+#   b. mid.wait_for_run_id == root_run.run_id (current tick's root, not stale).
+#   c. sink*.wait_for_run_id == mid_run.run_id (current tick's mid, not stale).
+#   d. After execution, sink1 and sink2 both report received_from_run_id == mid_run.run_id.
+#
+# Self-healing (trigger_on_status=ANY): exercised because mid and sinks all use "ANY".
+
+
+async def _get_runs_by_status_and_job(
+    factory: async_sessionmaker,
+    job_id: int,
+    status: str,
+) -> list[JobRun]:
+    """Return all runs for a given job_id in the given status."""
+    async with factory() as session:
+        async with session.begin():
+            return (
+                (
+                    await session.execute(
+                        select(JobRun).where(
+                            JobRun.job_id == job_id,
+                            JobRun.status == status,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+
+
+async def _mark_run_succeeded(
+    factory: async_sessionmaker,
+    run: JobRun,
+    result: dict,
+) -> RunEvent:
+    """Mark a run SUCCEEDED and emit RunEvent. Returns committed RunEvent."""
+    now = datetime.now(tz=UTC)
+    async with factory() as session:
+        async with session.begin():
+            await session.execute(
+                update(JobRun)
+                .where(JobRun.run_id == run.run_id)
+                .values(status="SUCCEEDED", finish_at=now, result=json.dumps(result))
+            )
+            event = RunEvent(
+                run_id=run.run_id,
+                job_id=run.job_id,
+                event_type="SUCCEEDED",
+                status_from="RUNNING",
+                status_to="SUCCEEDED",
+                occurred_at=now,
+            )
+            session.add(event)
+            await session.flush()
+            event_id = event.event_id
+    async with factory() as session:
+        async with session.begin():
+            return (
+                await session.execute(select(RunEvent).where(RunEvent.event_id == event_id))
+            ).scalar_one()
+
+
+@pytest.mark.integration
+async def test_fan_out_digest_shape_refires_per_tick(session_factory, sqs):
+    """Full fan-out digest shape: root→mid→(sink1+sink2) re-fires end-to-end per tick.
+
+    S2 / issue #226 AC:
+    - Every tick produces runs at all four levels (root, mid, sink1, sink2).
+    - Fan-out: one mid run arms WAITING runs for BOTH sink1 and sink2.
+    - Each run reads its own tick's direct-upstream result (not a stale one).
+    - Self-healing: trigger_on_status=ANY on mid and sinks survives failure modes.
+    - No schema/API change (uses only existing Job fields).
+    """
+    now = datetime.now(tz=UTC)
+    initial_bucket = now.replace(minute=0, second=0, microsecond=0).isoformat()
+
+    # -----------------------------------------------------------------------
+    # Setup: 4 jobs — root (cron), mid, sink1, sink2 (all trigger-driven, no cron)
+    # -----------------------------------------------------------------------
+    async with session_factory() as session:
+        async with session.begin():
+            # Root: recurring cron job (the github_digest analogue)
+            job_root = Job(
+                user_id="fanout-digest-test",
+                description="root recurring (github_digest analogue)",
+                action="capturing_chain",
+                action_params={},
+                job_type="recurring",
+                cron_expr="@hourly",
+                timezone="UTC",
+            )
+            session.add(job_root)
+            await session.flush()
+
+            # Root's initial run (PENDING — completed per tick)
+            run_root0 = JobRun(
+                time_bucket=initial_bucket,
+                job_id=job_root.job_id,
+                user_id=job_root.user_id,
+                scheduled_at=now,
+                status="PENDING",
+            )
+            session.add(run_root0)
+            await session.flush()
+            session.add(
+                RunEvent(
+                    run_id=run_root0.run_id,
+                    job_id=job_root.job_id,
+                    event_type="CREATED",
+                    status_from=None,
+                    status_to="PENDING",
+                )
+            )
+
+            # Mid: trigger-driven off root (llm_summarize analogue); NO cron.
+            job_mid = Job(
+                user_id="fanout-digest-test",
+                description="mid trigger-driven (llm_summarize analogue)",
+                action="capturing_chain",
+                action_params={},
+                job_type="one_shot",
+                scheduled_at=now,
+                trigger_on_job_id=job_root.job_id,
+                trigger_on_status="ANY",
+            )
+            session.add(job_mid)
+            await session.flush()
+
+            # Mid's initial WAITING run (armed against root's first run)
+            run_mid0 = JobRun(
+                time_bucket=initial_bucket,
+                job_id=job_mid.job_id,
+                user_id=job_mid.user_id,
+                scheduled_at=now,
+                status="WAITING",
+                wait_for_run_id=run_root0.run_id,
+            )
+            session.add(run_mid0)
+            await session.flush()
+            session.add(
+                RunEvent(
+                    run_id=run_mid0.run_id,
+                    job_id=job_mid.job_id,
+                    event_type="CREATED",
+                    status_from=None,
+                    status_to="WAITING",
+                )
+            )
+
+            # Sink1: trigger-driven off mid (slack_post analogue); NO cron.
+            job_sink1 = Job(
+                user_id="fanout-digest-test",
+                description="sink1 (slack_post analogue)",
+                action="capturing_chain",
+                action_params={},
+                job_type="one_shot",
+                scheduled_at=now,
+                trigger_on_job_id=job_mid.job_id,
+                trigger_on_status="ANY",
+            )
+            session.add(job_sink1)
+            await session.flush()
+
+            # Sink2: trigger-driven off mid (email_send analogue); NO cron.
+            job_sink2 = Job(
+                user_id="fanout-digest-test",
+                description="sink2 (email_send analogue)",
+                action="capturing_chain",
+                action_params={},
+                job_type="one_shot",
+                scheduled_at=now,
+                trigger_on_job_id=job_mid.job_id,
+                trigger_on_status="ANY",
+            )
+            session.add(job_sink2)
+            await session.flush()
+
+            # Sink1 + sink2 initial WAITING runs (armed against mid's initial run)
+            run_sink1_0 = JobRun(
+                time_bucket=initial_bucket,
+                job_id=job_sink1.job_id,
+                user_id=job_sink1.user_id,
+                scheduled_at=now,
+                status="WAITING",
+                wait_for_run_id=run_mid0.run_id,
+            )
+            session.add(run_sink1_0)
+            await session.flush()
+            session.add(
+                RunEvent(
+                    run_id=run_sink1_0.run_id,
+                    job_id=job_sink1.job_id,
+                    event_type="CREATED",
+                    status_from=None,
+                    status_to="WAITING",
+                )
+            )
+
+            run_sink2_0 = JobRun(
+                time_bucket=initial_bucket,
+                job_id=job_sink2.job_id,
+                user_id=job_sink2.user_id,
+                scheduled_at=now,
+                status="WAITING",
+                wait_for_run_id=run_mid0.run_id,
+            )
+            session.add(run_sink2_0)
+            await session.flush()
+            session.add(
+                RunEvent(
+                    run_id=run_sink2_0.run_id,
+                    job_id=job_sink2.job_id,
+                    event_type="CREATED",
+                    status_from=None,
+                    status_to="WAITING",
+                )
+            )
+
+    # -----------------------------------------------------------------------
+    # Drive 3 ticks
+    # -----------------------------------------------------------------------
+    # Track per-tick run_ids for final cross-verification
+    root_run_ids: list[int] = []
+    mid_run_ids: list[int] = []
+    sink1_run_ids: list[int] = []
+    sink2_run_ids: list[int] = []
+
+    root_current = run_root0
+    mid_current_waiting = run_mid0
+
+    for tick in range(3):
+        # --- Step 1: complete root's current run ---
+        await _mark_run_succeeded(
+            session_factory,
+            root_current,
+            result={"tick": tick, "source": "root"},
+        )
+        root_run_ids.append(root_current.run_id)
+
+        # --- Step 2: chain_watcher flips mid WAITING→PENDING ---
+        # (root just succeeded, mid's WAITING run wait_for_run_id == root_current.run_id)
+        cw_count = await chain_poll_once(session_factory)
+        assert cw_count >= 1, f"tick {tick}: chain_watcher processed 0 events (mid flip)"
+
+        mid_pending = await _get_runs_by_status_and_job(session_factory, job_mid.job_id, "PENDING")
+        assert len(mid_pending) == 1, (
+            f"tick {tick}: expected exactly 1 PENDING mid run, got {len(mid_pending)}"
+        )
+        mid_current_pending = mid_pending[0]
+        assert mid_current_pending.run_id == mid_current_waiting.run_id, (
+            f"tick {tick}: expected mid run_id={mid_current_waiting.run_id} to be PENDING"
+        )
+
+        # --- Step 3: execute mid run ---
+        msg = _sqs_message(mid_current_pending.run_id, job_mid.job_id)
+        await process_one(session_factory, sqs, msg, registry=_REGISTRY)
+        mid_run_ids.append(mid_current_pending.run_id)
+
+        # Verify mid run SUCCEEDED and captured its upstream (root) run_id
+        async with session_factory() as session:
+            async with session.begin():
+                mid_done = (
+                    await session.execute(
+                        select(JobRun).where(JobRun.run_id == mid_current_pending.run_id)
+                    )
+                ).scalar_one()
+        assert mid_done.status == "SUCCEEDED", (
+            f"tick {tick}: mid run status={mid_done.status}, expected SUCCEEDED"
+        )
+        mid_result = json.loads(mid_done.result)
+        assert mid_result["received_from_run_id"] == root_current.run_id, (
+            f"tick {tick}: mid received from_run_id={mid_result['received_from_run_id']},"
+            f" expected root run_id={root_current.run_id}"
+        )
+
+        # --- Step 4: chain_watcher flips sink1 + sink2 WAITING→PENDING ---
+        # (mid just succeeded; both sinks WAITING on mid)
+        cw_count2 = await chain_poll_once(session_factory)
+        assert cw_count2 >= 1, f"tick {tick}: chain_watcher processed 0 events (sink flip)"
+
+        sink1_pending = await _get_runs_by_status_and_job(
+            session_factory, job_sink1.job_id, "PENDING"
+        )
+        sink2_pending = await _get_runs_by_status_and_job(
+            session_factory, job_sink2.job_id, "PENDING"
+        )
+        assert len(sink1_pending) == 1, (
+            f"tick {tick}: expected 1 PENDING sink1 run, got {len(sink1_pending)}"
+        )
+        assert len(sink2_pending) == 1, (
+            f"tick {tick}: expected 1 PENDING sink2 run, got {len(sink2_pending)}"
+        )
+
+        # --- Step 5: execute sink1 and sink2 ---
+        for sink_run, sink_job_id, sink_run_ids in [
+            (sink1_pending[0], job_sink1.job_id, sink1_run_ids),
+            (sink2_pending[0], job_sink2.job_id, sink2_run_ids),
+        ]:
+            msg = _sqs_message(sink_run.run_id, sink_job_id)
+            await process_one(session_factory, sqs, msg, registry=_REGISTRY)
+            sink_run_ids.append(sink_run.run_id)
+
+        # --- Step 6: recurring_watcher sees root's terminal event ---
+        # → materialize_successor spawns root(next) + arms mid(next) + sink1(next) + sink2(next)
+        rw_count = await recurring_poll_once(session_factory)
+        assert rw_count >= 1, f"tick {tick}: recurring_watcher processed 0 events"
+
+        if tick < 2:
+            # Verify new root PENDING run exists
+            new_root_pending = await _get_runs_by_status_and_job(
+                session_factory, job_root.job_id, "PENDING"
+            )
+            assert len(new_root_pending) == 1, (
+                f"tick {tick}: expected 1 new PENDING root run, got {len(new_root_pending)}"
+            )
+            root_current = new_root_pending[0]
+
+            # KEY: verify mid has a new WAITING run pointing at the new root run
+            new_mid_waiting = await _get_runs_by_status_and_job(
+                session_factory, job_mid.job_id, "WAITING"
+            )
+            assert len(new_mid_waiting) == 1, (
+                f"tick {tick}: expected 1 new WAITING mid run (from _arm cascade), "
+                f"got {len(new_mid_waiting)}.  _arm must cascade through root→mid."
+            )
+            mid_current_waiting = new_mid_waiting[0]
+            assert mid_current_waiting.wait_for_run_id == root_current.run_id, (
+                f"tick {tick}: mid WAITING run points at"
+                f" run_id={mid_current_waiting.wait_for_run_id},"
+                f" expected new root run_id={root_current.run_id}.  Cascade must be atomic."
+            )
+
+            # KEY: verify sink1 and sink2 both have new WAITING runs pointing at the new mid run
+            new_sink1_waiting = await _get_runs_by_status_and_job(
+                session_factory, job_sink1.job_id, "WAITING"
+            )
+            new_sink2_waiting = await _get_runs_by_status_and_job(
+                session_factory, job_sink2.job_id, "WAITING"
+            )
+            assert len(new_sink1_waiting) == 1, (
+                f"tick {tick}: expected 1 WAITING sink1 run, got {len(new_sink1_waiting)}."
+                "  Fan-out from mid must arm sink1."
+            )
+            assert len(new_sink2_waiting) == 1, (
+                f"tick {tick}: expected 1 WAITING sink2 run, got {len(new_sink2_waiting)}."
+                "  Fan-out from mid must arm sink2."
+            )
+            assert new_sink1_waiting[0].wait_for_run_id == mid_current_waiting.run_id, (
+                f"tick {tick}: sink1 points at run_id={new_sink1_waiting[0].wait_for_run_id},"
+                f" expected mid run_id={mid_current_waiting.run_id}"
+            )
+            assert new_sink2_waiting[0].wait_for_run_id == mid_current_waiting.run_id, (
+                f"tick {tick}: sink2 points at run_id={new_sink2_waiting[0].wait_for_run_id},"
+                f" expected mid run_id={mid_current_waiting.run_id}"
+            )
+
+    # -----------------------------------------------------------------------
+    # Final cross-verification: each sink run received ITS OWN tick's mid run_id
+    # -----------------------------------------------------------------------
+    async with session_factory() as session:
+        async with session.begin():
+            all_sink1_succeeded = (
+                (
+                    await session.execute(
+                        select(JobRun).where(
+                            JobRun.job_id == job_sink1.job_id,
+                            JobRun.status == "SUCCEEDED",
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            all_sink2_succeeded = (
+                (
+                    await session.execute(
+                        select(JobRun).where(
+                            JobRun.job_id == job_sink2.job_id,
+                            JobRun.status == "SUCCEEDED",
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+
+    assert len(all_sink1_succeeded) == 3, (
+        f"expected 3 SUCCEEDED sink1 runs (one per tick), got {len(all_sink1_succeeded)}"
+    )
+    assert len(all_sink2_succeeded) == 3, (
+        f"expected 3 SUCCEEDED sink2 runs (one per tick), got {len(all_sink2_succeeded)}"
+    )
+
+    sink1_by_id = {r.run_id: json.loads(r.result) for r in all_sink1_succeeded}
+    sink2_by_id = {r.run_id: json.loads(r.result) for r in all_sink2_succeeded}
+
+    for tick in range(3):
+        expected_mid_id = mid_run_ids[tick]
+
+        s1_result = sink1_by_id[sink1_run_ids[tick]]
+        assert s1_result["received_from_run_id"] == expected_mid_id, (
+            f"tick {tick}: sink1 run_id={sink1_run_ids[tick]} received "
+            f"from_run_id={s1_result['received_from_run_id']},"
+            f" expected mid run_id={expected_mid_id}"
+        )
+
+        s2_result = sink2_by_id[sink2_run_ids[tick]]
+        assert s2_result["received_from_run_id"] == expected_mid_id, (
+            f"tick {tick}: sink2 run_id={sink2_run_ids[tick]} received "
+            f"from_run_id={s2_result['received_from_run_id']},"
+            f" expected mid run_id={expected_mid_id}"
+        )
