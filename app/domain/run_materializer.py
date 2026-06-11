@@ -142,9 +142,10 @@ async def _arm(
     Then recurse for each newly created run (bounded by MAX_CHAIN_DEPTH).
 
     Runs inside the caller's transaction (atomic with the upstream insert).
-    ConcurrencyError from _spawn_run is logged and suppressed — a live downstream
-    run means the slow-consumer policy applies (ChainWatcher will cancel the stale
-    WAITING run when the upstream terminates).
+    ConcurrencyError from _spawn_run is logged and suppressed: if the downstream
+    already has a live (non-terminal) run, the at-most-one-live-run invariant
+    (ADR-016 addendum) forbids spawning a second WAITING run, so this tick's arm
+    for that downstream is skipped rather than failing the whole materialization.
     """
     if depth >= MAX_CHAIN_DEPTH:
         logger.warning(
@@ -185,7 +186,7 @@ async def _arm(
         except ConcurrencyError:
             logger.info(
                 "run_materializer: downstream job_id=%s already has a live run;"
-                " skipping arm for upstream run_id=%s (slow-consumer drop)",
+                " skipping arm for upstream run_id=%s (at-most-one-live-run)",
                 downstream.job_id,
                 upstream_run.run_id,
             )
