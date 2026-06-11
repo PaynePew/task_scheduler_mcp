@@ -153,6 +153,7 @@ async def create_job(
     Raises InvalidTimezoneError if timezone is not a valid IANA key.
     Raises InvalidScheduledAtError if scheduled_at is missing, unparseable, or past.
     Raises InvalidCronExprError if cron_expr is missing or invalid for recurring.
+    Raises ChainRunSourceError if both trigger_on_job_id and cron_expr are set (V6).
     Raises ChainJobNotFoundError / ChainJobTerminatedError / ChainCycleError /
         ChainDepthError when trigger_on_job_id fails V1-V5 validation.
     """
