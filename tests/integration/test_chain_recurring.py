@@ -1,7 +1,24 @@
-"""Integration tests for recurring-chain from_run_id auto-wiring (issue #202).
+"""Integration test: recurring chain re-fires on every upstream tick (ADR-065, issue #224).
 
-Verifies that executor auto-wires params.from_run_id = jobrun.wait_for_run_id
-for recurring chains where the caller left from_run_id unset at job create time.
+Exercises the real materialize → arm → ChainWatcher flip → executor inject path.
+NO faked downstream-run creation (the _insert_downstream_run seam is gone).
+
+Topology:
+  Job A: recurring (cron "@hourly") — the root; produces a result per tick.
+  Job B: trigger-driven (trigger_on_job_id=A, trigger_on_status="ANY") — NO cron.
+         (B recurs because A recurs; it must NOT carry its own cron_expr.)
+
+Per-tick flow:
+  1. Mark A's current run SUCCEEDED + emit RunEvent(SUCCEEDED).
+  2. RecurringJobWatcher.poll_once: sees terminal event on A, calls materialize_successor
+     which spawns a new PENDING A run AND arms a new WAITING B run (same transaction).
+  3. ChainWatcher.poll_once: flips B's WAITING→PENDING (trigger_on_status="ANY" matches).
+  4. executor.process_one(B_run): captures params.from_run_id from wait_for_run_id.
+  5. Assert B_run.result["received_from_run_id"] == that tick's A run_id.
+
+Regression assertions:
+  - One-shot chains: explicit from_run_id in action_params is NOT overwritten.
+  - Non-chained recurring: wait_for_run_id=None → no injection, from_run_id stays None.
 
 Run with:
     uv run pytest -m integration tests/integration/test_chain_recurring.py
@@ -15,14 +32,16 @@ from datetime import UTC, datetime, timedelta
 import pytest
 import pytest_asyncio
 from pydantic import BaseModel
-from sqlalchemy import select, text
+from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.actions.base import ActionResult
 from app.db.engine import create_async_engine
-from app.db.models import Job, JobRun
+from app.db.models import Job, JobRun, RunEvent
 from app.queue.sqs import SQSClient
+from app.workers.chain_watcher import poll_once as chain_poll_once
 from app.workers.executor import process_one
+from app.workers.recurring_watcher import poll_once as recurring_poll_once
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -74,6 +93,7 @@ class _CapturingHandler:
     name = "capturing_chain"
     params_model = _CaptureParams
     timeout_seconds = 10
+    requires_operator = False
 
     async def execute(self, run: JobRun, params: _CaptureParams) -> ActionResult:
         return ActionResult(
@@ -91,84 +111,82 @@ _REGISTRY = {"capturing_chain": _CapturingHandler()}
 # ---------------------------------------------------------------------------
 
 
-async def _insert_upstream_run(
+async def _complete_run(
     factory: async_sessionmaker,
-    *,
-    job: Job,
+    run: JobRun,
     result: dict,
-    scheduled_offset_seconds: int = 0,
-) -> JobRun:
-    """Insert an already-SUCCEEDED upstream JobRun with a given result."""
-    base = datetime.now(tz=UTC) - timedelta(hours=1)
-    scheduled = base + timedelta(seconds=scheduled_offset_seconds)
-    bucket = scheduled.replace(minute=0, second=0, microsecond=0).isoformat()
+) -> RunEvent:
+    """Mark a run SUCCEEDED + emit RunEvent(SUCCEEDED). Returns the committed event."""
+    now = datetime.now(tz=UTC)
     async with factory() as session:
         async with session.begin():
-            run = JobRun(
-                time_bucket=bucket,
-                job_id=job.job_id,
-                user_id=job.user_id,
-                scheduled_at=scheduled,
-                status="SUCCEEDED",
-                finish_at=datetime.now(tz=UTC),
-                result=json.dumps(result),
+            await session.execute(
+                update(JobRun)
+                .where(JobRun.run_id == run.run_id)
+                .values(status="SUCCEEDED", finish_at=now, result=json.dumps(result))
             )
-            session.add(run)
-    return run
-
-
-async def _insert_downstream_run(
-    factory: async_sessionmaker,
-    *,
-    job: Job,
-    wait_for_run_id: int,
-    scheduled_offset_seconds: int = 0,
-) -> JobRun:
-    """Insert a PENDING downstream JobRun that waits for wait_for_run_id.
-
-    Simulates what ChainWatcher produces after flipping WAITING → PENDING.
-    """
-    base = datetime.now(tz=UTC) - timedelta(hours=1)
-    scheduled = base + timedelta(seconds=scheduled_offset_seconds)
-    bucket = scheduled.replace(minute=0, second=0, microsecond=0).isoformat()
+            event = RunEvent(
+                run_id=run.run_id,
+                job_id=run.job_id,
+                event_type="SUCCEEDED",
+                status_from="RUNNING",
+                status_to="SUCCEEDED",
+                occurred_at=now,
+            )
+            session.add(event)
+            await session.flush()
+            event_id = event.event_id
     async with factory() as session:
         async with session.begin():
-            run = JobRun(
-                time_bucket=bucket,
-                job_id=job.job_id,
-                user_id=job.user_id,
-                scheduled_at=scheduled,
-                status="PENDING",
-                wait_for_run_id=wait_for_run_id,
+            return (
+                await session.execute(select(RunEvent).where(RunEvent.event_id == event_id))
+            ).scalar_one()
+
+
+async def _get_runs_by_status(
+    factory: async_sessionmaker, job_id: int, status: str
+) -> list[JobRun]:
+    async with factory() as session:
+        async with session.begin():
+            return (
+                (
+                    await session.execute(
+                        select(JobRun).where(
+                            JobRun.job_id == job_id,
+                            JobRun.status == status,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
             )
-            session.add(run)
-    return run
 
 
 # ---------------------------------------------------------------------------
-# Core test: 3 ticks, each B run sees its own A tick's run_id
+# Core test: 3 ticks — each B run reads its own tick's A run_id
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.integration
-async def test_recurring_chain_auto_wires_from_run_id_across_3_ticks(session_factory, sqs):
-    """Recurring chain: each downstream run receives the correct upstream run_id.
+async def test_recurring_chain_refires_per_tick_3_ticks(session_factory, sqs):
+    """Recurring A (cron) → chained B (NO cron): B refires on every A tick.
 
-    Job A: recurring upstream (produces structured result per tick)
-    Job B: recurring downstream, trigger_on_job_id=A, from_run_id NOT set at create time
-
-    After ChainWatcher flips each B run to PENDING (with wait_for_run_id=A_tick_N.run_id),
-    executor must inject params.from_run_id = jobrun.wait_for_run_id so each B tick
-    reads its own A tick — not a stale first-tick run_id.
+    Each B run must read its own tick's A run_id (not a stale first-tick run_id).
+    Uses the REAL materialize → arm → ChainWatcher flip → executor inject path.
+    B is constructed WITHOUT a cron_expr (inherited recurrence via trigger).
     """
     # -----------------------------------------------------------------------
-    # Setup: two recurring jobs
+    # Setup: create Job A (recurring) and Job B (trigger-driven, no cron)
+    # Job B has NO cron_expr; it recurs because A recurs.
     # -----------------------------------------------------------------------
+    now = datetime.now(tz=UTC)
+    initial_bucket = now.replace(minute=0, second=0, microsecond=0).isoformat()
+
     async with session_factory() as session:
         async with session.begin():
             job_a = Job(
                 user_id="chain-recurring-test",
-                description="upstream recurring",
+                description="upstream recurring A",
                 action="capturing_chain",
                 action_params={},
                 job_type="recurring",
@@ -178,81 +196,130 @@ async def test_recurring_chain_auto_wires_from_run_id_across_3_ticks(session_fac
             session.add(job_a)
             await session.flush()
 
-            # B has from_run_id absent (None) in action_params — the bug case
+            # A's initial run (PENDING — will be completed per tick)
+            run_a0 = JobRun(
+                time_bucket=initial_bucket,
+                job_id=job_a.job_id,
+                user_id=job_a.user_id,
+                scheduled_at=now,
+                status="PENDING",
+            )
+            session.add(run_a0)
+            await session.flush()
+            session.add(
+                RunEvent(
+                    run_id=run_a0.run_id,
+                    job_id=job_a.job_id,
+                    event_type="CREATED",
+                    status_from=None,
+                    status_to="PENDING",
+                )
+            )
+
+            # B is trigger-driven: NO cron_expr; it recurs because A recurs.
+            # job_type=one_shot because it has no cron. It requires scheduled_at.
             job_b = Job(
                 user_id="chain-recurring-test",
-                description="downstream recurring chain",
+                description="downstream trigger-driven B (no cron)",
                 action="capturing_chain",
-                action_params={},  # from_run_id intentionally absent
-                job_type="recurring",
-                cron_expr="@hourly",
-                timezone="UTC",
+                action_params={},
+                job_type="one_shot",
+                scheduled_at=now,  # required by DB constraint for one_shot
                 trigger_on_job_id=job_a.job_id,
                 trigger_on_status="ANY",
             )
             session.add(job_b)
+            await session.flush()
+
+            # B's initial WAITING run armed against A's first run.
+            # This is what materialize_initial (called from create_job) would create.
+            run_b0 = JobRun(
+                time_bucket=initial_bucket,
+                job_id=job_b.job_id,
+                user_id=job_b.user_id,
+                scheduled_at=now,
+                status="WAITING",
+                wait_for_run_id=run_a0.run_id,
+            )
+            session.add(run_b0)
+            await session.flush()
+            session.add(
+                RunEvent(
+                    run_id=run_b0.run_id,
+                    job_id=job_b.job_id,
+                    event_type="CREATED",
+                    status_from=None,
+                    status_to="WAITING",
+                )
+            )
 
     # -----------------------------------------------------------------------
-    # Tick 1: A produces result_1; B run waits for A's tick-1 run_id
+    # Drive 3 ticks
     # -----------------------------------------------------------------------
-    run_a1 = await _insert_upstream_run(
-        session_factory,
-        job=job_a,
-        result={"tick": 1, "issues_closed": 3},
-        scheduled_offset_seconds=0,
-    )
-    run_b1 = await _insert_downstream_run(
-        session_factory,
-        job=job_b,
-        wait_for_run_id=run_a1.run_id,
-        scheduled_offset_seconds=1,
-    )
+    a_run_ids_per_tick = []
+    b_run_ids_per_tick = []
 
-    # -----------------------------------------------------------------------
-    # Tick 2: different bucket (1 hour later offset)
-    # -----------------------------------------------------------------------
-    run_a2 = await _insert_upstream_run(
-        session_factory,
-        job=job_a,
-        result={"tick": 2, "issues_closed": 7},
-        scheduled_offset_seconds=3600,
-    )
-    run_b2 = await _insert_downstream_run(
-        session_factory,
-        job=job_b,
-        wait_for_run_id=run_a2.run_id,
-        scheduled_offset_seconds=3601,
-    )
+    a_current = run_a0
+    b_current_waiting = run_b0
 
-    # -----------------------------------------------------------------------
-    # Tick 3
-    # -----------------------------------------------------------------------
-    run_a3 = await _insert_upstream_run(
-        session_factory,
-        job=job_a,
-        result={"tick": 3, "issues_closed": 12},
-        scheduled_offset_seconds=7200,
-    )
-    run_b3 = await _insert_downstream_run(
-        session_factory,
-        job=job_b,
-        wait_for_run_id=run_a3.run_id,
-        scheduled_offset_seconds=7201,
-    )
+    for tick in range(3):
+        # Step 1: complete A's current run
+        await _complete_run(
+            session_factory,
+            a_current,
+            result={"tick": tick, "data": f"tick-{tick}"},
+        )
+        a_run_ids_per_tick.append(a_current.run_id)
 
-    # -----------------------------------------------------------------------
-    # Execute all three downstream runs via process_one
-    # -----------------------------------------------------------------------
-    for run_b in (run_b1, run_b2, run_b3):
-        msg = _sqs_message(run_b.run_id, job_b.job_id)
+        # Step 2: chain_watcher flips current B WAITING → PENDING
+        cw_count = await chain_poll_once(session_factory)
+        assert cw_count >= 1, f"tick {tick}: chain_watcher processed 0 events"
+
+        # Verify B's current run is now PENDING
+        b_pending_runs = await _get_runs_by_status(session_factory, job_b.job_id, "PENDING")
+        matching = [r for r in b_pending_runs if r.run_id == b_current_waiting.run_id]
+        assert len(matching) == 1, (
+            f"tick {tick}: expected run_id={b_current_waiting.run_id} to be PENDING,"
+            f" pending runs: {[r.run_id for r in b_pending_runs]}"
+        )
+        b_run_ids_per_tick.append(b_current_waiting.run_id)
+
+        # Step 3: execute B's run; capturing handler stores from_run_id in result
+        msg = _sqs_message(b_current_waiting.run_id, job_b.job_id)
         await process_one(session_factory, sqs, msg, registry=_REGISTRY)
 
+        # Step 4: recurring_watcher sees A's terminal event
+        #         → materialize_successor spawns A(next) + arms B(next) atomically
+        rw_count = await recurring_poll_once(session_factory)
+        assert rw_count >= 1, f"tick {tick}: recurring_watcher processed 0 events"
+
+        if tick < 2:
+            # Verify A has a new PENDING run
+            a_pending = await _get_runs_by_status(session_factory, job_a.job_id, "PENDING")
+            assert len(a_pending) == 1, (
+                f"tick {tick}: expected 1 new PENDING A run, got {len(a_pending)}"
+            )
+            # Verify B has a new WAITING run (created by _arm inside materialize_successor)
+            b_waiting = await _get_runs_by_status(session_factory, job_b.job_id, "WAITING")
+            assert len(b_waiting) == 1, (
+                f"tick {tick}: expected 1 new WAITING B run (from _arm), got {len(b_waiting)}. "
+                "This is the anti-pattern this test was written to catch — _arm must create it."
+            )
+            a_current = a_pending[0]
+            b_current_waiting = b_waiting[0]
+            # KEY assertion: each new B WAITING run points at the new A run (not stale)
+            assert b_current_waiting.wait_for_run_id == a_current.run_id, (
+                f"tick {tick}: B's wait_for_run_id={b_current_waiting.wait_for_run_id}"
+                f" != new A run_id={a_current.run_id}. "
+                "Arming must be atomic with the upstream run insert."
+            )
+
     # -----------------------------------------------------------------------
-    # Assert: each B run recorded the correct upstream run_id (not a stale one)
+    # Final assertion: each B run received its own tick's A run_id
     # -----------------------------------------------------------------------
     async with session_factory() as session:
         async with session.begin():
-            b_runs = (
+            b_succeeded = (
                 (
                     await session.execute(
                         select(JobRun).where(
@@ -265,22 +332,18 @@ async def test_recurring_chain_auto_wires_from_run_id_across_3_ticks(session_fac
                 .all()
             )
 
-    assert len(b_runs) == 3, f"expected 3 SUCCEEDED B runs, got {len(b_runs)}"
+    assert len(b_succeeded) == 3, f"expected 3 SUCCEEDED B runs, got {len(b_succeeded)}"
 
-    by_run_id = {r.run_id: json.loads(r.result) for r in b_runs}
-
-    assert by_run_id[run_b1.run_id]["received_from_run_id"] == run_a1.run_id, (
-        f"tick 1: expected from_run_id={run_a1.run_id}, "
-        f"got {by_run_id[run_b1.run_id]['received_from_run_id']}"
-    )
-    assert by_run_id[run_b2.run_id]["received_from_run_id"] == run_a2.run_id, (
-        f"tick 2: expected from_run_id={run_a2.run_id}, "
-        f"got {by_run_id[run_b2.run_id]['received_from_run_id']}"
-    )
-    assert by_run_id[run_b3.run_id]["received_from_run_id"] == run_a3.run_id, (
-        f"tick 3: expected from_run_id={run_a3.run_id}, "
-        f"got {by_run_id[run_b3.run_id]['received_from_run_id']}"
-    )
+    by_run_id = {r.run_id: json.loads(r.result) for r in b_succeeded}
+    for tick in range(3):
+        b_run_id = b_run_ids_per_tick[tick]
+        expected_a_id = a_run_ids_per_tick[tick]
+        received = by_run_id[b_run_id]["received_from_run_id"]
+        assert received == expected_a_id, (
+            f"tick {tick}: B run_id={b_run_id} received from_run_id={received},"
+            f" expected {expected_a_id} (this tick's A run). "
+            "Each B tick must read ITS OWN upstream A run_id."
+        )
 
 
 # ---------------------------------------------------------------------------
