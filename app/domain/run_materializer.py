@@ -45,7 +45,7 @@ import logging
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import exists, select
+from sqlalchemy import exists, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.cron import next_after
@@ -70,6 +70,47 @@ class ConcurrencyError(Exception):
     """
 
 
+_ADVISORY_LOCK_SQL = text("SELECT pg_advisory_xact_lock(:job_id)")
+"""Transaction-level advisory lock keyed by job_id (issue #237).
+
+Acquired before every check-then-write on the executing-run invariant so that
+concurrent sessions cannot both pass the non-locking SELECT and both insert a
+second executing run (the classic SELECT-then-act race).
+
+Lock-acquisition order (deadlock prevention):
+  - Spawn path (``_spawn_run`` called from ``materialize_successor`` and
+    ``_arm``): locks the job being spawned — depth-first top-down through the
+    chain (root first, then each downstream as ``_arm`` recurses). The lock on
+    the root is held for the entire transaction; downstream locks are nested
+    inside it. Since the chain is a DAG (no cycles — validated at create time
+    by V4/V5), there is no circular dependency in this path.
+  - Flip path (``ChainWatcher._flip_waiting_run``): locks only the single
+    downstream job being flipped. It never locks an upstream job.
+
+Because the flip path never holds an upstream lock, it cannot deadlock with
+the spawn path (spawn holds root, then acquires downstream; flip only acquires
+the downstream). Two concurrent ``_arm`` calls for the same chain both acquire
+locks depth-first: the first wins each lock sequentially; the second blocks and
+serializes safely.
+
+The Watcher claim query (``FOR UPDATE SKIP LOCKED`` on ``job_runs.status =
+'PENDING'``) is on a different table and different row-level lock mechanism;
+advisory locks do not interact with row-level locks, so the claim path is
+unchanged (ADR-007).
+"""
+
+
+async def _acquire_job_lock(session: AsyncSession, job_id: int) -> None:
+    """Acquire a transaction-scoped advisory lock for *job_id*.
+
+    Blocks until the lock is obtained; released automatically on COMMIT or
+    ROLLBACK. Callers must be inside an open transaction.
+
+    See ``_ADVISORY_LOCK_SQL`` for the full lock-ordering rationale.
+    """
+    await session.execute(_ADVISORY_LOCK_SQL, {"job_id": job_id})
+
+
 async def has_executing_run(session: AsyncSession, job_id: int) -> bool:
     """Return True if job_id has at least one *executing* run.
 
@@ -80,6 +121,9 @@ async def has_executing_run(session: AsyncSession, job_id: int) -> bool:
     Shared predicate for:
     - ``_spawn_run`` / ``RecurringJobWatcher`` (spawn-time forbid-concurrency); and
     - ``ChainWatcher`` (flip-time slow-consumer drop).
+
+    Callers must hold ``_acquire_job_lock(session, job_id)`` before calling
+    this function to prevent a non-locking SELECT-then-act race (issue #237).
     """
     result = await session.execute(
         select(
@@ -108,6 +152,10 @@ async def _spawn_run(
 
     Caller must be inside an open transaction.
     """
+    # Serialize per job: acquire the advisory lock before the executing-run check
+    # so concurrent sessions cannot both pass the SELECT-then-act (issue #237).
+    # See _ADVISORY_LOCK_SQL for the full lock-ordering rationale.
+    await _acquire_job_lock(session, job.job_id)
     # Forbid-concurrency: at most one executing run per job at any time (ADR-065 §4).
     if await has_executing_run(session, job.job_id):
         raise ConcurrencyError(

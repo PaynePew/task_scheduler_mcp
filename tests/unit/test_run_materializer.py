@@ -62,7 +62,14 @@ def _make_session(
     flushed_run_id=99,
     downstream_jobs=None,
 ):
-    """Build a mock async session that supports add/flush/execute."""
+    """Build a mock async session that supports add/flush/execute.
+
+    TextClause statements (pg_advisory_xact_lock calls, issue #237) are
+    returned a dummy result without advancing the call counter, so the
+    existing lock-check / downstream alternation is unchanged.
+    """
+    from sqlalchemy.sql.elements import TextClause
+
     session = AsyncMock()
 
     # Track objects added to the session
@@ -95,6 +102,10 @@ def _make_session(
     execute_call_count = [0]
 
     async def _execute(stmt, *args, **kwargs):
+        # Advisory lock calls (TextClause) pass through without advancing the counter.
+        if isinstance(stmt, TextClause):
+            dummy = MagicMock()
+            return dummy
         execute_call_count[0] += 1
         # First call is always the has_executing_run check (returns scalar bool)
         # Subsequent calls are downstream job queries
@@ -313,7 +324,12 @@ def _make_cascade_session(
     start_with_downstream: set True when the first execute call comes from
         _arm (downstream query) rather than _spawn_run (executing-run check).
         Use this when calling _arm() directly without a preceding _spawn_run.
+
+    TextClause statements (pg_advisory_xact_lock, issue #237) are passed
+    through without advancing the state machine.
     """
+    from sqlalchemy.sql.elements import TextClause
+
     session = AsyncMock()
 
     session._added = []
@@ -336,6 +352,10 @@ def _make_cascade_session(
     call_is_live_run = [not start_with_downstream]
 
     async def _execute(stmt, *args, **kwargs):
+        # Advisory lock calls (TextClause) pass through without advancing the state machine.
+        if isinstance(stmt, TextClause):
+            return MagicMock()
+
         if call_is_live_run[0]:
             # executing-run check: return False (no executing run — spawning always succeeds)
             call_is_live_run[0] = False
@@ -633,3 +653,88 @@ async def test_has_executing_run_builds_no_run_id_inequality():
     assert len(captured) == 1
     sql = str(captured[0].compile(compile_kwargs={"literal_binds": True}))
     assert "run_id !=" not in sql
+
+
+# ---------------------------------------------------------------------------
+# Advisory lock — per-job serialization (issue #237)
+# ---------------------------------------------------------------------------
+#
+# _spawn_run and _flip_waiting_run must acquire pg_advisory_xact_lock(job_id)
+# BEFORE the has_executing_run check so that concurrent sessions cannot both
+# pass the check and both write (the non-locking SELECT-then-act race).
+# Lock ordering: spawn locks jobs depth-first (root first, then downstream);
+# flip locks only the downstream job being flipped. No cross-lock nesting
+# between paths, so no deadlock is possible.
+
+
+def _make_capturing_session_with_lock_tracking(scalar_value: bool):
+    """Mock session that records ALL statements in order.
+
+    The order matters for #237: pg_advisory_xact_lock must appear BEFORE the
+    has_executing_run SELECT.  Statements are recorded with their type label
+    so tests can assert ordering.
+    """
+    from sqlalchemy.sql.elements import TextClause
+
+    session = AsyncMock()
+    ordered_calls: list[str] = []  # "lock:<job_id>" or "check" or "downstream"
+
+    scalar_result = MagicMock()
+    scalar_result.scalar.return_value = scalar_value
+
+    scalars_result = MagicMock()
+    scalars_result.scalars.return_value.all.return_value = []
+
+    async def _execute(stmt, *args, **kwargs):
+        if isinstance(stmt, TextClause):
+            # Parameters passed as positional dict: execute(text(...), {"job_id": n})
+            params = args[0] if args else kwargs.get("parameters", {}) or {}
+            ordered_calls.append(f"lock:{params.get('job_id', '?')}")
+            return MagicMock()
+        sql = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        if "pg_catalog.exists" in sql or "EXISTS" in sql.upper():
+            ordered_calls.append("check")
+            return scalar_result
+        ordered_calls.append("downstream")
+        return scalars_result
+
+    session.execute = _execute
+
+    async def _flush():
+        pass
+
+    session.flush = _flush
+    session._added = []
+    session.add = MagicMock(side_effect=lambda obj: session._added.append(obj))
+
+    return session, ordered_calls
+
+
+@pytest.mark.asyncio
+async def test_spawn_run_acquires_advisory_lock_before_concurrency_check():
+    """_spawn_run must acquire pg_advisory_xact_lock(job_id) before has_executing_run.
+
+    The lock serializes the check-then-write per job so two concurrent sessions
+    cannot both pass the check and both insert an executing run (issue #237).
+    """
+    job = _make_job(job_id=42, cron_expr="@hourly")
+    run_at = datetime.now(tz=UTC) + timedelta(hours=1)
+
+    session, calls = _make_capturing_session_with_lock_tracking(scalar_value=False)
+
+    await materialize_initial(session, job, run_at=run_at)
+
+    # The first call must be the advisory lock for job 42.
+    assert calls, "no execute calls recorded"
+    assert calls[0].startswith("lock:"), (
+        f"first execute call must be the advisory lock, got: {calls[0]!r}"
+    )
+    assert "42" in calls[0], f"advisory lock must use the job's job_id (42), got: {calls[0]!r}"
+    # The check must follow the lock.
+    check_idx = next((i for i, c in enumerate(calls) if c == "check"), None)
+    lock_idx = next((i for i, c in enumerate(calls) if c.startswith("lock:")), None)
+    assert lock_idx is not None, "no advisory lock call found"
+    assert check_idx is not None, "no has_executing_run check call found"
+    assert lock_idx < check_idx, (
+        f"advisory lock (pos {lock_idx}) must precede the executing-run check (pos {check_idx})"
+    )

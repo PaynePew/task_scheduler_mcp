@@ -30,7 +30,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db.models import Job, JobRun, RunEvent
-from app.domain.run_materializer import has_executing_run
+from app.domain.run_materializer import _acquire_job_lock, has_executing_run
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +65,12 @@ async def _flip_waiting_run(
     3. Match → PENDING with QUEUED_BY_CHAIN event.
     """
     # --- Slow-consumer check (flip-time has_executing_run predicate, ADR-065) ---
+    # Serialize per job: acquire the advisory lock before the executing-run check
+    # so concurrent watcher instances cannot both pass the SELECT-then-act (issue
+    # #237). The flip path only ever locks the downstream job; it never holds an
+    # upstream lock, so no deadlock with the spawn path is possible.
+    # See run_materializer._ADVISORY_LOCK_SQL for the full lock-ordering rationale.
+    await _acquire_job_lock(session, waiting_run.job_id)
     # The predicate counts only executing runs (PENDING/QUEUED/RUNNING/RETRYING);
     # this WAITING run is excluded by definition, so no exclude_run_id is needed.
     if await has_executing_run(session, waiting_run.job_id):
