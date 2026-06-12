@@ -56,18 +56,23 @@ async def _flip_waiting_run(
 ) -> None:
     """Flip one WAITING run to PENDING or CANCELLED and emit a RunEvent.
 
-    Decision tree:
-    1. Slow-consumer drop (ADR-065 §4): if the downstream job already has an
+    Decision tree (match evaluated before slow-consumer, ADR-020 / ADR-065 §4):
+    1. Trigger-status mismatch: if the upstream terminal event does not satisfy
+       ``trigger_on_status`` → CANCELLED with CANCELLED_BY_CHAIN_MISS.
+       (Busy-or-not is irrelevant — this run was never going to fire.)
+    2. Match + slow-consumer drop: if the downstream job already has an
        *executing* run, the upstream outpaced the downstream → drop this tick →
        CANCELLED with CANCELLED_SLOW_CONSUMER event.
-    2. Trigger-status mismatch (ADR-020): if the upstream terminal event does
-       not satisfy ``trigger_on_status`` → CANCELLED with CANCELLED_BY_CHAIN_MISS.
-    3. Match → PENDING with QUEUED_BY_CHAIN event.
+    3. Match + idle downstream → PENDING with QUEUED_BY_CHAIN event.
     """
-    # --- Slow-consumer check (flip-time has_executing_run predicate, ADR-065) ---
-    # The predicate counts only executing runs (PENDING/QUEUED/RUNNING/RETRYING);
-    # this WAITING run is excluded by definition, so no exclude_run_id is needed.
-    if await has_executing_run(session, waiting_run.job_id):
+    if not _is_match(trigger_job.trigger_on_status, event_type):
+        # Chain-miss verdict takes precedence — no need to check busy state.
+        new_status = "CANCELLED"
+        event_name = "CANCELLED_BY_CHAIN_MISS"
+    elif await has_executing_run(session, waiting_run.job_id):
+        # --- Slow-consumer drop (flip-time has_executing_run predicate, ADR-065) ---
+        # The predicate counts only executing runs (PENDING/QUEUED/RUNNING/RETRYING);
+        # this WAITING run is excluded by definition, so no exclude_run_id is needed.
         new_status = "CANCELLED"
         event_name = "CANCELLED_SLOW_CONSUMER"
         logger.info(
@@ -77,9 +82,8 @@ async def _flip_waiting_run(
             waiting_run.run_id,
         )
     else:
-        match = _is_match(trigger_job.trigger_on_status, event_type)
-        new_status = "PENDING" if match else "CANCELLED"
-        event_name = "QUEUED_BY_CHAIN" if match else "CANCELLED_BY_CHAIN_MISS"
+        new_status = "PENDING"
+        event_name = "QUEUED_BY_CHAIN"
 
     await session.execute(
         update(JobRun)
