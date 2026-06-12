@@ -306,7 +306,12 @@ def test_chain_error_codes_via_map_domain_error():
         (ChainJobTerminatedError(99), "INVALID_STATE", "trigger_on_job_id", None),
         (ChainCycleError(99), "USER_INPUT", "trigger_on_job_id", "non-circular chain"),
         (ChainDepthError(99), "USER_INPUT", "trigger_on_job_id", "chain depth ≤ 10"),
-        (ChainRunSourceError(), "USER_INPUT", "trigger_on_job_id", None),
+        (
+            ChainRunSourceError(),
+            "USER_INPUT",
+            "trigger_on_job_id",
+            "set only one of cron_expr or trigger_on_job_id",
+        ),
     ]
 
     for exc, expected_code, expected_field, expected_expected in cases:
@@ -358,3 +363,14 @@ def test_v6_error_maps_to_user_input():
     assert result["ok"] is False
     assert result["error"]["code"] == "USER_INPUT"
     assert result["error"]["field"] == "trigger_on_job_id"
+
+
+def test_v6_error_envelope_carries_expected_hint():
+    """V6 error envelope includes an 'expected' hint for LLM self-correction (like V1-V5)."""
+    from app.mcp.errors import map_domain_error
+
+    result = map_domain_error(ChainRunSourceError())
+    assert "expected" in result["error"], (
+        "V6 error envelope must carry an 'expected' hint for LLM self-correction"
+    )
+    assert result["error"]["expected"] == "set only one of cron_expr or trigger_on_job_id"

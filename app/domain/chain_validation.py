@@ -1,7 +1,7 @@
 """Chain-creation validation rules V1-V6 (ADR-020, ADR-065).
 
 Called from create_job.  Pure domain — no MCP knowledge.  Raises typed
-exceptions that map_domain_error (in app.mcp.errors) maps to the 6-code
+exceptions that map_domain_error (in app.mcp.errors) maps to the 7-code
 error vocabulary.
 
 V1  Trigger Job exists                           → ChainJobNotFoundError
