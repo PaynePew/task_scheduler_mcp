@@ -81,9 +81,7 @@ async def test_mismatch_and_busy_downstream_emits_chain_miss_not_slow_consumer()
 
     # Upstream event is FAILED → mismatch (trigger_on_status="SUCCEEDED")
     # Downstream IS busy (has_executing_run returns True)
-    with patch(
-        "app.workers.chain_watcher.has_executing_run", new=AsyncMock(return_value=True)
-    ):
+    with patch("app.workers.chain_watcher.has_executing_run", new=AsyncMock(return_value=True)):
         await _flip_waiting_run(
             session,
             waiting_run=waiting_run,
@@ -110,9 +108,7 @@ async def test_match_and_busy_downstream_emits_slow_consumer():
     now = datetime.now(tz=UTC)
 
     # Upstream event is SUCCEEDED → match; downstream IS busy
-    with patch(
-        "app.workers.chain_watcher.has_executing_run", new=AsyncMock(return_value=True)
-    ):
+    with patch("app.workers.chain_watcher.has_executing_run", new=AsyncMock(return_value=True)):
         await _flip_waiting_run(
             session,
             waiting_run=waiting_run,
@@ -137,9 +133,7 @@ async def test_match_and_idle_downstream_emits_queued_by_chain():
     session = _make_session()
     now = datetime.now(tz=UTC)
 
-    with patch(
-        "app.workers.chain_watcher.has_executing_run", new=AsyncMock(return_value=False)
-    ):
+    with patch("app.workers.chain_watcher.has_executing_run", new=AsyncMock(return_value=False)):
         await _flip_waiting_run(
             session,
             waiting_run=waiting_run,
@@ -164,9 +158,7 @@ async def test_mismatch_and_idle_downstream_emits_chain_miss():
     session = _make_session()
     now = datetime.now(tz=UTC)
 
-    with patch(
-        "app.workers.chain_watcher.has_executing_run", new=AsyncMock(return_value=False)
-    ):
+    with patch("app.workers.chain_watcher.has_executing_run", new=AsyncMock(return_value=False)):
         await _flip_waiting_run(
             session,
             waiting_run=waiting_run,
