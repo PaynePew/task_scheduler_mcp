@@ -11,11 +11,13 @@ Match logic (ADR-020):
   otherwise                         → CANCELLED (mismatch)
 
 Slow-consumer drop (ADR-065 §4):
-  When a match would flip WAITING → PENDING but the downstream job already has
-  another non-terminal run (i.e. it is still processing a prior tick), the
-  incoming tick is dropped: flip WAITING → CANCELLED instead, with a
-  CANCELLED_SLOW_CONSUMER RunEvent. The downstream is NOT left stuck WAITING;
-  it will receive the next idle tick's arm from RunMaterializer.
+  When a match would flip WAITING → PENDING but the downstream job already has an
+  *executing* run (i.e. it is still processing a prior tick), the incoming tick is
+  dropped: flip WAITING → CANCELLED instead, with a CANCELLED_SLOW_CONSUMER
+  RunEvent. This flip-time check is the single, audited load-shedding path —
+  arming is unconditional, so this is where overlap is resolved. The downstream is
+  NOT left stuck WAITING; it will receive the next idle tick's arm from
+  RunMaterializer.
 """
 
 from __future__ import annotations
@@ -28,7 +30,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db.models import Job, JobRun, RunEvent
-from app.domain.run_materializer import has_live_run
+from app.domain.run_materializer import has_executing_run
 
 logger = logging.getLogger(__name__)
 
@@ -55,23 +57,22 @@ async def _flip_waiting_run(
     """Flip one WAITING run to PENDING or CANCELLED and emit a RunEvent.
 
     Decision tree:
-    1. Slow-consumer drop (ADR-065 §4): if the downstream job already has
-       *another* non-terminal run (excluding this WAITING run itself), the
-       upstream outpaced the downstream → drop this tick → CANCELLED with
-       CANCELLED_SLOW_CONSUMER event.
+    1. Slow-consumer drop (ADR-065 §4): if the downstream job already has an
+       *executing* run, the upstream outpaced the downstream → drop this tick →
+       CANCELLED with CANCELLED_SLOW_CONSUMER event.
     2. Trigger-status mismatch (ADR-020): if the upstream terminal event does
        not satisfy ``trigger_on_status`` → CANCELLED with CANCELLED_BY_CHAIN_MISS.
     3. Match → PENDING with QUEUED_BY_CHAIN event.
     """
-    # --- Slow-consumer check (flip-time has_live_run predicate, ADR-065) ---
-    # Exclude the WAITING run itself from the live-run check: it is non-terminal
-    # by definition, but we only care whether there is a *different* live run.
-    if await has_live_run(session, waiting_run.job_id, exclude_run_id=waiting_run.run_id):
+    # --- Slow-consumer check (flip-time has_executing_run predicate, ADR-065) ---
+    # The predicate counts only executing runs (PENDING/QUEUED/RUNNING/RETRYING);
+    # this WAITING run is excluded by definition, so no exclude_run_id is needed.
+    if await has_executing_run(session, waiting_run.job_id):
         new_status = "CANCELLED"
         event_name = "CANCELLED_SLOW_CONSUMER"
         logger.info(
-            "chain_watcher: slow-consumer drop — downstream job_id=%s already has a live run;"
-            " run_id=%s WAITING→CANCELLED",
+            "chain_watcher: slow-consumer drop — downstream job_id=%s already has an"
+            " executing run; run_id=%s WAITING→CANCELLED",
             waiting_run.job_id,
             waiting_run.run_id,
         )

@@ -218,7 +218,7 @@ All run creation routes through one stateless domain module (not a process), the
 - `RecurringJobWatcher` → `materialize_successor` (the next cron occurrence)
 - both, internally → `arm` (recursively)
 
-**`arm` / `re-arm`** — materializing a fresh `WAITING` downstream `JobRun` whose `wait_for_run_id` points at a specific upstream run. Done once per upstream run, cascading down the chain (and across `fan-out`). This is the **control plane**. `ChainWatcher` then flips `WAITING → PENDING/CANCELLED` (status only); the executor injects `from_run_id = wait_for_run_id` (the **data plane**, ADR-064). Three separate concerns: materialize *creates*, ChainWatcher *coordinates status*, executor *moves data* — never merged (ADR-033).
+**`arm` / `re-arm`** — materializing a fresh `WAITING` downstream `JobRun` whose `wait_for_run_id` points at a specific upstream run. Done **once per upstream run, unconditionally** — even while the previous tick's downstream run is still in flight — cascading down the chain (and across `fan-out`). This is the **control plane**. `ChainWatcher` then flips `WAITING → PENDING/CANCELLED` (status only); the executor injects `from_run_id = wait_for_run_id` (the **data plane**, ADR-064). Three separate concerns: materialize *creates*, ChainWatcher *coordinates status*, executor *moves data* — never merged (ADR-033). Load-shedding is **not** an arm-time concern; the overlap is resolved later at flip time (see `slow consumer`).
 
 ### `trigger_on_status` — the flip predicate
 
@@ -235,7 +235,9 @@ Recommended **Design B**: `trigger_on_status=ANY` + downstream internal ok/error
 
 ### `slow consumer`
 
-If an upstream produces runs faster than a downstream finishes, the overlapping downstream tick is **dropped** (load-shedding), preserving "at most one live `JobRun` per `Job`" — consistent with `RecurringJobWatcher`'s existing forbid-concurrency. The dropped tick's data is simply not consumed; the downstream catches the next idle tick.
+If an upstream produces runs faster than a downstream finishes, the overlapping downstream tick is **dropped** (load-shedding), preserving the invariant **at most one *executing* `JobRun` per `Job`** — where *executing* means `PENDING` / `QUEUED` / `RUNNING` / `RETRYING`. A `WAITING` run armed for the next tick is **not** executing, so it may coexist with the current tick's executing (or not-yet-flipped `WAITING`) run; the shared `has_executing_run` predicate excludes `WAITING`. The drop happens at **flip time** (`ChainWatcher`: `WAITING → CANCELLED` with an audited `CANCELLED_SLOW_CONSUMER` event), which is the single load-shedding path — arming is unconditional. The dropped tick's data is simply not consumed; the downstream catches the next idle tick.
+
+> **Supersedes #227** (operator decision, 2026-06-12): the earlier wording was "at most one *live* (non-terminal) run", with a spawn-time forbid-concurrency check applied to **all** spawns. That let `re-arm` of tick N+1 silently fail with `ConcurrencyError` whenever tick N's downstream run was still live (the common case under concurrent watchers), so a chained downstream missed every other tick with no audit record. Counting only *executing* runs and routing all load-shedding through the flip-time drop fixes the race. A transient overlap of two `WAITING` runs (current tick not yet flipped + next tick just armed) is now expected, not a violation. See ADR-065 §4.
 
 History: W1 schema; W2 `ChainWatcher` + cron expansion (`croniter`); W4 `from_run_id` convention + `upstream_reader`; the `RunMaterializer` + `inherited recurrence` model is ADR-065 (the realisation of the "subscription" run source ADR-020 deferred and ADR-064 mistakenly assumed already existed).
 

@@ -101,12 +101,38 @@ rows.
 ### 4. Slow-consumer policy — drop (load-shedding)
 
 If an upstream outpaces a downstream, the overlapping downstream tick is **dropped**,
-preserving "at most one live `JobRun` per `Job`". Implemented via a shared
-`has_live_run(job)` predicate checked at **flip time** for trigger-driven jobs
-(`ChainWatcher`) and at **spawn time** for cron jobs (`RecurringWatcher`'s existing
-`already_live` guard). Dropped data is not consumed; the downstream catches the next
-idle tick. (For a daily digest, ticks are 24h apart and execution is seconds — this
-never triggers in practice; it is the safe degradation path.)
+preserving the invariant **at most one *executing* `JobRun` per `Job`** —
+`PENDING` / `QUEUED` / `RUNNING` / `RETRYING`. A `WAITING` run armed for the *next*
+tick is **not** executing, so it may coexist with the current tick's executing run.
+
+Implemented via the shared `has_executing_run(job)` predicate (executing statuses
+only — `WAITING` excluded):
+
+- **Spawn time** (cron roots, `RecurringWatcher` → `materialize_successor`): forbids a
+  second *executing* root run for the same scheduled tick.
+- **Flip time** (trigger-driven downstreams, `ChainWatcher`): when a `WAITING` run
+  would flip to `PENDING` but the downstream already has an executing run, the tick is
+  dropped — `WAITING → CANCELLED` with an audited `CANCELLED_SLOW_CONSUMER` event.
+
+Arming is therefore **unconditional per tick**: `materialize_successor` always creates
+the full `WAITING` cascade, even while the previous tick's downstream work is in flight.
+The flip-time drop is the single, *audited* load-shedding path. Because the spawn-time
+check no longer counts `WAITING`, the predicate needs no `exclude_run_id`.
+
+> **Correction (operator decision, 2026-06-12, supersedes #227):** the original wording
+> ("at most one *live* run", with the spawn-time check applied to all spawns) caused a
+> real race in production. Under concurrent watchers, `RecurringWatcher` arms tick N+1
+> within ≤ 5 s of the upstream's terminal event — while the downstream's tick-N run is
+> still live (`WAITING`, not yet flipped, or `PENDING`/`RUNNING`). The old `has_live_run`
+> counted that run and raised `ConcurrencyError`, so `_arm` silently skipped the entire
+> downstream subtree: the chain went dark every other tick, with no audit record. The
+> race competes against the **watcher poll phase**, not the 24 h tick interval — so the
+> earlier "never triggers in practice" claim was wrong. Redefining the invariant to count
+> only *executing* runs makes arming unconditional and routes all load-shedding through
+> the single audited flip-time drop. This **supersedes #227's literal AC** ("at no point
+> do two non-terminal runs exist for the same job"): a transient overlap of two `WAITING`
+> runs (the not-yet-flipped current tick + the newly armed next tick) is now expected and
+> is resolved by the same terminal event's flip.
 
 ---
 
