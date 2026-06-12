@@ -939,3 +939,246 @@ async def test_fan_out_digest_shape_refires_per_tick(session_factory, sqs):
             f"from_run_id={s2_result['received_from_run_id']},"
             f" expected mid run_id={expected_mid_id}"
         )
+
+
+async def _mark_run_failed(factory: async_sessionmaker, run: JobRun) -> RunEvent:
+    """Mark a run FAILED and emit RunEvent(FAILED). Returns the committed RunEvent."""
+    now = datetime.now(tz=UTC)
+    async with factory() as session:
+        async with session.begin():
+            await session.execute(
+                update(JobRun)
+                .where(JobRun.run_id == run.run_id)
+                .values(status="FAILED", finish_at=now)
+            )
+            event = RunEvent(
+                run_id=run.run_id,
+                job_id=run.job_id,
+                event_type="FAILED",
+                status_from="RUNNING",
+                status_to="FAILED",
+                occurred_at=now,
+            )
+            session.add(event)
+            await session.flush()
+            event_id = event.event_id
+    async with factory() as session:
+        async with session.begin():
+            return (
+                await session.execute(select(RunEvent).where(RunEvent.event_id == event_id))
+            ).scalar_one()
+
+
+@pytest.mark.integration
+async def test_fan_out_self_heals_on_failed_upstream_tick(session_factory, sqs):
+    """Self-healing (ADR-033): a FAILED upstream tick still drives the full downstream cascade.
+
+    S2 / issue #226 self-healing AC. The chain is wired trigger_on_status="ANY", so a FAILED
+    root must NOT stall the digest: chain_watcher flips the WAITING mid -> PENDING (ANY matches
+    FAILED — not left WAITING, not dropped), mid executes reading the *failed* root's run_id
+    (its error/fallback branch), and BOTH sinks then flip + run -> the sink still notifies.
+
+    Complements test_fan_out_digest_shape_refires_per_tick, which drives only the SUCCEEDED
+    path; this isolates the FAILED-upstream -> ANY -> cascade-completes behaviour end to end.
+    """
+    now = datetime.now(tz=UTC)
+    bucket = now.replace(minute=0, second=0, microsecond=0).isoformat()
+
+    async with session_factory() as session:
+        async with session.begin():
+            job_root = Job(
+                user_id="self-heal-test",
+                description="root recurring",
+                action="capturing_chain",
+                action_params={},
+                job_type="recurring",
+                cron_expr="@hourly",
+                timezone="UTC",
+            )
+            session.add(job_root)
+            await session.flush()
+
+            run_root0 = JobRun(
+                time_bucket=bucket,
+                job_id=job_root.job_id,
+                user_id=job_root.user_id,
+                scheduled_at=now,
+                status="PENDING",
+            )
+            session.add(run_root0)
+            await session.flush()
+            session.add(
+                RunEvent(
+                    run_id=run_root0.run_id,
+                    job_id=job_root.job_id,
+                    event_type="CREATED",
+                    status_from=None,
+                    status_to="PENDING",
+                )
+            )
+
+            job_mid = Job(
+                user_id="self-heal-test",
+                description="mid trigger-driven (ANY)",
+                action="capturing_chain",
+                action_params={},
+                job_type="one_shot",
+                scheduled_at=now,
+                trigger_on_job_id=job_root.job_id,
+                trigger_on_status="ANY",
+            )
+            session.add(job_mid)
+            await session.flush()
+
+            run_mid0 = JobRun(
+                time_bucket=bucket,
+                job_id=job_mid.job_id,
+                user_id=job_mid.user_id,
+                scheduled_at=now,
+                status="WAITING",
+                wait_for_run_id=run_root0.run_id,
+            )
+            session.add(run_mid0)
+            await session.flush()
+            session.add(
+                RunEvent(
+                    run_id=run_mid0.run_id,
+                    job_id=job_mid.job_id,
+                    event_type="CREATED",
+                    status_from=None,
+                    status_to="WAITING",
+                )
+            )
+
+            job_sink1 = Job(
+                user_id="self-heal-test",
+                description="sink1 (ANY)",
+                action="capturing_chain",
+                action_params={},
+                job_type="one_shot",
+                scheduled_at=now,
+                trigger_on_job_id=job_mid.job_id,
+                trigger_on_status="ANY",
+            )
+            session.add(job_sink1)
+            await session.flush()
+
+            job_sink2 = Job(
+                user_id="self-heal-test",
+                description="sink2 (ANY)",
+                action="capturing_chain",
+                action_params={},
+                job_type="one_shot",
+                scheduled_at=now,
+                trigger_on_job_id=job_mid.job_id,
+                trigger_on_status="ANY",
+            )
+            session.add(job_sink2)
+            await session.flush()
+
+            run_sink1_0 = JobRun(
+                time_bucket=bucket,
+                job_id=job_sink1.job_id,
+                user_id=job_sink1.user_id,
+                scheduled_at=now,
+                status="WAITING",
+                wait_for_run_id=run_mid0.run_id,
+            )
+            session.add(run_sink1_0)
+            run_sink2_0 = JobRun(
+                time_bucket=bucket,
+                job_id=job_sink2.job_id,
+                user_id=job_sink2.user_id,
+                scheduled_at=now,
+                status="WAITING",
+                wait_for_run_id=run_mid0.run_id,
+            )
+            session.add(run_sink2_0)
+            await session.flush()
+            session.add(
+                RunEvent(
+                    run_id=run_sink1_0.run_id,
+                    job_id=job_sink1.job_id,
+                    event_type="CREATED",
+                    status_from=None,
+                    status_to="WAITING",
+                )
+            )
+            session.add(
+                RunEvent(
+                    run_id=run_sink2_0.run_id,
+                    job_id=job_sink2.job_id,
+                    event_type="CREATED",
+                    status_from=None,
+                    status_to="WAITING",
+                )
+            )
+
+    # --- Root FAILS this tick ---
+    await _mark_run_failed(session_factory, run_root0)
+
+    # --- Self-heal: chain_watcher flips mid WAITING -> PENDING despite the FAILED root ---
+    await chain_poll_once(session_factory)
+    mid_pending = await _get_runs_by_status_and_job(session_factory, job_mid.job_id, "PENDING")
+    assert len(mid_pending) == 1, (
+        "self-heal: a FAILED root (trigger_on_status=ANY) must still flip mid "
+        f"WAITING->PENDING, got {len(mid_pending)} PENDING mid runs"
+    )
+    assert mid_pending[0].wait_for_run_id == run_root0.run_id
+
+    mid_waiting = await _get_runs_by_status_and_job(session_factory, job_mid.job_id, "WAITING")
+    assert len(mid_waiting) == 0, "mid must not be left stuck WAITING after a FAILED upstream"
+    mid_cancelled = await _get_runs_by_status_and_job(session_factory, job_mid.job_id, "CANCELLED")
+    assert len(mid_cancelled) == 0, "single cascade has no overlap — mid must not be dropped"
+
+    # --- mid executes, reading the FAILED root's run_id (its error/fallback branch) ---
+    await process_one(
+        session_factory,
+        sqs,
+        _sqs_message(mid_pending[0].run_id, job_mid.job_id),
+        registry=_REGISTRY,
+    )
+    async with session_factory() as session:
+        async with session.begin():
+            mid_done = (
+                await session.execute(select(JobRun).where(JobRun.run_id == mid_pending[0].run_id))
+            ).scalar_one()
+    assert mid_done.status == "SUCCEEDED", f"mid status={mid_done.status}, expected SUCCEEDED"
+    assert json.loads(mid_done.result)["received_from_run_id"] == run_root0.run_id, (
+        "mid must read the FAILED root's run_id (self-heal reads upstream for its fallback)"
+    )
+
+    # --- both sinks flip + run -> the sink still notifies despite the upstream failure ---
+    await chain_poll_once(session_factory)
+    sink1_pending = await _get_runs_by_status_and_job(session_factory, job_sink1.job_id, "PENDING")
+    sink2_pending = await _get_runs_by_status_and_job(session_factory, job_sink2.job_id, "PENDING")
+    assert len(sink1_pending) == 1 and len(sink2_pending) == 1, (
+        "self-heal: both sinks must be driven after a failed upstream tick "
+        f"(sink1={len(sink1_pending)}, sink2={len(sink2_pending)})"
+    )
+
+    for sink_run, sink_job_id in [
+        (sink1_pending[0], job_sink1.job_id),
+        (sink2_pending[0], job_sink2.job_id),
+    ]:
+        await process_one(
+            session_factory,
+            sqs,
+            _sqs_message(sink_run.run_id, sink_job_id),
+            registry=_REGISTRY,
+        )
+
+    async with session_factory() as session:
+        async with session.begin():
+            sink1_done = (
+                await session.execute(
+                    select(JobRun).where(JobRun.run_id == sink1_pending[0].run_id)
+                )
+            ).scalar_one()
+            sink2_done = (
+                await session.execute(
+                    select(JobRun).where(JobRun.run_id == sink2_pending[0].run_id)
+                )
+            ).scalar_one()
+    assert sink1_done.status == "SUCCEEDED", "sink1 must notify even when the upstream tick FAILED"
+    assert sink2_done.status == "SUCCEEDED", "sink2 must notify even when the upstream tick FAILED"
