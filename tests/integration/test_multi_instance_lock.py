@@ -108,13 +108,17 @@ async def _count_executing_runs(factory: async_sessionmaker, job_id: int) -> int
     async with factory() as session:
         async with session.begin():
             result = (
-                await session.execute(
-                    select(JobRun).where(
-                        JobRun.job_id == job_id,
-                        JobRun.status.in_(list(_EXECUTING)),
+                (
+                    await session.execute(
+                        select(JobRun).where(
+                            JobRun.job_id == job_id,
+                            JobRun.status.in_(list(_EXECUTING)),
+                        )
                     )
                 )
-            ).scalars().all()
+                .scalars()
+                .all()
+            )
     return len(result)
 
 
@@ -163,9 +167,7 @@ async def test_concurrent_spawn_attempts_produce_at_most_one_executing_run(
     await asyncio.gather(_try_spawn(), _try_spawn())
 
     # Exactly one of the two must have succeeded; the other must have been skipped.
-    assert outcomes.count("ok") == 1, (
-        f"expected exactly 1 spawn success, got outcomes={outcomes}"
-    )
+    assert outcomes.count("ok") == 1, f"expected exactly 1 spawn success, got outcomes={outcomes}"
     assert outcomes.count("skipped") == 1, (
         f"expected exactly 1 ConcurrencyError skip, got outcomes={outcomes}"
     )
@@ -280,8 +282,7 @@ async def test_concurrent_spawn_and_flip_produce_at_most_one_executing_run(
     # At most one executing run per downstream job.
     executing = await _count_executing_runs(session_factory, downstream.job_id)
     assert executing <= 1, (
-        f"at-most-one-executing-run invariant violated for downstream: "
-        f"{executing} executing runs"
+        f"at-most-one-executing-run invariant violated for downstream: {executing} executing runs"
     )
 
 

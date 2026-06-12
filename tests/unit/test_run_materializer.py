@@ -729,9 +729,7 @@ async def test_spawn_run_acquires_advisory_lock_before_concurrency_check():
     assert calls[0].startswith("lock:"), (
         f"first execute call must be the advisory lock, got: {calls[0]!r}"
     )
-    assert "42" in calls[0], (
-        f"advisory lock must use the job's job_id (42), got: {calls[0]!r}"
-    )
+    assert "42" in calls[0], f"advisory lock must use the job's job_id (42), got: {calls[0]!r}"
     # The check must follow the lock.
     check_idx = next((i for i, c in enumerate(calls) if c == "check"), None)
     lock_idx = next((i for i, c in enumerate(calls) if c.startswith("lock:")), None)
