@@ -17,7 +17,7 @@ import pytest
 from app.db.models import Job, JobRun
 from app.domain.run_materializer import (
     ConcurrencyError,
-    has_live_run,
+    has_executing_run,
     materialize_initial,
     materialize_successor,
 )
@@ -81,9 +81,9 @@ def _make_session(
 
     session.flush = _flush
 
-    # execute returns no-live-run by default (for forbid-concurrency check)
+    # execute returns no-executing-run by default (for forbid-concurrency check)
     scalar_result = MagicMock()
-    scalar_result.scalar.return_value = not no_live_run  # scalar() returns False = no live run
+    scalar_result.scalar.return_value = not no_live_run  # scalar() False = no executing run
 
     # For downstream jobs query
     if downstream_jobs is None:
@@ -96,9 +96,9 @@ def _make_session(
 
     async def _execute(stmt, *args, **kwargs):
         execute_call_count[0] += 1
-        # First call is always the has_live_run check (returns scalar bool)
+        # First call is always the has_executing_run check (returns scalar bool)
         # Subsequent calls are downstream job queries
-        if execute_call_count[0] % 2 == 1:  # odd calls = live-run check
+        if execute_call_count[0] % 2 == 1:  # odd calls = executing-run check
             return scalar_result
         else:  # even calls = downstream jobs
             return scalars_result
@@ -307,11 +307,11 @@ def _make_cascade_session(
         Maps each job_id to the list of downstream jobs that trigger on it.
         If a job_id has no entry, it has no downstream.
 
-    All has_live_run checks return False (no live run) so spawning always
-    succeeds.  flush() auto-assigns ascending run_ids.
+    All has_executing_run checks return False (no executing run) so spawning
+    always succeeds.  flush() auto-assigns ascending run_ids.
 
     start_with_downstream: set True when the first execute call comes from
-        _arm (downstream query) rather than _spawn_run (live-run check).
+        _arm (downstream query) rather than _spawn_run (executing-run check).
         Use this when calling _arm() directly without a preceding _spawn_run.
     """
     session = AsyncMock()
@@ -330,14 +330,14 @@ def _make_cascade_session(
 
     session.flush = _flush
 
-    # State machine: True = next execute is a live-run check; False = downstream-jobs query.
-    # When calling _spawn_run first, the first call is live-run check (start_with_downstream=False).
-    # When calling _arm directly (skipping _spawn_run for root), first call is downstream query.
+    # State machine: True = next execute is an executing-run check; False = downstream query.
+    # _spawn_run first → first call is the executing-run check (start_with_downstream=False).
+    # _arm directly (skipping _spawn_run for root) → first call is the downstream query.
     call_is_live_run = [not start_with_downstream]
 
     async def _execute(stmt, *args, **kwargs):
         if call_is_live_run[0]:
-            # live-run check: return False (no live run — spawning always succeeds)
+            # executing-run check: return False (no executing run — spawning always succeeds)
             call_is_live_run[0] = False
             result = MagicMock()
             result.scalar.return_value = False
@@ -557,32 +557,32 @@ async def test_materialize_successor_full_fanout_shape():
         )
 
 
-# has_live_run — public predicate (shared by ChainWatcher + _spawn_run)
+# has_executing_run — public predicate (shared by ChainWatcher + _spawn_run)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_has_live_run_returns_true_when_live_run_exists():
-    """has_live_run returns True when a non-terminal run exists for the job."""
-    session = _make_session(no_live_run=False)  # live run exists
-    result = await has_live_run(session, job_id=1)
+async def test_has_executing_run_returns_true_when_executing_run_exists():
+    """has_executing_run returns True when an executing run exists for the job."""
+    session = _make_session(no_live_run=False)  # executing run exists
+    result = await has_executing_run(session, job_id=1)
     assert result is True
 
 
 @pytest.mark.asyncio
-async def test_has_live_run_returns_false_when_no_live_run():
-    """has_live_run returns False when no non-terminal run exists."""
-    session = _make_session(no_live_run=True)  # no live run
-    result = await has_live_run(session, job_id=1)
+async def test_has_executing_run_returns_false_when_no_executing_run():
+    """has_executing_run returns False when no executing run exists."""
+    session = _make_session(no_live_run=True)  # no executing run
+    result = await has_executing_run(session, job_id=1)
     assert result is False
 
 
 def _make_capturing_session(scalar_value: bool):
     """Mock session that records the statement passed to execute().
 
-    Lets a test assert on the *compiled SQL* of the live-run query (i.e. that
-    the exclude_run_id clause is actually built) rather than only trusting a
-    canned scalar result — the statement itself is the seam under test.
+    Lets a test assert on the *compiled SQL* of the executing-run query (i.e. which
+    statuses it counts) rather than only trusting a canned scalar result — the
+    statement itself is the seam under test.
     """
     session = AsyncMock()
     captured: list = []
@@ -598,30 +598,36 @@ def _make_capturing_session(scalar_value: bool):
 
 
 @pytest.mark.asyncio
-async def test_has_live_run_with_exclude_run_id_adds_run_id_filter():
-    """has_live_run(exclude_run_id=X) builds a `run_id != X` clause in the query.
+async def test_has_executing_run_counts_only_executing_statuses_not_waiting():
+    """has_executing_run's SQL counts PENDING/QUEUED/RUNNING/RETRYING but NOT WAITING.
 
-    This is the predicate ChainWatcher uses: the WAITING run itself is non-terminal,
-    but we want to know if there is *another* live run besides it. Asserting on the
-    compiled SQL guards the exclusion — a test that only checks the (mocked) return
-    value would still pass if exclude_run_id were silently dropped.
+    The executing-only predicate is the heart of #234: a WAITING run armed for the
+    next tick must not be counted, so it can coexist with the current tick's run.
+    Asserting on the compiled SQL guards the status set — a test that only checks
+    the (mocked) return value would still pass if WAITING crept back in.
     """
     session, captured = _make_capturing_session(scalar_value=False)
 
-    result = await has_live_run(session, job_id=1, exclude_run_id=42)
+    result = await has_executing_run(session, job_id=1)
 
     assert result is False
     assert len(captured) == 1
     sql = str(captured[0].compile(compile_kwargs={"literal_binds": True}))
-    assert "job_runs.run_id != 42" in sql
+    for executing in ("'PENDING'", "'QUEUED'", "'RUNNING'", "'RETRYING'"):
+        assert executing in sql, f"{executing} must be counted as executing"
+    assert "'WAITING'" not in sql, "WAITING must NOT count as an executing run (#234)"
 
 
 @pytest.mark.asyncio
-async def test_has_live_run_without_exclude_omits_run_id_filter():
-    """has_live_run() with no exclude_run_id builds no run_id inequality clause."""
+async def test_has_executing_run_builds_no_run_id_inequality():
+    """has_executing_run filters by (job_id, status) only — no run_id exclusion.
+
+    The old predicate took an exclude_run_id to skip the WAITING run being flipped.
+    With WAITING no longer counted, that exclusion is unnecessary and removed.
+    """
     session, captured = _make_capturing_session(scalar_value=True)
 
-    result = await has_live_run(session, job_id=1)
+    result = await has_executing_run(session, job_id=1)
 
     assert result is True
     assert len(captured) == 1

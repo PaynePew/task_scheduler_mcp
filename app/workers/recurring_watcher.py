@@ -94,7 +94,7 @@ async def poll_once(
                     try:
                         # materialize_successor: next cron occurrence + arm downstream
                         # in the same transaction (ADR-065).
-                        # ConcurrencyError = non-terminal run already exists → same
+                        # ConcurrencyError = executing run already exists → same
                         # skip semantics as the old already_live pre-check.
                         await materialize_successor(
                             session,
@@ -105,7 +105,7 @@ async def poll_once(
                     except ConcurrencyError:
                         logger.info(
                             "recurring_watcher: skipping spawn for job_id=%s"
-                            " (non-terminal run already exists; run_id=%s event_type=%s)",
+                            " (executing run already exists; run_id=%s event_type=%s)",
                             job.job_id,
                             event.run_id,
                             event.event_type,

@@ -23,13 +23,17 @@ run-creation sites delegate here:
 ``_spawn_run(session, job, *, run_at, status, wait_for_run_id=None) → JobRun``
     The single low-level primitive: insert JobRun + emit CREATED RunEvent +
     derive time_bucket + forbid-concurrency check.  Raises ConcurrencyError
-    if a non-terminal run already exists for the job.
+    if an *executing* run already exists for the job.
 
 ``_arm(session, upstream_run, *, depth=0) → None``
     For each downstream job (trigger_on_job_id == upstream_run.job_id, not
     cancelled): _spawn_run a WAITING run with wait_for_run_id = upstream_run,
     then recurse (bounded by MAX_CHAIN_DEPTH).  Runs in the same transaction
-    as the upstream insert — atomicity is the caller's responsibility.
+    as the upstream insert — atomicity is the caller's responsibility.  Arming
+    is unconditional per tick: a freshly-armed WAITING run may coexist with the
+    previous tick's still-executing (or not-yet-flipped WAITING) downstream run.
+    Load-shedding happens later, at flip time (ChainWatcher), as a single audited
+    CANCELLED_SLOW_CONSUMER drop — see ADR-065 §4.
 
 Per ADR-033 and ADR-065, ChainWatcher (status coordination) and the executor
 (from_run_id injection) are unchanged.
@@ -50,43 +54,42 @@ from app.domain.chain_validation import MAX_CHAIN_DEPTH
 
 logger = logging.getLogger(__name__)
 
-# Non-terminal statuses that block a second spawn for the same job.
-_NON_TERMINAL = frozenset({"PENDING", "QUEUED", "WAITING", "RUNNING", "RETRYING"})
+# Executing statuses: a job may have at most one run in any of these at a time
+# (ADR-065 §4). WAITING is deliberately excluded — a WAITING run armed for the
+# next tick may coexist with the current tick's executing run; the flip-time
+# slow-consumer drop resolves the overlap.
+_EXECUTING = frozenset({"PENDING", "QUEUED", "RUNNING", "RETRYING"})
 
 
 class ConcurrencyError(Exception):
-    """Raised by _spawn_run when a live run already exists for the job.
+    """Raised by _spawn_run when an executing run already exists for the job.
 
-    ADR-016 addendum: at most one live JobRun per Job at any time.
-    The caller decides whether to skip or cancel the overlapping run.
+    ADR-065 §4: at most one *executing* run (PENDING/QUEUED/RUNNING/RETRYING)
+    per Job at any time. The caller decides whether to skip or cancel the
+    overlapping run.
     """
 
 
-async def has_live_run(
-    session: AsyncSession, job_id: int, *, exclude_run_id: int | None = None
-) -> bool:
-    """Return True if job_id has at least one non-terminal run.
+async def has_executing_run(session: AsyncSession, job_id: int) -> bool:
+    """Return True if job_id has at least one *executing* run.
 
-    When *exclude_run_id* is provided, that specific run is not counted — useful
-    when ``ChainWatcher`` wants to know whether a downstream job has a *different*
-    live run (i.e. one other than the WAITING run it is currently inspecting).
+    Executing = PENDING / QUEUED / RUNNING / RETRYING (WAITING excluded). A
+    WAITING run armed for the next tick does not count, so it may be created
+    while the current tick's run is still in flight (ADR-065 §4).
 
-    Used as the shared predicate for both:
+    Shared predicate for:
     - ``_spawn_run`` / ``RecurringJobWatcher`` (spawn-time forbid-concurrency); and
     - ``ChainWatcher`` (flip-time slow-consumer drop).
     """
-    clause = [
-        JobRun.job_id == job_id,
-        JobRun.status.in_(list(_NON_TERMINAL)),
-    ]
-    if exclude_run_id is not None:
-        clause.append(JobRun.run_id != exclude_run_id)
-    result = await session.execute(select(exists().where(*clause)))
+    result = await session.execute(
+        select(
+            exists().where(
+                JobRun.job_id == job_id,
+                JobRun.status.in_(list(_EXECUTING)),
+            )
+        )
+    )
     return bool(result.scalar())
-
-
-# Internal alias kept for backward-compat callers inside this module.
-_has_live_run = has_live_run
 
 
 async def _spawn_run(
@@ -100,15 +103,15 @@ async def _spawn_run(
     """Low-level primitive: insert JobRun + emit CREATED RunEvent.
 
     Derives time_bucket from run_at (hour-truncated ISO string, per ADR-009).
-    Checks forbid-concurrency: raises ConcurrencyError if job already has a
-    non-terminal run.
+    Checks forbid-concurrency: raises ConcurrencyError if job already has an
+    executing run.
 
     Caller must be inside an open transaction.
     """
-    # Forbid-concurrency: at most one live run per job at any time (ADR-016 addendum).
-    if await _has_live_run(session, job.job_id):
+    # Forbid-concurrency: at most one executing run per job at any time (ADR-065 §4).
+    if await has_executing_run(session, job.job_id):
         raise ConcurrencyError(
-            f"job_id={job.job_id} already has a non-terminal run; cannot spawn {status!r} run"
+            f"job_id={job.job_id} already has an executing run; cannot spawn {status!r} run"
         )
 
     time_bucket = run_at.replace(minute=0, second=0, microsecond=0).isoformat()
@@ -156,10 +159,11 @@ async def _arm(
     Then recurse for each newly created run (bounded by MAX_CHAIN_DEPTH).
 
     Runs inside the caller's transaction (atomic with the upstream insert).
-    ConcurrencyError from _spawn_run is logged and suppressed: if the downstream
-    already has a live (non-terminal) run, the at-most-one-live-run invariant
-    (ADR-016 addendum) forbids spawning a second WAITING run, so this tick's arm
-    for that downstream is skipped rather than failing the whole materialization.
+    Arming a WAITING run never raises ConcurrencyError under the executing-only
+    invariant (a WAITING run is not an executing run, so it can always be armed).
+    The suppression here is defensive: if some future caller arms a non-WAITING
+    status into an already-executing job, this tick's arm for that downstream is
+    skipped rather than failing the whole materialization.
     """
     if depth >= MAX_CHAIN_DEPTH:
         logger.warning(
@@ -199,8 +203,8 @@ async def _arm(
             await _arm(session, waiting_run, depth=depth + 1)
         except ConcurrencyError:
             logger.info(
-                "run_materializer: downstream job_id=%s already has a live run;"
-                " skipping arm for upstream run_id=%s (at-most-one-live-run)",
+                "run_materializer: downstream job_id=%s already has an executing run;"
+                " skipping arm for upstream run_id=%s (at-most-one-executing-run)",
                 downstream.job_id,
                 upstream_run.run_id,
             )
@@ -225,7 +229,7 @@ async def materialize_initial(
     needed at create time (the upstream is already live or running).
 
     Caller must be inside an open transaction.
-    Raises ConcurrencyError if a live run already exists for the job.
+    Raises ConcurrencyError if an executing run already exists for the job.
     """
     if wait_run is not None:
         # Trigger-driven: WAITING, armed against the upstream's most-recent run.
@@ -265,7 +269,7 @@ async def materialize_successor(
     runs in the same transaction.
 
     Caller must be inside an open transaction.
-    Raises ConcurrencyError if the root job already has a live run.
+    Raises ConcurrencyError if the root job already has an executing run.
     """
     tz = ZoneInfo(job.timezone or "UTC")
     anchor = max(

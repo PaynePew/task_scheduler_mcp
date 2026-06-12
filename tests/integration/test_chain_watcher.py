@@ -501,9 +501,11 @@ async def test_chain_watcher_does_not_reprocess_stamped_event(session_factory):
 
 
 # ---------------------------------------------------------------------------
-# Slow-consumer drop (ADR-065 §4, issue #227):
-# When a downstream job already has a live run, flip WAITING → CANCELLED
-# with CANCELLED_SLOW_CONSUMER instead of PENDING.
+# Slow-consumer drop (ADR-065 §4, issue #227; predicate revised by #234):
+# When a downstream job already has an *executing* run, flip WAITING → CANCELLED
+# with CANCELLED_SLOW_CONSUMER instead of PENDING.  These tests set the
+# overlapping executing run up directly to isolate the flip-time decision; the
+# overlap arising through the real arm path is covered in test_chain_concurrency.py.
 # ---------------------------------------------------------------------------
 
 
@@ -635,10 +637,11 @@ async def test_slow_consumer_drop_cancels_waiting_run(session_factory):
 
 @pytest.mark.integration
 async def test_slow_consumer_single_live_run_invariant(session_factory):
-    """At no point do two non-terminal runs for the same job coexist.
+    """At no point do two executing runs for the same job coexist.
 
-    After the slow-consumer drop, only one non-terminal run exists for Job B.
-    This is the RUNNING case — even stronger: a mid-execution run is protected.
+    After the slow-consumer drop, only one executing run exists for Job B (#234:
+    the invariant is now at-most-one-*executing*-run). This is the RUNNING case —
+    even stronger: a mid-execution run is protected.
     """
     scheduled = datetime.now(tz=UTC) - timedelta(hours=1)
 
@@ -715,8 +718,8 @@ async def test_slow_consumer_single_live_run_invariant(session_factory):
 
     await poll_once(session_factory)
 
-    # After the drop, count non-terminal runs for job B
-    _NON_TERMINAL_STATUSES = ("PENDING", "QUEUED", "WAITING", "RUNNING", "RETRYING")
+    # After the drop, count *executing* runs for job B (WAITING excluded — #234)
+    _EXECUTING_STATUSES = ("PENDING", "QUEUED", "RUNNING", "RETRYING")
     async with session_factory() as session:
         async with session.begin():
             live_runs = (
@@ -724,7 +727,7 @@ async def test_slow_consumer_single_live_run_invariant(session_factory):
                     await session.execute(
                         select(JobRun).where(
                             JobRun.job_id == job_b.job_id,
-                            JobRun.status.in_(list(_NON_TERMINAL_STATUSES)),
+                            JobRun.status.in_(list(_EXECUTING_STATUSES)),
                         )
                     )
                 )
@@ -732,12 +735,12 @@ async def test_slow_consumer_single_live_run_invariant(session_factory):
                 .all()
             )
 
-    # At most one non-terminal run for Job B at any time
+    # At most one executing run for Job B at any time
     assert len(live_runs) == 1, (
-        f"Expected at most 1 non-terminal run for job_b, got {len(live_runs)}: "
+        f"Expected at most 1 executing run for job_b, got {len(live_runs)}: "
         f"{[(r.run_id, r.status) for r in live_runs]}"
     )
-    # The surviving live run is the RUNNING one (not the dropped WAITING)
+    # The surviving executing run is the RUNNING one (not the dropped WAITING)
     assert live_runs[0].run_id == run_b_running.run_id
     assert live_runs[0].status == "RUNNING"
 
