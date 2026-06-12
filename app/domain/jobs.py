@@ -3,7 +3,7 @@
 Per ADR-010 this layer **knows nothing about MCP**. It accepts an
 ``AsyncSession``, mutates DB state, and raises domain exceptions. The MCP
 handlers in ``app.mcp.handlers`` wrap each call, map exceptions to the
-6-code error vocabulary, and shape the envelope.
+7-code error vocabulary, and shape the envelope.
 
 Anything that writes a status transition also writes a matching
 ``RunEvent`` *in the same transaction* — the transactional outbox pattern

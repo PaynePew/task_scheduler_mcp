@@ -112,6 +112,7 @@ def map_domain_error(exc: Exception) -> dict[str, Any]:
             "trigger_on_job_id and cron_expr are mutually exclusive: "
             "a chained job inherits recurrence from its trigger and must not carry its own cron.",
             field="trigger_on_job_id",
+            expected="set only one of cron_expr or trigger_on_job_id",
         )
     if isinstance(exc, ValueError):
         return error("USER_INPUT", str(exc))
