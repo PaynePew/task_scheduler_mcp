@@ -75,6 +75,7 @@ docker compose --profile full up -d   # 會重新讀取 env_file；restart 不�
 ```powershell
 Invoke-RestMethod http://localhost:8000/healthz
 # 期望：ok=True, db=connected, version=<git sha>
+#       （本地 build 的 version 常是 "unknown"，git sha 只在 VPS/prod build 注入；只要 ok=true、db=connected 就算過）
 
 Invoke-RestMethod http://localhost:8000/healthz/shed
 # 期望：ok=True, shed=False（沒有在 load shedding）
@@ -496,31 +497,34 @@ env = { MCP_USER_ID = "me", MCP_USER_TZ = "UTC" }
 ```toml
 [mcp_servers.task-scheduler]
 url = "http://localhost:8000/mcp"
-http_headers = { "X-User-Id" = "me" }
 ```
-或用指令加：
+或用指令加（已實測 `codex mcp add` 的 HTTP 形式支援 `--url`）：
 ```powershell
 codex mcp add task-scheduler --url http://localhost:8000/mcp
-# 再手動補 http_headers，trust-only 模式要靠 X-User-Id 帶身分
 ```
+> ⚠️ **修正（依實測 `codex mcp add --help`）**：Codex 的 HTTP MCP **不支援自訂 header**——只有 `--url` 與 `--bearer-token-env-var`（`--env` 明確「Only valid with stdio servers」）。所以**不要**寫 `http_headers = {...}`，那不是有效設定鍵。
+> 本地 **TrustOnly** 模式其實**不用帶 `X-User-Id`**：server 沒收到該 header 時會 fallback 到 mcp-server 容器自己的 `MCP_USER_ID`（本範本＝`me`），所以 Codex 走 HTTP 連進來就是以 `me` 身分操作。「每個 client 帶不同身分」才需要 header，本地這條路走不了——多租戶情境改用 7.3 的 hosted + WorkOS bearer。
 
 ### 7.3 Codex + Hosted（scheduler.paynepew.dev，WorkOS Bearer）
 
 ```toml
 [mcp_servers.task-scheduler]
 url = "https://scheduler.paynepew.dev/mcp"
-# 方式一：Codex 透過 RFC 9728 PRM 自動走 WorkOS OAuth（首次呼叫觸發）
-# 方式二：自己備一個 WorkOS JWT，放環境變數
-# bearer_token_env_var = "TASK_SCHEDULER_JWT"
+# 方式一（OAuth）：先 `codex mcp login task-scheduler`，Codex 透過 RFC 9728 PRM 走 WorkOS OAuth
+# 方式二（自備 JWT）：環境變數放一顆 WorkOS JWT，再用下面這行指定該 env var 名稱
+# bearer_token_env_var = "TASK_SCHEDULER_JWT"   # 對應 CLI flag --bearer-token-env-var
 ```
+> Codex 有 `codex mcp login / logout` 子指令；HTTP server 的身分驗證走 **bearer token**（`--bearer-token-env-var`），不是自訂 header。
 
 ### 7.4 Codex 串接驗證
+
+> ✅ **本機已驗證（2026-06-14）**：docker 全棧 Up；`codex mcp` 子指令（list/get/add/remove/login）皆在；直接對 `localhost:8000/mcp` 跑 MCP handshake（initialize→tools/list）回得到**正好 5 個 tool**。注意 `codex.exe` 可能不在 PATH（實際在 `…\AppData\Local\OpenAI\Codex\bin\codex.exe`），但在 Codex app 的整合終端機裡直接打 `codex` 即可。
 
 1. `codex mcp list` → 看到 `task-scheduler`。
 2. 在 Codex 對話輸入：「**list my scheduled tasks**」→ 它應呼叫 `task.list.v1` 並回你前面建立的 job。
 3. 「**schedule an echo task that says hi, immediately**」→ 應呼叫 `task.create.v1`，`status:"scheduled"`，~10 秒後查 `completed`。
 
-> 一樣受「user_id 三邊一致」規則約束：HTTP 用 `X-User-Id="me"`、stdio 用 `MCP_USER_ID="me"`，要和 `/connections` 授權時的身分相同，否則 OAuth action 會 `MISSING_CONNECTION`。
+> 一樣受「user_id 三邊一致」規則約束：身分要和 `/connections` 授權時相同，否則 OAuth action 會 `MISSING_CONNECTION`。stdio 用 `MCP_USER_ID="me"`；HTTP 一般用 `X-User-Id="me"` header，但 **Codex 的 HTTP 不送自訂 header**，靠 server 端容器的 `MCP_USER_ID="me"` fallback 同樣解析成 `me`（見 7.2 修正）。
 
 ---
 
