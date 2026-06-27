@@ -243,4 +243,4 @@ uv run pytest -m "not integration" && uv run pytest -m integration
 uv run ruff check . && uv run ruff format --check .
 ```
 
-For MCP Inspector against the stdio entrypoint, see [§3 Path C](#§3-how-to-use). Expected surface: **5 tools · 4 resources · 2 prompts** (W4 complete). Full click-through verification: [docs/W2-VERIFICATION.md](docs/W2-VERIFICATION.md).
+For MCP Inspector against the stdio entrypoint, see [§3 Path C](#§3-how-to-use). Expected surface: **5 tools · 4 resources · 2 prompts** (W4 complete). Full click-through verification: [docs/PRODUCTION-VERIFICATION.md](docs/PRODUCTION-VERIFICATION.md).
