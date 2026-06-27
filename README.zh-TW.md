@@ -264,4 +264,4 @@ uv run pytest -m integration               # 需要運行中的服務
 uv run ruff check . && uv run ruff format --check .
 ```
 
-MCP Inspector 對 stdio 入口的用法，請見 [§3 Path C](#§3-使用方式)。預期介面：**5 個工具 · 4 個資源 · 2 個提示詞**（W4 完成）。完整 11 步驟點選流程：[docs/W2-VERIFICATION.md](docs/W2-VERIFICATION.md)。
+MCP Inspector 對 stdio 入口的用法，請見 [§3 Path C](#§3-使用方式)。預期介面：**5 個工具 · 4 個資源 · 2 個提示詞**（W4 完成）。完整人工驗證流程：[docs/PRODUCTION-VERIFICATION.md](docs/PRODUCTION-VERIFICATION.md)。
