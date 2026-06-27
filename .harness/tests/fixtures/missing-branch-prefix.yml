@@ -1,3 +1,0 @@
-image: agent-harness:latest
-tracker:
-  type: github
