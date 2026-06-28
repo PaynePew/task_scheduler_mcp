@@ -1,0 +1,83 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="Task Scheduler MCP owl, perched on a pole at night">
+  <defs>
+    <linearGradient id="bodyGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#7A5236"/>
+      <stop offset="1" stop-color="#5A3A24"/>
+    </linearGradient>
+    <linearGradient id="headGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#85593A"/>
+      <stop offset="1" stop-color="#6A4528"/>
+    </linearGradient>
+    <linearGradient id="bellyGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#E3C893"/>
+      <stop offset="1" stop-color="#C7A06C"/>
+    </linearGradient>
+    <linearGradient id="poleGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#8A5E36"/>
+      <stop offset="1" stop-color="#5E3D20"/>
+    </linearGradient>
+  </defs>
+
+  <!-- pole -->
+  <rect x="22" y="192" width="212" height="15" rx="7.5" fill="url(#poleGrad)"/>
+  <rect x="22" y="192" width="212" height="5" rx="2.5" fill="#9C6E40" opacity="0.6"/>
+
+  <!-- tail (behind body, hanging over the pole) -->
+  <path d="M104 156 L88 214 L108 198 L120 212 L132 196 L122 152 Z" fill="#43301F"/>
+  <path d="M112 160 L106 196 M120 162 L122 194" stroke="#5A3A24" stroke-width="3" stroke-linecap="round" fill="none"/>
+
+  <!-- body -->
+  <ellipse cx="126" cy="126" rx="54" ry="62" fill="url(#bodyGrad)"/>
+  <!-- belly -->
+  <ellipse cx="140" cy="138" rx="33" ry="46" fill="url(#bellyGrad)"/>
+  <!-- belly speckles -->
+  <g fill="#A87F4E" opacity="0.55">
+    <ellipse cx="134" cy="118" rx="3" ry="4"/>
+    <ellipse cx="148" cy="126" rx="3" ry="4"/>
+    <ellipse cx="138" cy="138" rx="3" ry="4"/>
+    <ellipse cx="152" cy="146" rx="3" ry="4"/>
+    <ellipse cx="136" cy="158" rx="3" ry="4"/>
+    <ellipse cx="150" cy="166" rx="3" ry="4"/>
+  </g>
+
+  <!-- folded wing on the back/left -->
+  <path d="M110 92 C84 100 72 138 82 170 C86 184 98 190 108 184 C118 178 122 150 120 118 C119 102 116 94 110 92 Z" fill="#4A3122"/>
+  <path d="M104 108 C92 120 88 144 94 166 M114 110 C106 124 104 146 108 168" stroke="#5E3D24" stroke-width="3" stroke-linecap="round" fill="none"/>
+
+  <!-- legs + feet gripping the pole -->
+  <g stroke="#B06E2C" stroke-width="8" stroke-linecap="round" fill="none">
+    <path d="M118 178 L118 192"/>
+    <path d="M146 178 L146 192"/>
+  </g>
+  <g stroke="#C77B2C" stroke-width="5" stroke-linecap="round" fill="none">
+    <path d="M110 191 C108 200 112 205 118 203"/>
+    <path d="M118 192 L118 205"/>
+    <path d="M126 191 C128 200 124 205 118 203"/>
+    <path d="M138 191 C136 200 140 205 146 203"/>
+    <path d="M146 192 L146 205"/>
+    <path d="M154 191 C156 200 152 205 146 203"/>
+  </g>
+
+  <!-- head -->
+  <circle cx="128" cy="76" r="48" fill="url(#headGrad)"/>
+
+  <!-- ear tufts -->
+  <path d="M98 42 L84 14 L116 38 Z" fill="#43301F"/>
+  <path d="M158 38 L176 12 L144 40 Z" fill="#43301F"/>
+
+  <!-- facial disk (light face on the front-right) -->
+  <path d="M126 44 C156 42 178 60 178 84 C178 110 158 124 138 122 C122 120 116 100 118 78 C120 58 116 46 126 44 Z" fill="#EAD6AC"/>
+
+  <!-- brow -->
+  <path d="M124 58 C140 50 162 54 172 68" stroke="#4A3122" stroke-width="6" stroke-linecap="round" fill="none"/>
+
+  <!-- eye -->
+  <circle cx="150" cy="84" r="19" fill="#F4E9CD"/>
+  <circle cx="150" cy="84" r="13.5" fill="#C77B2C"/>
+  <circle cx="150" cy="84" r="7.5" fill="#241509"/>
+  <circle cx="153.5" cy="80.5" r="3" fill="#FFF7E6"/>
+
+  <!-- beak -->
+  <path d="M167 92 L184 98 L171 114 C164 112 162 100 167 92 Z" fill="#C77B2C"/>
+  <path d="M171 114 C167 113 164 107 165 102" stroke="#9A5A1C" stroke-width="2.5" stroke-linecap="round" fill="none"/>
+</svg>

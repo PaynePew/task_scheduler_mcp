@@ -3,37 +3,263 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="description" content="ChatGPT Task Scheduler — a self-hostable MCP server for scheduling and managing tasks." />
-  <title>ChatGPT Task Scheduler</title>
+  <meta name="description" data-en="Task Scheduler MCP — a self-hostable MCP server that lets your LLM client schedule, chain, and cancel recurring tasks, backed by Postgres + SQS." data-zh="Task Scheduler MCP — 一個可自架的 MCP 伺服器，讓你的 LLM 客戶端排程、串接、取消週期性任務，由 Postgres + SQS 驅動。" content="Task Scheduler MCP — a self-hostable MCP server that lets your LLM client schedule, chain, and cancel recurring tasks, backed by Postgres + SQS." />
+  <meta name="theme-color" content="#F3EADA" />
+  <meta property="og:type" content="website" />
+  <meta property="og:url" content="https://scheduler.paynepew.dev/" />
+  <meta property="og:title" content="Task Scheduler MCP" />
+  <meta property="og:description" content="A self-hostable MCP server that lets your LLM client schedule, chain, and cancel recurring tasks." />
+  <meta property="og:image" content="https://scheduler.paynepew.dev/og-image.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="Task Scheduler MCP" />
+  <meta name="twitter:description" content="A self-hostable MCP server that lets your LLM client schedule, chain, and cancel recurring tasks." />
+  <meta name="twitter:image" content="https://scheduler.paynepew.dev/og-image.png" />
+  <title>Task Scheduler MCP</title>
+  <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+  <link rel="apple-touch-icon" href="favicon.svg" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
+  <header class="site-header">
+    <a class="brand" href="/" aria-label="Task Scheduler MCP home">
+      <img src="owl.svg" alt="" width="40" height="40" class="brand-mark" />
+      <span class="brand-name">Task&nbsp;Scheduler<span class="brand-mcp">MCP</span></span>
+    </a>
+    <nav class="site-nav" aria-label="Primary">
+      <a href="#what" data-en="Overview" data-zh="總覽">Overview</a>
+      <a href="#quickstart" data-en="Quickstart" data-zh="快速開始">Quickstart</a>
+      <a href="#surface" data-en="What it does" data-zh="功能">What it does</a>
+      <a href="https://github.com/PaynePew/task_scheduler_mcp">GitHub</a>
+    </nav>
+    <div class="lang" role="group" aria-label="Language / 語言">
+      <button type="button" class="lang-btn" data-lang="en">EN</button>
+      <button type="button" class="lang-btn" data-lang="zh">中</button>
+    </div>
+  </header>
+
   <main>
+    <!-- HERO -->
     <section class="hero">
-      <img
-        src="hero.gif"
-        alt="ChatGPT Task Scheduler demo"
-        class="hero-gif"
-        onerror="this.style.display='none'"
-      />
-      <h1>ChatGPT Task Scheduler</h1>
-      <p class="tagline">
-        A self-hostable scheduler MCP — schedule, chain, and manage tasks from
-        Claude Desktop, Cursor, or any MCP client. Backed by Postgres&nbsp;+&nbsp;SQS.
-      </p>
-      <nav class="ctas">
-        <a href="https://github.com/PaynePew/chatgpt_task" class="btn btn-primary">GitHub source</a>
-        <a href="https://github.com/PaynePew/chatgpt_task#readme" class="btn">README</a>
-        <a href="/healthz" class="btn">Status</a>
-      </nav>
+      <div class="hero-copy">
+        <p class="kicker" data-en="Self-hostable MCP server" data-zh="可自架的 MCP 伺服器">Self-hostable MCP server</p>
+        <h1 class="hero-title">Task Scheduler <span class="accent">MCP</span></h1>
+        <p class="hero-tagline"
+           data-en="Schedule, chain, and cancel recurring tasks straight from your LLM client. A persistent HTTP service backed by Postgres + SQS — it keeps firing jobs long after the chat window is closed."
+           data-zh="直接從你的 LLM 客戶端排程、串接、取消週期性任務。一個由 Postgres + SQS 驅動的常駐 HTTP 服務 — 即使聊天視窗關掉，它仍會持續執行你的任務。">
+          Schedule, chain, and cancel recurring tasks straight from your LLM client. A persistent HTTP service backed by Postgres + SQS — it keeps firing jobs long after the chat window is closed.
+        </p>
+        <ul class="stats" aria-label="MCP surface">
+          <li><b>5</b><span data-en="tools" data-zh="工具">tools</span></li>
+          <li><b>7</b><span data-en="actions" data-zh="動作">actions</span></li>
+          <li><b>4</b><span data-en="resources" data-zh="資源">resources</span></li>
+          <li><b>2</b><span data-en="prompts" data-zh="提示">prompts</span></li>
+        </ul>
+        <div class="cta-row">
+          <a class="btn btn-primary" href="#quickstart" data-en="Quickstart" data-zh="快速開始">Quickstart</a>
+          <a class="btn" href="https://github.com/PaynePew/task_scheduler_mcp">GitHub</a>
+          <a class="btn btn-ghost" href="https://status.paynepew.dev" data-en="Live status" data-zh="服務狀態">Live status</a>
+        </div>
+      </div>
+      <div class="hero-art" aria-hidden="true">
+        <div class="moon-disc">
+          <img src="owl.svg" alt="" width="300" height="300" class="hero-owl" />
+        </div>
+      </div>
+    </section>
+
+    <!-- OVERVIEW / CLIENTS -->
+    <section id="what" class="band">
+      <div class="wrap">
+        <p class="eyebrow" data-en="Who &amp; where" data-zh="對象與環境">Who &amp; where</p>
+        <h2 data-en="Built for developers who run their own jobs" data-zh="為自行管理任務的開發者打造">Built for developers who run their own jobs</h2>
+        <p class="lead"
+           data-en="Drive your own webhooks and APIs on a schedule, in plain language, with an audit trail that outlives the chat session. Connect any MCP-speaking client over a stable HTTP endpoint."
+           data-zh="用自然語言，按排程驅動你自己的 webhook 與 API，並保留比聊天會話更長久的稽核紀錄。透過穩定的 HTTP 端點，連接任何支援 MCP 的客戶端。">
+          Drive your own webhooks and APIs on a schedule, in plain language, with an audit trail that outlives the chat session. Connect any MCP-speaking client over a stable HTTP endpoint.
+        </p>
+        <div class="client-row">
+          <span class="client-label" data-en="Works with" data-zh="支援">Works with</span>
+          <span class="chip">Claude Desktop</span>
+          <span class="chip">Cursor</span>
+          <span class="chip">Claude in Chrome</span>
+          <span class="chip">MCP Inspector</span>
+        </div>
+        <p class="fineprint"
+           data-en="Not ChatGPT — Custom GPT Actions aren't the MCP protocol."
+           data-zh="不支援 ChatGPT — Custom GPT Actions 並非 MCP 協定。">
+          Not ChatGPT — Custom GPT Actions aren't the MCP protocol.
+        </p>
+      </div>
+    </section>
+
+    <!-- QUICKSTART -->
+    <section id="quickstart" class="band band-alt">
+      <div class="wrap">
+        <p class="eyebrow" data-en="Quickstart" data-zh="快速開始">Quickstart</p>
+        <h2 data-en="Hosted path — try it in two minutes" data-zh="託管路徑 — 兩分鐘上手">Hosted path — try it in two minutes</h2>
+        <p class="lead"
+           data-en="Zero install. Point your MCP client at the hosted endpoint and sign in. Prefer to run it yourself? Self-host over HTTP or stdio — the README has the full guide."
+           data-zh="零安裝。把你的 MCP 客戶端指向託管端點並登入即可。想自己跑？可用 HTTP 或 stdio 自架 — 完整指南見 README。">
+          Zero install. Point your MCP client at the hosted endpoint and sign in. Prefer to run it yourself? Self-host over HTTP or stdio — the README has the full guide.
+        </p>
+
+        <ol class="steps">
+          <li class="step">
+            <div class="step-no">1</div>
+            <div class="step-body">
+              <h3 data-en="Add the server to your MCP client config" data-zh="將伺服器加入 MCP 客戶端設定">Add the server to your MCP client config</h3>
+              <pre class="code"><span class="code-tab">claude_desktop_config.json</span><code>{ "mcpServers": { "task-scheduler": {
+  "url": <span class="s">"https://scheduler.paynepew.dev/mcp"</span>,
+  "transport": <span class="s">"streamable-http"</span>
+}}}</code></pre>
+            </div>
+          </li>
+          <li class="step">
+            <div class="step-no">2</div>
+            <div class="step-body">
+              <h3 data-en="Restart the client and sign in" data-zh="重啟客戶端並登入">Restart the client and sign in</h3>
+              <p data-en="The first tool call opens a WorkOS sign-in flow. Approve it once and your client is authenticated."
+                 data-zh="第一次呼叫工具會開啟 WorkOS 登入流程。核准一次後，你的客戶端即完成認證。">
+                The first tool call opens a WorkOS sign-in flow. Approve it once and your client is authenticated.
+              </p>
+            </div>
+          </li>
+          <li class="step">
+            <div class="step-no">3</div>
+            <div class="step-body">
+              <h3 data-en="Connect the providers you need" data-zh="連接你需要的服務">Connect the providers you need</h3>
+              <p data-en="Open the connections dashboard and link GitHub, Slack, or Google so actions can act on your behalf."
+                 data-zh="開啟連線面板，連接 GitHub、Slack 或 Google，讓動作能代你執行。">
+                Open the connections dashboard and link GitHub, Slack, or Google so actions can act on your behalf.
+              </p>
+              <a class="btn btn-small" href="https://scheduler.paynepew.dev/connections" data-en="Open connections" data-zh="開啟連線面板">Open connections</a>
+            </div>
+          </li>
+          <li class="step">
+            <div class="step-no">4</div>
+            <div class="step-body">
+              <h3 data-en="Ask your LLM to create a task" data-zh="請你的 LLM 建立任務">Ask your LLM to create a task</h3>
+              <p data-en="For example: “Every weekday at 9am, post a GitHub digest of my repo to #standup on Slack.” The scheduler persists the job and fires it on time — every time."
+                 data-zh="例如：「每個工作日早上 9 點，把我 repo 的 GitHub 摘要貼到 Slack 的 #standup。」排程器會保存這個任務，並準時、每次都執行。">
+                For example: “Every weekday at 9am, post a GitHub digest of my repo to #standup on Slack.” The scheduler persists the job and fires it on time — every time.
+              </p>
+            </div>
+          </li>
+        </ol>
+      </div>
+    </section>
+
+    <!-- SURFACE -->
+    <section id="surface" class="band">
+      <div class="wrap">
+        <p class="eyebrow" data-en="What it does" data-zh="功能">What it does</p>
+        <h2 data-en="Five tools, seven actions" data-zh="五個工具，七種動作">Five tools, seven actions</h2>
+
+        <div class="surface-grid">
+          <div class="panel">
+            <h3 class="panel-title" data-en="Tools" data-zh="工具">Tools</h3>
+            <p class="panel-sub" data-en="The MCP verbs your LLM calls." data-zh="你的 LLM 呼叫的 MCP 動詞。">The MCP verbs your LLM calls.</p>
+            <ul class="tool-list">
+              <li><code>task.create</code></li>
+              <li><code>task.list</code></li>
+              <li><code>task.status</code></li>
+              <li><code>task.cancel</code></li>
+              <li><code>task.list_actions</code></li>
+            </ul>
+            <p class="panel-foot"
+               data-en="Plus 4 resources & 2 prompts: a recent-results briefing and ready-made review prompts."
+               data-zh="另含 4 個資源與 2 個提示：近期結果摘要與現成的回顧提示。">
+              Plus 4 resources &amp; 2 prompts: a recent-results briefing and ready-made review prompts.
+            </p>
+          </div>
+
+          <div class="panel">
+            <h3 class="panel-title" data-en="Actions" data-zh="動作">Actions</h3>
+            <p class="panel-sub" data-en="What a task actually does when it fires." data-zh="任務觸發時實際執行的工作。">What a task actually does when it fires.</p>
+            <ul class="action-list">
+              <li><code>echo</code><span data-en="Echo a message back — smoke test." data-zh="回傳訊息 — 煙霧測試。">Echo a message back — smoke test.</span></li>
+              <li><code>http_call</code><span data-en="Call any HTTP endpoint, with ${VAR} env substitution." data-zh="呼叫任意 HTTP 端點，支援 ${VAR} 環境變數替換。">Call any HTTP endpoint, with ${VAR} env substitution.</span></li>
+              <li><code>slack_post</code><span data-en="Post a message to a Slack channel." data-zh="發送訊息到 Slack 頻道。">Post a message to a Slack channel.</span></li>
+              <li><code>github_digest</code><span data-en="Summarize a repo's issues &amp; PRs." data-zh="彙整某 repo 的 issues 與 PR。">Summarize a repo's issues &amp; PRs.</span></li>
+              <li><code>email_send</code><span data-en="Send email via your connected Gmail." data-zh="透過已連接的 Gmail 寄送 email。">Send email via your connected Gmail.</span></li>
+              <li><code>r2_upload</code><span data-en="Upload to Cloudflare R2 / S3-compatible storage." data-zh="上傳到 Cloudflare R2／S3 相容儲存。">Upload to Cloudflare R2 / S3-compatible storage.</span></li>
+              <li><code>calendar_digest_ics</code><span data-en="Pull events from an iCal / ICS calendar." data-zh="從 iCal／ICS 行事曆擷取事件。">Pull events from an iCal / ICS calendar.</span></li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="feature-strip">
+          <span class="feature-label" data-en="Built in" data-zh="內建">Built in</span>
+          <span class="chip" data-en="Cron recurrence" data-zh="Cron 週期排程">Cron recurrence</span>
+          <span class="chip" data-en="Job chaining" data-zh="任務串接">Job chaining</span>
+          <span class="chip" data-en="Cancel semantics" data-zh="取消語意">Cancel semantics</span>
+          <span class="chip" data-en="Env-var substitution" data-zh="環境變數替換">Env-var substitution</span>
+          <span class="chip" data-en="Rate limiting" data-zh="速率限制">Rate limiting</span>
+        </div>
+      </div>
     </section>
   </main>
-  <footer>
-    <p>
-      Public demo &mdash; trust-only auth, no SLA.
-      <a href="https://github.com/PaynePew/chatgpt_task#1-self-host-the-intended-path">Self-host</a>
-      for serious use.
-    </p>
+
+  <footer class="site-footer">
+    <div class="wrap footer-wrap">
+      <div class="footer-brand">
+        <img src="owl.svg" alt="" width="34" height="34" />
+        <span>Task Scheduler MCP</span>
+      </div>
+      <nav class="footer-links" aria-label="Footer">
+        <a href="https://github.com/PaynePew/task_scheduler_mcp">GitHub</a>
+        <a href="https://github.com/PaynePew/task_scheduler_mcp#readme">README</a>
+        <a href="https://scheduler.paynepew.dev/connections" data-en="Connections" data-zh="連線面板">Connections</a>
+        <a href="https://status.paynepew.dev" data-en="Status" data-zh="狀態">Status</a>
+      </nav>
+      <p class="footer-note"
+         data-en="Hosted demo — WorkOS sign-in, best-effort, no SLA. Self-host for production."
+         data-zh="託管展示 — WorkOS 登入、盡力而為、無 SLA。正式使用請自行架設。">
+        Hosted demo — WorkOS sign-in, best-effort, no SLA. Self-host for production.
+      </p>
+    </div>
   </footer>
+
+  <script>
+    (function () {
+      var STORE = "tsmcp-lang";
+      var nodes = document.querySelectorAll("[data-en][data-zh]");
+      var buttons = document.querySelectorAll(".lang-btn");
+
+      function apply(lang) {
+        nodes.forEach(function (el) {
+          var val = el.getAttribute("data-" + lang);
+          if (val == null) return;
+          if (el.tagName === "META") {
+            el.setAttribute("content", val);
+          } else {
+            el.textContent = val;
+          }
+        });
+        document.documentElement.lang = (lang === "zh") ? "zh-Hant" : "en";
+        buttons.forEach(function (b) {
+          var on = b.getAttribute("data-lang") === lang;
+          b.classList.toggle("is-active", on);
+          b.setAttribute("aria-pressed", on ? "true" : "false");
+        });
+        try { localStorage.setItem(STORE, lang); } catch (e) {}
+      }
+
+      var saved = null;
+      try { saved = localStorage.getItem(STORE); } catch (e) {}
+      var initial = saved || ((navigator.language || "").toLowerCase().indexOf("zh") === 0 ? "zh" : "en");
+
+      buttons.forEach(function (b) {
+        b.addEventListener("click", function () { apply(b.getAttribute("data-lang")); });
+      });
+
+      apply(initial);
+    })();
+  </script>
 </body>
 </html>
