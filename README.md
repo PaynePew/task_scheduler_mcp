@@ -1,111 +1,180 @@
 # Task Scheduler MCP
 
-**🌐 English** | [繁體中文](README.zh-TW.md)
+**English** | [繁體中文](README.zh-TW.md)
 
-A self-hostable MCP server that runs as a persistent HTTP service — **5 tools · 7 actions · 4 resources · 2 prompts** — so LLM clients can schedule, chain, and cancel recurring tasks backed by Postgres + SQS.
+A self-hostable, multi-tenant MCP server that turns a natural-language chat into durable scheduled jobs. You tell Claude or Codex "every weekday at 9am, summarize my GitHub issues and post them to Slack", and the job keeps firing on schedule long after you close the chat. Backed by Postgres and SQS, running live on a $5 VPS.
 
 [![CI](https://github.com/PaynePew/task_scheduler_mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/PaynePew/task_scheduler_mcp/actions) [![Demo](https://img.shields.io/badge/demo-scheduler.paynepew.dev-blue)](https://scheduler.paynepew.dev) [![Status](https://img.shields.io/badge/status-status.paynepew.dev-green)](https://status.paynepew.dev)
 
 ---
 
-## §1 Who this is for
+## What it is
 
-Built for: developers who run their own webhooks/APIs and want to schedule them via natural-language LLM chat, with auditable persistence beyond chat sessions.
+Most MCP servers run over stdio, so they live and die with the chat window. A scheduler can't work that way: a job that fires "every Monday at 10am" has to run whether or not a chat is open. So this runs as a persistent HTTP service with its own database and worker pool. The chat client just creates and queries jobs over MCP; the server does the actual scheduling on wall-clock time.
 
-**Supported MCP clients:** Claude Desktop · Cursor · Claude in Chrome · MCP Inspector
-**Not supported:** ChatGPT (Custom GPT Actions ≠ MCP protocol)
+A live multi-tenant instance runs at [scheduler.paynepew.dev](https://scheduler.paynepew.dev). It authenticates each user through OAuth 2.1, runs actions with that user's own scoped tokens, and keeps a single small box safe with quotas, rate limits, and load shedding. Connect to it in about two minutes, or clone the repo and run the whole stack yourself.
 
----
+**Supported clients:** Claude Desktop, Claude Code, Codex CLI, Cursor, MCP Inspector.
 
-## §2 Architecture
+## Key technical points
+
+- Persistence is the whole point. Jobs survive the chat session because the scheduler is a long-lived HTTP service with its own database, not a subprocess that dies with the client ([ADR-006](docs/adr/ADR-006-mcp-transport-dual-stdio-http.md)).
+- Real auth, not a header. The public endpoint is an OAuth 2.1 resource server, with WorkOS AuthKit as the authorization server. A user's identity is a verified JWT subject, so one user can never read or cancel another's jobs ([ADR-053](docs/adr/ADR-053-layer1-authorization-server-workos-authkit.md), [ADR-049](docs/adr/ADR-049-public-product-multi-tenant-oauth-delegation.md)).
+- Your raw secret is never stored. GitHub, Slack, and Gmail actions run on per-user OAuth tokens that are scoped, revocable, and encrypted at rest with AWS KMS envelope encryption, then refreshed automatically when they expire ([ADR-054](docs/adr/ADR-054-layer2-token-storage-aws-kms-envelope-encryption.md)).
+- The data model is built to avoid races. Every status change is written to an append-only outbox in the same transaction, and the watchers read that event log instead of polling mutable state ([ADR-009](docs/adr/ADR-009-database-schema-outbox.md)). Run creation has a single owner, so chained and recurring jobs can't double-spawn ([ADR-065](docs/adr/ADR-065-run-source-dichotomy-and-run-materializer.md)).
+- It runs on $5/month and stays up under load. Watchers claim work with `FOR UPDATE SKIP LOCKED` so several can run with no leader election. The server sheds load at the edge, caps concurrency, and applies backpressure when the queue is deep ([ADR-007](docs/adr/ADR-007-watcher-ha-skip-locked.md), [ADR-057](docs/adr/ADR-057-overload-protection-load-shedding-concurrency.md)).
+- Every decision is written down. 60+ ADRs cover scope, language, data store, transport, auth, and the security model, so the reasoning is auditable rather than tribal.
+
+## Architecture
+
+Two views. The first is the job lifecycle: how a request becomes a scheduled run that fires on time. The second is the auth and secrets handshake that happens before any of it.
+
+### Runtime
 
 ```mermaid
 flowchart LR
-    User([User]) --> LLM[LLM Client<br/>Claude / Cursor]
-    LLM -->|MCP tool call| MCP[MCP Server<br/>HTTP · stdio]
-    MCP --> DB[(Postgres)]
-    DB --> W[Watcher<br/>SKIP LOCKED]
-    W -->|enqueue| Q[(SQS / ElasticMQ)]
-    Q --> Worker[Worker]
-    Worker -->|dispatches| AH[ActionHandler]
-    AH -->|outbound API call| Ext[External Service<br/>Slack · GitHub · SMTP · R2 · ICS]
-    Worker --> DB
-    DB --> CW[ChainWatcher]
-    DB --> RW[RecurringJobWatcher]
+    CL["MCP client<br/>Claude · Codex · Cursor"]
+    SRV["mcp-server<br/>OAuth 2.1 resource server<br/>verify · rate-limit · concurrency"]
+    PG[("Postgres<br/>jobs · job_runs<br/>run_events outbox")]
+    WAT["Watcher<br/>SKIP LOCKED"]
+    Q[("Queue<br/>SQS · ElasticMQ")]
+    WO["Worker<br/>action handlers"]
+    EXT["External APIs<br/>GitHub · Slack · Gmail<br/>LLM · HTTP · ICS"]
+    CTL["RecurringJobWatcher<br/>ChainWatcher<br/>Reconciler"]
+
+    CL -->|MCP call| SRV
+    SRV -->|persist job| PG
+    PG -->|due runs| WAT
+    WAT -->|enqueue| Q
+    Q --> WO
+    WO -->|dispatch| EXT
+    WO -->|results + events| PG
+    PG -.-> CTL
+    CTL -.materialize next run.-> PG
 ```
 
-The MCP server persists `Job` + `JobRun` rows. The **Watcher** claims due runs via `FOR UPDATE SKIP LOCKED` and enqueues them. The **Worker** dispatches to one of 7 typed **ActionHandlers** (`echo` · `http_call` · `slack_post` · `github_digest` · `email_send` · `r2_upload` · `calendar_digest_ics`). **ChainWatcher** and **RecurringJobWatcher** consume the append-only `run_events` outbox — they never poll mutable state.
+A tool call reaches `mcp-server` through Caddy. The server verifies the bearer token, checks the caller's rate limit and quota, and writes a `Job` plus its first `JobRun`. The **Watcher** scans for runs due within the next five minutes and claims them with `FOR UPDATE SKIP LOCKED`, so several watchers can run at once without stepping on each other. Claimed runs go onto the queue, and the **Worker** pulls one, dispatches it to the matching typed action handler, then writes the result and a status event back to Postgres.
 
----
+The follow-up watchers never poll the mutable status column. They read the append-only `run_events` outbox: **RecurringJobWatcher** materializes the next cron occurrence, and **ChainWatcher** flips a downstream job from `WAITING` to `PENDING` once its trigger reaches a terminal status. The **Reconciler** sweeps up runs orphaned by a worker crash.
 
-## §3 How to use
+### Auth and secrets
 
-Three deployment paths. They use **different MCP transports** and **different OAuth scopes** — mixing them is the #1 setup pitfall. Pick one and follow it end-to-end.
+```mermaid
+sequenceDiagram
+    actor U as User
+    participant C as MCP client
+    participant S as mcp-server
+    participant W as WorkOS AuthKit
+    participant DB as Postgres + KMS
 
-|                          | **A. Hosted**                                      | **B. Self-host (HTTP)**                          | **C. Self-host (stdio)**                                    |
-|--------------------------|----------------------------------------------------|--------------------------------------------------|-------------------------------------------------------------|
-| MCP transport            | streamable-http over TLS                           | streamable-http                                  | stdio child process                                         |
-| MCP endpoint             | `https://scheduler.paynepew.dev/mcp`               | `http://localhost:8000/mcp`                      | spawned: `uv run python -m app.entrypoints.mcp_stdio`       |
-| `user_id` source         | WorkOS Bearer JWT (`sub` claim) — ADR-053          | `X-User-Id` header (trust-only) — ADR-015        | `MCP_USER_ID` env var (trust-only) — ADR-015                |
-| OAuth dashboard          | `https://scheduler.paynepew.dev/connections`       | `http://localhost:8000/connections`              | `http://localhost:8000/connections` *(same web tier)*       |
-| What to launch locally   | nothing                                            | `docker compose --profile full up -d`            | `docker compose --profile full up -d` *(for `/connections`)* + on-demand stdio spawn |
-| `CONNECTIONS_BASE_URL`   | (operator-managed)                                 | `http://localhost:8000`                          | `http://localhost:8000`                                     |
-
-> **Why this matters.** When an action (`github_digest`, `slack_post`, `email_send`) can't find an upstream OAuth token, the server replies with `MISSING_CONNECTION` + `connect_url` built from **its own `CONNECTIONS_BASE_URL`**. If you point your MCP client at Path A but try to OAuth on Path B/C (or vice versa), the two sides hold different `user_id`s, the connect_url shows the wrong host, and every action call silently fails.
-
-### A. Hosted — zero install, try in 2 min
-
-```jsonc
-// Claude Desktop / Claude Code / Cursor MCP config
-{ "mcpServers": { "task-scheduler": {
-  "url": "https://scheduler.paynepew.dev/mcp",
-  "transport": "streamable-http"
-}}}
+    C->>S: MCP call without token
+    S-->>C: 401 + WWW-Authenticate (PRM URL)
+    C->>W: OAuth 2.1 login in browser
+    W-->>C: bearer JWT
+    C->>S: MCP call with bearer
+    S->>W: verify JWT against JWKS
+    S-->>C: tools available
+    U->>S: Connect GitHub / Slack / Google
+    S->>DB: store OAuth token, KMS-encrypted
+    Note over S,DB: the Worker later reads the user's token to run an action
 ```
 
-1. Restart your MCP client; the first tool call triggers the WorkOS OAuth flow ([RFC 9728 Protected Resource Metadata](https://www.rfc-editor.org/rfc/rfc9728)).
-2. After signing in, open `https://scheduler.paynepew.dev/connections` and click Connect for each upstream provider you need (GitHub / Slack / Google).
-3. Inspector quick-check: `curl https://scheduler.paynepew.dev/healthz` → `{"ok":true,"db":"connected"}`.
+An unauthenticated call gets a `401` and a `WWW-Authenticate` challenge that points at the Protected Resource Metadata endpoint (RFC 9728), which is how the client discovers the login flow. After the browser login, the client sends a WorkOS bearer JWT that the server verifies against the JWKS. Connecting an app is a separate per-provider OAuth consent on `/connections`; the resulting token is encrypted and stored, and the worker reads it at run time.
 
-### B. Self-host (HTTP) — recommended for production
+## Quick start
+
+There are three ways to connect, and they use different transports and different identity sources. Mixing them is the most common setup mistake, so pick one path and follow it all the way down.
+
+|                    | A. Hosted                                | B. Self-host (HTTP)                  | C. Self-host (stdio)                       |
+|--------------------|------------------------------------------|-------------------------------------|--------------------------------------------|
+| MCP transport      | streamable HTTP over TLS                 | streamable HTTP                     | stdio subprocess                           |
+| MCP endpoint       | `https://scheduler.paynepew.dev/mcp`     | `http://localhost:8000/mcp`         | `uv run python -m app.entrypoints.mcp_stdio` |
+| Who you are        | WorkOS OAuth (verified JWT `sub`)        | `X-User-Id` header (trust-only)     | `MCP_USER_ID` env var (trust-only)         |
+| Connect apps at    | `scheduler.paynepew.dev/connections`     | `localhost:8000/connections`        | `localhost:8000/connections`               |
+| What to run first  | nothing                                  | `docker compose --profile full up -d` | same compose stack, then on-demand stdio   |
+
+> The trust-only `X-User-Id` and `MCP_USER_ID` paths believe whatever you tell them. They are fine for your own machine, but never expose them to the public internet: anyone who guesses the header reads your jobs. The hosted path uses real OAuth instead.
+
+When an action needs an OAuth connection you haven't set up, the server replies with a `MISSING_CONNECTION` error and a `connect_url` built from its own `CONNECTIONS_BASE_URL`. If your client points at the hosted server but you try to connect apps on a local one (or the reverse), the two sides hold different identities and every action quietly fails. Keep both ends on the same path.
+
+### A. Hosted: nothing to install
+
+This is the fastest way to try it. Two minutes, no clone.
+
+**Claude Desktop** (Settings, Connectors, Add custom connector): name it `Task Scheduler`, URL `https://scheduler.paynepew.dev/mcp`, leave the rest blank. Click Connect, sign in through the browser window, and the tools appear in chat. Full walkthrough: [docs/guides/claude-desktop-quickstart.md](docs/guides/claude-desktop-quickstart.md).
+
+**Claude Code:**
+
+```bash
+claude mcp add --transport http task-scheduler https://scheduler.paynepew.dev/mcp
+```
+
+**Codex CLI** (`~/.codex/config.toml`):
+
+```toml
+[mcp_servers.task-scheduler]
+url = "https://scheduler.paynepew.dev/mcp"
+```
+
+Then run `codex mcp login task-scheduler` to do the browser sign-in.
+
+After signing in, open [scheduler.paynepew.dev/connections](https://scheduler.paynepew.dev/connections), check the name at the top matches the account you just used, and click Connect for GitHub, Slack, or Google as needed. Health check: `curl https://scheduler.paynepew.dev/healthz` returns `{"ok":true,"db":"connected"}`.
+
+### B. Self-host over HTTP: the production path
 
 ```bash
 git clone https://github.com/PaynePew/task_scheduler_mcp
 cd task_scheduler_mcp
-cp .env.docker.example .env.docker     # ← compose reads THIS, not .env
-cp .env.example .env                   # only for host-side `uv run` (tests, alembic)
+cp .env.docker.example .env.docker   # compose reads THIS file, not .env
+cp .env.example .env                 # only for host-side uv (tests, alembic)
 docker compose --profile full up -d
 ```
 
-```jsonc
-// MCP client config (Claude Desktop / Code / Cursor)
-{ "mcpServers": { "task-scheduler": {
-  "url": "http://localhost:8000/mcp",
-  "transport": "streamable-http",
-  "headers": { "X-User-Id": "me" }
-}}}
+That brings up nine services: Postgres, ElasticMQ, a one-shot migrator, `mcp-server`, the watcher, the worker, and the recurring, chain, and reconciler watchers.
+
+Point your client at the local endpoint. The `X-User-Id` header is your identity in trust-only mode.
+
+```bash
+# Claude Code
+claude mcp add --transport http task-scheduler http://localhost:8000/mcp --header "X-User-Id: me"
 ```
 
-OAuth dashboard: open `http://localhost:8000/connections` → verify the page shows `Signed in as me` (matches your `X-User-Id` header) → click Connect for each provider. For an internet-facing deployment, edit `.env.docker`:
+```toml
+# Codex CLI config: ~/.codex/config.toml
+[mcp_servers.task-scheduler]
+url = "http://localhost:8000/mcp"
+http_headers = { "X-User-Id" = "me" }
+```
 
-- Set `CONNECTIONS_BASE_URL=https://yourdomain.tld` so OAuth callback URLs and PRM resource URLs use the public host.
-- Fill in §7 (WorkOS Bearer auth) — **never expose trust-only `X-User-Id` to the public internet** (anyone can read jobs by guessing the header).
-- Run `bin/setup-vps.sh` on a fresh Ubuntu 24.04 box for Docker + Caddy + ufw + nightly Postgres backup + systemd auto-restart.
+Open `http://localhost:8000/connections`, confirm it says `Signed in as me` (matching your header), and connect each provider. To put this on the public internet, edit `.env.docker`:
 
-**BYO LLM via `http_call`:** set `action: "http_call"`, reference `${ANTHROPIC_API_KEY}` in headers/body — substituted at run time ([ADR-032](docs/adr/ADR-032-secrets-aware-action-handlers-and-env-var-substitution.md)); add the var name to `ALLOWED_TEMPLATE_VARS`. Rate limit: **1 000 creates/24h · 10/min burst** — env-configurable ([ADR-042](docs/adr/ADR-042-postgres-backed-rate-limiting.md)).
+- Set `CONNECTIONS_BASE_URL=https://yourdomain.tld` so OAuth callbacks and metadata use the public host.
+- Configure WorkOS so the public endpoint requires a real bearer token instead of trust-only headers.
+- On a fresh Ubuntu 24.04 box, `bin/setup-vps.sh` installs Docker, Caddy with automatic TLS, a firewall, a nightly Postgres backup, and systemd auto-restart.
 
-### C. Self-host (stdio) — MCP Inspector / dev convenience
+Bring your own LLM through `http_call`: set `action: "http_call"`, reference `${ANTHROPIC_API_KEY}` in the headers or body (it is substituted at run time, [ADR-032](docs/adr/ADR-032-secrets-aware-action-handlers-and-env-var-substitution.md)), and add the variable name to `ALLOWED_TEMPLATE_VARS`. Per-user creation limit defaults to 100 jobs/day with a 5/minute burst, all configurable ([ADR-055](docs/adr/ADR-055-public-abuse-cost-containment-posture.md)).
 
-Stdio MCP is a child process that dies with the chat ([§4](#§4-why-http-not-stdio) for why this is usually a bad idea). Use it only for MCP Inspector debugging or short-lived dev runs. **The OAuth dashboard still lives in the HTTP web tier**, so you still bring up the stack:
+### C. Self-host over stdio: Inspector and dev convenience
+
+A stdio MCP server is a subprocess that dies with the chat ([see below](#why-http-not-stdio) for why that's usually wrong for a scheduler). Use it for MCP Inspector debugging or short dev runs. The OAuth dashboard still lives in the HTTP web tier, so you bring the stack up anyway:
 
 ```bash
 cp .env.docker.example .env.docker
 cp .env.example .env
-docker compose --profile full up -d    # web tier (for /connections) + Postgres + queue
+docker compose --profile full up -d   # web tier for /connections, plus Postgres and queue
+```
+
+```toml
+# Codex CLI config: ~/.codex/config.toml
+[mcp_servers.task-scheduler]
+command = "uv"
+args = ["run", "python", "-m", "app.entrypoints.mcp_stdio"]
+cwd = "/path/to/task_scheduler_mcp"
+env = { MCP_USER_ID = "me", MCP_USER_TZ = "UTC" }
 ```
 
 ```jsonc
-// MCP client config — client spawns the stdio process on demand
+// Claude Desktop / Cursor: the client spawns the process on demand
 { "mcpServers": { "task-scheduler": {
   "type": "stdio",
   "command": "uv",
@@ -114,133 +183,96 @@ docker compose --profile full up -d    # web tier (for /connections) + Postgres 
 }}}
 ```
 
-OAuth: open `http://localhost:8000/connections` → connect providers. Verify `Signed in as me` matches the `MCP_USER_ID` you passed to the stdio process.
+The stdio process and the web tier each read `MCP_USER_ID` from their own environment. They must resolve to the same string, or you connect apps as one user and the stdio process queries another. Open `http://localhost:8000/connections` and confirm `Signed in as me` matches the `MCP_USER_ID` you passed in.
 
-> **The stdio gotcha.** Two processes read `MCP_USER_ID` from their own environment: the stdio process (from your MCP client's `env` block above) and the web tier (from `.env.docker`). They MUST resolve to the same string. If they differ, you OAuth as one user and the stdio process queries another — silent miss, error envelope returns `connect_url=http://localhost:8000/connections` even though the connection is already stored under a different user_id.
-
-Inspector quick-check:
+MCP Inspector against the stdio entrypoint:
 
 ```bash
 MCP_USER_ID=local-dev MCP_USER_TZ=UTC \
   npx @modelcontextprotocol/inspector uv run python -m app.entrypoints.mcp_stdio
 ```
 
-Browse: [ADRs](docs/adr/) · [PRDs](docs/PRD/) · [Design Decisions](#design-decisions-adrs)
+### Why HTTP, not stdio
 
----
+A stdio MCP server is a child process of the chat client, so it stops the moment the chat closes. A scheduler has to fire at wall-clock times no matter which client is open, which only a long-lived service can do. The codebase keeps both transports because stdio is genuinely useful for local debugging and for the operator's own low-friction access. See [ADR-006](docs/adr/ADR-006-mcp-transport-dual-stdio-http.md).
 
-## §4 Why HTTP, not stdio
+## The MCP surface
 
-Stdio MCPs are child processes — they die when the chat closes. A scheduler must fire at wall-clock times regardless of which client is open. See [ADR-006](docs/adr/ADR-006-mcp-transport-dual-stdio-http.md).
+**Tools (5):** `task.create.v1`, `task.list.v1`, `task.status.v1`, `task.cancel.v1`, `task.list_actions.v1`. A tool is what the LLM client invokes; `task.create.v1` takes an `action` field naming one of the handlers below.
 
----
+**Actions (8):** what the worker actually executes, grouped by how they get credentials.
 
-## §5 Deployment Architecture
-
-![Deployment architecture: VPS runtime + Fargate design artifact](docs/diagrams/d2-dual-deployment.png)
-
-| | VPS (runtime — live) | Fargate (design artifact) |
+| Action | Needs | What it does |
 |---|---|---|
-| **Platform** | AWS Lightsail Tokyo | ECS Fargate / RDS / ALB / SQS |
-| **Monthly cost** | ~$5 | ~$117–145 idle |
-| **TLS** | Caddy auto-ACME | ACM + ALB |
-| **Data** | Postgres in container + R2 backup | RDS Multi-AZ-ready |
-| **Validated by** | Every CI/CD push | `validate-fargate.yml` (W4) |
+| `echo` | nothing | Echoes input back. Smoke test for create and dispatch. |
+| `llm_summarize` | nothing | Summarizes text or an upstream result. Fixed prompt, with token and budget caps. |
+| `llm_polish` | nothing | Rewrites text more cleanly. Same fixed-prompt, capped path. |
+| `github_digest` | your GitHub | Pulls your issues and PRs for a repo. Good upstream for a digest. |
+| `slack_post` | your Slack | Posts a message to a channel in your workspace. |
+| `email_send` | your Google | Sends mail from your Gmail. Supports digest chaining. |
+| `http_call` | operator only | Generic HTTP call with `${VAR}` substitution. Restricted to the deployer (SSRF surface). |
+| `calendar_digest_ics` | operator only | Fetches an ICS calendar and lists events in a window. |
 
----
+The OAuth-backed actions run on each user's own scoped token. The two LLM actions run a fixed, cost-capped transform: no free-form prompt and no `${VAR}`. The model is pinned to a cheap one (`gpt-4o-mini`) with a hard per-call output-token limit plus per-user daily and global monthly budget ceilings, so cost stays bounded ([ADR-052](docs/adr/ADR-052-operator-subsidized-llm-actions-fixed-prompt-and-caps.md)).
 
-## §6 Roadmap
+**Resources (4):** `tasks://list`, `tasks://actions`, `tasks://job/{job_id}`, `tasks://recent-results` (last 24h of completed runs, useful as an on-connect briefing).
 
-| Gate | Description | Status |
-|---|---|---|
-| G1 | CI green; test coverage targets met | ✅ |
-| G2 | 5 new handlers in registry; `task.list_actions.v1` returns 7 | ✅ |
-| G3 | Digest workflow live — ≥ 5 consecutive Slack messages on production VPS | ✅ |
-| G4 | `tasks://recent-results` queryable; returns real 24h data | ✅ |
-| G5 | Landing page live — `curl https://scheduler.paynepew.dev/` returns 200 + HTML | ✅ |
-| G6 | Rate limiting — integration test: 1001st create rejected | ✅ |
-| G7 | Fargate evidence — dry + recording runs green; bill < $5 | ✅ |
-| G8 | Visual artifacts — hero GIF + 4 screenshots + 3 diagrams in README | ✅ |
-| G9 | README polished + i18n — EN + zh-TW, ~150 lines | ✅ |
-| G10 | ADR cluster — 13 new W4 ADRs merged | ✅ |
+**Prompts (2):** `daily_review`, `setup_summary`.
 
----
+**Scheduling features:** immediate, one-shot (`scheduled_at`), and recurring (`cron_expr`, including `@daily`/`@hourly` shortcuts) jobs; job chaining (`trigger_on_job_id` with `trigger_on_status`); cancel semantics; per-user rate limits and quotas.
 
-## §7 Design Decisions (ADRs)
+## How scheduling works
 
-W1 scope + language + data store + queue + schema + module layout ([ADR-001–023](docs/adr/)):
+The system stores three things, and confusing them is the usual source of bugs. A **`Job`** is the task definition (what to run, when, who owns it). A **`JobRun`** is one execution attempt of that job. A **`RunEvent`** is one immutable record of a status transition. A recurring `Job` has many `JobRun`s over time; a one-shot has exactly one.
 
-| ADR | Decision |
-|---|---|
-| [ADR-001](docs/adr/ADR-001-project-scope.md) | Project scope |
-| [ADR-002](docs/adr/ADR-002-implementation-language-python.md) | Python |
-| [ADR-003](docs/adr/ADR-003-primary-data-store-postgres.md) | Postgres as primary store |
-| [ADR-006](docs/adr/ADR-006-mcp-transport-dual-stdio-http.md) | Dual stdio + HTTP MCP transport |
-| [ADR-007](docs/adr/ADR-007-watcher-ha-skip-locked.md) | Watcher HA via `SKIP LOCKED` |
-| [ADR-008](docs/adr/ADR-008-message-queue-sqs.md) | SQS / ElasticMQ queue |
-| [ADR-009](docs/adr/ADR-009-database-schema-outbox.md) | 3-table schema + transactional outbox |
-| [ADR-013](docs/adr/ADR-013-action-catalog-typed-registry.md) | Typed action registry |
-| [ADR-014](docs/adr/ADR-014-mcp-tool-surface-v1.md) | MCP tool surface v1 |
-| [ADR-018](docs/adr/ADR-018-no-server-side-llm-in-w2.md) | No server-side LLM in W2 |
-| [ADR-018-amended](docs/adr/ADR-018-amended-w4-reconsidered-stays-llm-agnostic.md) | W4 reconsidered — stays LLM-agnostic |
+Clients see five simple statuses (`scheduled`, `running`, `completed`, `failed`, `cancelled`). Internally the database keeps a finer eight-state machine and maps it down at the MCP boundary, so the precise truth stays in the data layer while the LLM gets a model it can reason about.
 
-W3 deployment cohort ([ADR-024–031](docs/adr/)):
+Chaining and recurrence share one rule: run creation has a single owner, the **RunMaterializer**. Arming a downstream job happens inside the same transaction that creates a run, so a chained or recurring job cannot be created without its downstream being armed atomically. If an upstream produces runs faster than a downstream can finish, the overlapping tick is dropped on purpose (load shedding) and audited, which keeps at most one executing run per job. This closed a real double-spawn race; the reasoning is in [ADR-065](docs/adr/ADR-065-run-source-dichotomy-and-run-materializer.md) and [CONTEXT.md](CONTEXT.md).
 
-| ADR | Decision |
-|---|---|
-| [ADR-024](docs/adr/ADR-024-tier-scoping-and-w3-cut-scope.md) | W3 tier scoping |
-| [ADR-025](docs/adr/ADR-025-network-topology-w3-public-ecs-private-rds.md) | Network topology |
-| [ADR-026](docs/adr/ADR-026-ecs-service-topology-and-replica-count.md) | ECS service topology |
-| [ADR-027](docs/adr/ADR-027-deployment-target-pivot-vps-first-aws-as-design-artifact.md) | VPS-first runtime; Fargate as design artifact |
-| [ADR-028](docs/adr/ADR-028-caddy-over-nginx-for-vps-reverse-proxy.md) | Caddy over nginx |
-| [ADR-029](docs/adr/ADR-029-vps-deployment-mechanics-ghcr-push-ssh-pull-containerized-data.md) | VPS deployment mechanics |
-| [ADR-030](docs/adr/ADR-030-vps-operational-concerns-backup-monitoring-fargate-validation.md) | Operational concerns |
-| [ADR-031](docs/adr/ADR-031-monitoring-better-stack-over-uptimerobot.md) | Better Stack monitoring |
+## Security model
 
-W4 action sprint cohort:
+The public deployment ([ADR-049](docs/adr/ADR-049-public-product-multi-tenant-oauth-delegation.md)) is built in two layers.
 
-| ADR | Decision |
-|---|---|
-| [ADR-032](docs/adr/ADR-032-secrets-aware-action-handlers-and-env-var-substitution.md) | Secrets via env-var substitution |
-| [ADR-033](docs/adr/ADR-033-inter-handler-data-flow-via-job-run-result.md) | Inter-handler data plane via `JobRun.result` |
-| [ADR-037](docs/adr/ADR-037-tasks-recent-results-mcp-resource-as-briefing-surface.md) | `tasks://recent-results` briefing surface |
-| [ADR-038](docs/adr/ADR-038-mcp-call-as-future-direction.md) | Worker as MCP client *(Deferred — v2)* |
-| [ADR-039](docs/adr/ADR-039-plan-abstraction-as-future-direction.md) | Plan abstraction *(Deferred — v2)* |
-| [ADR-040](docs/adr/ADR-040-predicate-based-chain-as-future-direction.md) | Predicate-based chain *(Deferred — v2)* |
-| [ADR-041](docs/adr/ADR-041-static-landing-page-and-caddy-path-routing.md) | Static landing page + Caddy path routing |
-| [ADR-042](docs/adr/ADR-042-postgres-backed-rate-limiting.md) | Postgres-backed rate limiting |
-| [ADR-044](docs/adr/ADR-044-project-rename-to-task-scheduler-mcp.md) | Project rename to `task_scheduler_mcp` |
-| [ADR-045](docs/adr/ADR-045-email-send-action-design.md) | `email_send` SMTP action |
-| [ADR-046](docs/adr/ADR-046-r2-upload-action-design.md) | `r2_upload` Cloudflare R2 / S3-compatible action |
-| [ADR-048](docs/adr/ADR-048-calendar-digest-ics-action-design.md) | Calendar digest via signed ICS URL |
+**Layer 1, who you are.** WorkOS AuthKit is the OAuth 2.1 authorization server; this server is only a resource server. Every `/mcp` request needs a valid WorkOS bearer token, verified against the JWKS with audience and resource binding (RFC 8707) to block confused-deputy attacks. The server publishes Protected Resource Metadata (RFC 9728) and answers an unauthenticated request with a `401` and a `WWW-Authenticate` challenge, which is how MCP clients discover the login flow. `user_id` is the verified token subject, so tenant isolation is structural.
 
----
+**Layer 2, what you can act on.** Each user connects their own GitHub, Slack, or Google account through a Connect button on `/connections`. The resulting OAuth tokens are encrypted at rest with AWS KMS envelope encryption (a fresh data key per write; the key material never leaves KMS) and refreshed automatically when they expire. The system never stores a public user's raw, long-lived secret.
 
-## §8 MCP Surface
+Credentials come from one of two non-overlapping tracks ([ADR-050](docs/adr/ADR-050-dual-credential-model-oauth-vs-operator-env.md)): public users use their own OAuth connections, while the server's own actions use `${VAR}` env substitution. Actions that read those server-side secrets or can reach arbitrary URLs (`http_call`, `calendar_digest_ics`) are restricted to the deployer and rejected at `task.create` for everyone else ([ADR-051](docs/adr/ADR-051-action-surface-tiering-public-oauth-vs-operator-only.md)).
 
-**Tools (5):** `task.create.v1` · `task.list.v1` · `task.status.v1` · `task.cancel.v1` · `task.list_actions.v1`
+A single $5 core stays safe through layered limits ([ADR-055](docs/adr/ADR-055-public-abuse-cost-containment-posture.md), [ADR-057](docs/adr/ADR-057-overload-protection-load-shedding-concurrency.md)): per-user creation rate (100/day, 5/min), caps on active recurring (5) and total (50) jobs per user, a global recurring ceiling (500), edge load shedding when the box is unhealthy, an in-flight concurrency cap, and `429` backpressure when the queue is deep. Every limit is env-configurable. Structured JSON logs ship to Better Stack with per-user and per-run correlation, and tokens are never logged ([ADR-056](docs/adr/ADR-056-observability-structured-json-logging-better-stack.md)).
 
-**Actions (7):** `echo` · `http_call` · `slack_post` · `github_digest` · `email_send` · `r2_upload` · `calendar_digest_ics`
+## Deployment
 
-**Resources (4):** `tasks://list` · `tasks://actions` · `tasks://job/{job_id}` · `tasks://recent-results` *(24h result briefing)*
+The live instance runs on an AWS Lightsail box in Tokyo for about $5/month plus roughly $1 for KMS. Caddy terminates TLS with automatic certificates and reverse-proxies to the app. Postgres runs in a container with nightly backups to Cloudflare R2. Every push to `main` that passes CI auto-deploys over SSH, and `/healthz` reports the running commit SHA so you can confirm what is live.
 
-**Prompts (2):** `daily_review` · `setup_summary`
+A public status page at [status.paynepew.dev](https://status.paynepew.dev) tracks uptime. Better Stack probes `/healthz` every three minutes from outside the box, so the monitor survives the box going down, and alerts by email and Slack; the page shows a 30/60/90-day uptime history. The server also exposes `/healthz/shed`, which Caddy uses as a health check to drop load at the edge when the box is unhealthy ([ADR-031](docs/adr/ADR-031-monitoring-better-stack-over-uptimerobot.md), [ADR-057](docs/adr/ADR-057-overload-protection-load-shedding-concurrency.md)).
 
-**Features:** cron recurrence · job chaining (`trigger_on_job_id`) · cancel semantics · `${VAR}` env-var substitution · rate limiting
+## Local development
 
----
-
-## §9 Local Development
-
-Host-side test loop (no full stack):
+Host-side test loop, no full stack:
 
 ```bash
 uv sync
 cp .env.example .env
-docker compose up -d postgres elasticmq             # Postgres + queue only
+docker compose up -d postgres elasticmq        # Postgres and queue only
 uv run alembic upgrade head
 uv run pytest -m "not integration" && uv run pytest -m integration
 uv run ruff check . && uv run ruff format --check .
 ```
 
-For MCP Inspector against the stdio entrypoint, see [§3 Path C](#§3-how-to-use). Expected surface: **5 tools · 4 resources · 2 prompts** (W4 complete). Full click-through verification: [docs/PRODUCTION-VERIFICATION.md](docs/PRODUCTION-VERIFICATION.md).
+If you have a production-flavored `.env` lying around, move it aside before running unit tests: KMS and WorkOS branches change behavior and produce false failures. Full click-through verification: [docs/PRODUCTION-VERIFICATION.md](docs/PRODUCTION-VERIFICATION.md).
+
+## Design decisions
+
+Decisions are recorded as ADRs under [docs/adr/](docs/adr/), with the domain language in [CONTEXT.md](CONTEXT.md). The ones worth reading first:
+
+| Theme | ADRs |
+|---|---|
+| Transport and data model | [006](docs/adr/ADR-006-mcp-transport-dual-stdio-http.md) dual stdio/HTTP, [009](docs/adr/ADR-009-database-schema-outbox.md) outbox schema, [007](docs/adr/ADR-007-watcher-ha-skip-locked.md) SKIP LOCKED watchers |
+| Actions and chaining | [013](docs/adr/ADR-013-action-catalog-typed-registry.md) typed registry, [033](docs/adr/ADR-033-inter-handler-data-flow-via-job-run-result.md) inter-handler data plane, [065](docs/adr/ADR-065-run-source-dichotomy-and-run-materializer.md) RunMaterializer |
+| Public auth and secrets | [049](docs/adr/ADR-049-public-product-multi-tenant-oauth-delegation.md) multi-tenant deployment, [053](docs/adr/ADR-053-layer1-authorization-server-workos-authkit.md) WorkOS, [054](docs/adr/ADR-054-layer2-token-storage-aws-kms-envelope-encryption.md) KMS tokens, [050](docs/adr/ADR-050-dual-credential-model-oauth-vs-operator-env.md) / [051](docs/adr/ADR-051-action-surface-tiering-public-oauth-vs-operator-only.md) credential tiering |
+| Cost and resilience | [055](docs/adr/ADR-055-public-abuse-cost-containment-posture.md) quotas, [057](docs/adr/ADR-057-overload-protection-load-shedding-concurrency.md) overload protection, [056](docs/adr/ADR-056-observability-structured-json-logging-better-stack.md) structured logging, [031](docs/adr/ADR-031-monitoring-better-stack-over-uptimerobot.md) external monitoring |
+
+## Status
+
+The hosted instance is live and multi-tenant: OAuth login, per-user connections, the eight actions above, recurring schedules, and chaining all work in production. Deferred to a later version: fan-in (one job reading several upstreams), a higher-level plan abstraction, and running the worker as its own MCP client ([ADR-038](docs/adr/ADR-038-mcp-call-as-future-direction.md) through [ADR-040](docs/adr/ADR-040-predicate-based-chain-as-future-direction.md)). Issues and discussion: [github.com/PaynePew/task_scheduler_mcp/issues](https://github.com/PaynePew/task_scheduler_mcp/issues).
