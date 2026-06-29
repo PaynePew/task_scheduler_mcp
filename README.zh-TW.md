@@ -200,26 +200,47 @@ stdio 的 MCP 伺服器是對話客戶端的子行程，對話一關就停。排
 
 **工具 Tools（5）：** `task.create.v1`、`task.list.v1`、`task.status.v1`、`task.cancel.v1`、`task.list_actions.v1`。工具是 LLM 客戶端能呼叫的東西；`task.create.v1` 帶一個 `action` 欄位，指名下面其中一個處理器。
 
-**動作 Actions（8）：** worker 真正執行的東西，依憑證取得方式分組。
+**動作 Actions（6）：** worker 真正執行的東西，依憑證取得方式分組。六個都對所有使用者開放。
 
 | 動作 | 需要 | 做什麼 |
 |---|---|---|
-| `echo` | 無 | 把輸入回拋。建立與分派的冒煙測試。 |
-| `llm_summarize` | 無 | 摘要文字或上游結果。固定提示詞，有 token 與預算上限。 |
-| `llm_polish` | 無 | 把文字改寫得更通順。同樣是固定提示詞、有上限的路徑。 |
 | `github_digest` | 你的 GitHub | 拉某個 repo 的 issues 與 PR。很適合當摘要的上游。 |
 | `slack_post` | 你的 Slack | 把訊息貼到你工作區的某個頻道。 |
 | `email_send` | 你的 Google | 用你的 Gmail 寄信。支援摘要串接。 |
-| `http_call` | 僅限 operator | 帶 `${VAR}` 替換的通用 HTTP 呼叫。限部署者使用（SSRF 風險面）。 |
-| `calendar_digest_ics` | 僅限 operator | 抓一份 ICS 行事曆，列出某個時間窗內的事件。 |
+| `llm_summarize` | 無 | 摘要文字或上游結果。固定提示詞，有 token 與預算上限。 |
+| `llm_polish` | 無 | 把文字改寫得更通順（語氣與語言）。同樣是固定提示詞、有上限的路徑。 |
+| `echo` | 無 | 把輸入回拋。建立與分派的冒煙測試。 |
 
 走 OAuth 的動作，跑在每位使用者自己的受限權杖上。兩個 LLM 動作只執行一個固定、有成本上限的轉換：不能自帶任意提示詞，也不能引用 `${VAR}`。模型釘死在便宜的 `gpt-4o-mini`，並有硬性的單次輸出 token 上限，以及每位使用者每日與全域每月的預算天花板，把成本框住（[ADR-052](docs/adr/ADR-052-operator-subsidized-llm-actions-fixed-prompt-and-caps.md)）。
+
+> 自架附帶（僅限 operator，不在託管 demo 提供）：`http_call` 與 `calendar_digest_ics` 是給部署者自己用的，其他人在 `task.create` 會被拒絕（[ADR-051](docs/adr/ADR-051-action-surface-tiering-public-oauth-vs-operator-only.md)）。
 
 **資源 Resources（4）：** `tasks://list`、`tasks://actions`、`tasks://job/{job_id}`、`tasks://recent-results`（最近 24 小時完成的執行，適合在連上時做個簡報）。
 
 **提示詞 Prompts（2）：** `daily_review`、`setup_summary`。
 
 **排程功能：** 立即 (immediate)、一次性 (one-shot，`scheduled_at`) 與週期性 (recurring，`cron_expr`，含 `@daily`／`@hourly` 等簡寫) 任務；任務串接（`trigger_on_job_id` 搭配 `trigger_on_status`）；取消語意；每位使用者的速率限制與配額。
+
+## 範例 prompt
+
+用自然語言跟它說話。先到 `/connections` 連接 GitHub、Slack、Google；把 `<owner>/<repo>` 與頻道／email 換成你自己的。若你的客戶端改用它內建的排程器，開頭加上 **「use owl-scheduler to …」**。
+
+1. **立即（immediate）** — *「現在立刻把 `<owner>/<repo>` 的未處理 issues 和卡住的 PR 抓出來，整理成摘要給我。」*
+   練到 `immediate` + `github_digest`。驗證：約 10 秒後用 `task.status` 看到摘要。
+
+2. **一次性、三服務串接（旗艦）** — *「請排定在三分鐘後，把 `<owner>/<repo>` 的現有 issues 抓取並整理，通知 Slack `#eng-updates` 頻道，成功後再寄一封 email 把整理好的內容寄給我自己。」*
+   練到 `one-shot` + 串接 `github_digest → slack_post → email_send`（資料藉 `from_run_id` + `digest_v1` 範本往下游流）。驗證：三分鐘後 Slack 出現訊息、接著收到 email；`task.list` 看到三個串接的 job。
+
+3. **週期（每日 standup）** — *「每個工作日早上 9:00（台北時間），把 `<owner>/<repo>` 的未處理 issues 與卡住的 PR 整理後貼到 Slack `#standup`。」*
+   練到 `recurring`（cron） + `github_digest → slack_post`。Demo 技巧：現場可改說「每兩分鐘」看它連續觸發，再說「取消那個任務」。
+
+4. **週期（每週報告）** — *「每週五下午 5:00，把 `<owner>/<repo>` 這週的 GitHub 動態整理成報告，email 給我。」*
+   練到每週 `recurring` + `github_digest → email_send`（`digest_v1`）。
+
+5. **管理排程** — *「列出我所有排程任務」·「job `<id>` 的狀態與執行紀錄？」·「取消 job `<id>`」·「你能做哪些事？」*
+   練到 `task.list` / `task.status` / `task.cancel`（best-effort） / `task.list_actions`。
+
+第 2 個是招牌：一句話變成一條會自己持續觸發、又留有稽核紀錄的 **GitHub → Slack → Gmail** 工作流程。串接也能 fan-out —— 一個上游同時餵 Slack **與** email。
 
 ## 排程是怎麼運作的
 

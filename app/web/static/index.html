@@ -33,6 +33,7 @@
     <nav class="site-nav" aria-label="Primary">
       <a href="#what" data-en="Overview" data-zh="總覽">Overview</a>
       <a href="#quickstart" data-en="Quickstart" data-zh="快速開始">Quickstart</a>
+      <a href="#try" data-en="Examples" data-zh="範例">Examples</a>
       <a href="#surface" data-en="What it does" data-zh="功能">What it does</a>
       <a href="https://scheduler.paynepew.dev/connections" data-en="Connections" data-zh="連線">Connections</a>
       <a href="https://github.com/PaynePew/task_scheduler_mcp">GitHub</a>
@@ -56,7 +57,7 @@
         </p>
         <ul class="stats" aria-label="MCP surface">
           <li><b>5</b><span data-en="tools" data-zh="工具">tools</span></li>
-          <li><b>7</b><span data-en="actions" data-zh="動作">actions</span></li>
+          <li><b>6</b><span data-en="actions" data-zh="動作">actions</span></li>
           <li><b>4</b><span data-en="resources" data-zh="資源">resources</span></li>
           <li><b>2</b><span data-en="prompts" data-zh="提示">prompts</span></li>
         </ul>
@@ -80,9 +81,9 @@
         <p class="eyebrow" data-en="Who &amp; where" data-zh="對象與環境">Who &amp; where</p>
         <h2 data-en="Built for developers who run their own jobs" data-zh="為自行管理任務的開發者打造">Built for developers who run their own jobs</h2>
         <p class="lead"
-           data-en="Drive your own webhooks and APIs on a schedule, in plain language, with an audit trail that outlives the chat session. Connect any MCP-speaking client over a stable HTTP endpoint."
-           data-zh="用自然語言，按排程驅動你自己的 webhook 與 API，並保留比聊天會話更長久的稽核紀錄。透過穩定的 HTTP 端點，連接任何支援 MCP 的客戶端。">
-          Drive your own webhooks and APIs on a schedule, in plain language, with an audit trail that outlives the chat session. Connect any MCP-speaking client over a stable HTTP endpoint.
+           data-en="Automate your GitHub, Slack, and Gmail workflows on a schedule, in plain language, with an audit trail that outlives the chat session. Connect any MCP-speaking client over a stable HTTP endpoint."
+           data-zh="用自然語言，按排程自動化你的 GitHub、Slack 與 Gmail 工作流程，並保留比聊天會話更長久的稽核紀錄。透過穩定的 HTTP 端點，連接任何支援 MCP 的客戶端。">
+          Automate your GitHub, Slack, and Gmail workflows on a schedule, in plain language, with an audit trail that outlives the chat session. Connect any MCP-speaking client over a stable HTTP endpoint.
         </p>
         <div class="client-row">
           <span class="client-label" data-en="Works with" data-zh="支援">Works with</span>
@@ -161,11 +162,63 @@
       </div>
     </section>
 
+    <!-- TRY THESE -->
+    <section id="try" class="band">
+      <div class="wrap">
+        <p class="eyebrow" data-en="Try these" data-zh="試試看">Try these</p>
+        <h2 data-en="Prompts that show what it does" data-zh="展示功能的範例 prompt">Prompts that show what it does</h2>
+        <p class="lead"
+           data-en="Connect GitHub, Slack and Google first, then paste these into your client. Replace &lt;owner&gt;/&lt;repo&gt; and the channel / email with your own. If Claude reaches for its built-in scheduler, start with “use owl-scheduler to …”."
+           data-zh="先連接 GitHub、Slack、Google，再把這些貼進你的客戶端。把 &lt;owner&gt;/&lt;repo&gt; 與頻道／email 換成你自己的。若 Claude 改用它內建的排程器，開頭加「use owl-scheduler to …」。">
+          Connect GitHub, Slack and Google first, then paste these into your client. Replace &lt;owner&gt;/&lt;repo&gt; and the channel / email with your own. If Claude reaches for its built-in scheduler, start with “use owl-scheduler to …”.
+        </p>
+
+        <ol class="steps">
+          <li class="step">
+            <div class="step-no">1</div>
+            <div class="step-body">
+              <h3 data-en="Immediate" data-zh="立即">Immediate</h3>
+              <p data-en="“Right now, pull the open issues and stale PRs for &lt;owner&gt;/&lt;repo&gt; and summarize them for me.”"
+                 data-zh="「現在立刻把 &lt;owner&gt;/&lt;repo&gt; 的未處理 issues 和卡住的 PR 抓出來，整理成摘要給我。」">
+                “Right now, pull the open issues and stale PRs for &lt;owner&gt;/&lt;repo&gt; and summarize them for me.”
+              </p>
+            </div>
+          </li>
+          <li class="step">
+            <div class="step-no">2</div>
+            <div class="step-body">
+              <h3 data-en="One-shot · GitHub → Slack → Email" data-zh="一次性 · GitHub → Slack → Email">One-shot · GitHub → Slack → Email</h3>
+              <p data-en="“In 3 minutes, pull the open issues for &lt;owner&gt;/&lt;repo&gt;, post the summary to Slack #eng-updates, and once that succeeds, email the same summary to me.”"
+                 data-zh="「請排定在三分鐘後，把 &lt;owner&gt;/&lt;repo&gt; 的現有 issues 抓取並整理，通知 Slack #eng-updates 頻道，成功後再寄一封 email 把整理好的內容寄給我自己。」">
+                “In 3 minutes, pull the open issues for &lt;owner&gt;/&lt;repo&gt;, post the summary to Slack #eng-updates, and once that succeeds, email the same summary to me.”
+              </p>
+            </div>
+          </li>
+          <li class="step">
+            <div class="step-no">3</div>
+            <div class="step-body">
+              <h3 data-en="Recurring" data-zh="週期">Recurring</h3>
+              <p data-en="“Every weekday at 9:00 AM Taipei time, post a digest of &lt;owner&gt;/&lt;repo&gt;’s open issues and stale PRs to Slack #standup.”"
+                 data-zh="「每個工作日早上 9:00（台北時間），把 &lt;owner&gt;/&lt;repo&gt; 的未處理 issues 與卡住的 PR 整理後貼到 Slack #standup。」">
+                “Every weekday at 9:00 AM Taipei time, post a digest of &lt;owner&gt;/&lt;repo&gt;’s open issues and stale PRs to Slack #standup.”
+              </p>
+            </div>
+          </li>
+        </ol>
+
+        <p class="fineprint"
+           data-en="Demo tip: for recurring jobs, say “every 2 minutes” to watch it fire live, then “cancel that task”. More examples — weekly email reports and list / status / cancel commands — in the README."
+           data-zh="Demo 技巧：週期任務現場展示可改說「每兩分鐘」看它連續觸發，再說「取消那個任務」。更多範例（每週 email 報告,以及 list／status／cancel 指令）見 README。">
+          Demo tip: for recurring jobs, say “every 2 minutes” to watch it fire live, then “cancel that task”. More examples — weekly email reports and list / status / cancel commands — in the README.
+        </p>
+      </div>
+    </section>
+
     <!-- SURFACE -->
-    <section id="surface" class="band">
+    <section id="surface" class="band band-alt">
       <div class="wrap">
         <p class="eyebrow" data-en="What it does" data-zh="功能">What it does</p>
-        <h2 data-en="Five tools, seven actions" data-zh="五個工具，七種動作">Five tools, seven actions</h2>
+        <h2 data-en="Five tools, six actions" data-zh="五個工具，六種動作">Five tools, six actions</h2>
 
         <div class="surface-grid">
           <div class="panel">
@@ -189,13 +242,12 @@
             <h3 class="panel-title" data-en="Actions" data-zh="動作">Actions</h3>
             <p class="panel-sub" data-en="What a task actually does when it fires." data-zh="任務觸發時實際執行的工作。">What a task actually does when it fires.</p>
             <ul class="action-list">
-              <li><code>echo</code><span data-en="Echo a message back — smoke test." data-zh="回傳訊息 — 煙霧測試。">Echo a message back — smoke test.</span></li>
-              <li><code>http_call</code><span data-en="Call any HTTP endpoint, with ${VAR} env substitution." data-zh="呼叫任意 HTTP 端點，支援 ${VAR} 環境變數替換。">Call any HTTP endpoint, with ${VAR} env substitution.</span></li>
-              <li><code>slack_post</code><span data-en="Post a message to a Slack channel." data-zh="發送訊息到 Slack 頻道。">Post a message to a Slack channel.</span></li>
               <li><code>github_digest</code><span data-en="Summarize a repo's issues &amp; PRs." data-zh="彙整某 repo 的 issues 與 PR。">Summarize a repo's issues &amp; PRs.</span></li>
+              <li><code>slack_post</code><span data-en="Post a message to a Slack channel." data-zh="發送訊息到 Slack 頻道。">Post a message to a Slack channel.</span></li>
               <li><code>email_send</code><span data-en="Send email via your connected Gmail." data-zh="透過已連接的 Gmail 寄送 email。">Send email via your connected Gmail.</span></li>
-              <li><code>r2_upload</code><span data-en="Upload to Cloudflare R2 / S3-compatible storage." data-zh="上傳到 Cloudflare R2／S3 相容儲存。">Upload to Cloudflare R2 / S3-compatible storage.</span></li>
-              <li><code>calendar_digest_ics</code><span data-en="Pull events from an iCal / ICS calendar." data-zh="從 iCal／ICS 行事曆擷取事件。">Pull events from an iCal / ICS calendar.</span></li>
+              <li><code>llm_summarize</code><span data-en="Summarize text or an upstream result." data-zh="摘要文字或上游結果。">Summarize text or an upstream result.</span></li>
+              <li><code>llm_polish</code><span data-en="Rewrite text more cleanly (tone &amp; language)." data-zh="把文字改寫得更通順（語氣與語言）。">Rewrite text more cleanly (tone &amp; language).</span></li>
+              <li><code>echo</code><span data-en="Echo a message back — smoke test." data-zh="回傳訊息 — 煙霧測試。">Echo a message back — smoke test.</span></li>
             </ul>
           </div>
         </div>
@@ -205,7 +257,7 @@
           <span class="chip" data-en="Cron recurrence" data-zh="Cron 週期排程">Cron recurrence</span>
           <span class="chip" data-en="Job chaining" data-zh="任務串接">Job chaining</span>
           <span class="chip" data-en="Cancel semantics" data-zh="取消語意">Cancel semantics</span>
-          <span class="chip" data-en="Env-var substitution" data-zh="環境變數替換">Env-var substitution</span>
+          <span class="chip" data-en="OAuth connections" data-zh="OAuth 連線">OAuth connections</span>
           <span class="chip" data-en="Rate limiting" data-zh="速率限制">Rate limiting</span>
         </div>
       </div>

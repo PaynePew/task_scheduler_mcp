@@ -133,12 +133,22 @@ def test_anti_substitution_directive_present() -> None:
     assert _ANTI_SUBSTITUTION_REGEX.search(SYSTEM_INSTRUCTION)
 
 
-def test_real_system_instruction_lists_every_registered_action() -> None:
+def test_real_system_instruction_lists_every_non_operator_action() -> None:
+    """Every public action appears in the cold-start instructions; operator-only
+    actions (ADR-051) are deliberately excluded so they are not advertised to
+    delegated users (ADR-066). They stay discoverable via task.list_actions.v1."""
     from app.actions.registry import ACTION_REGISTRY
     from app.mcp.server import SYSTEM_INSTRUCTION
 
-    for name in ACTION_REGISTRY:
-        assert name in SYSTEM_INSTRUCTION, f"action {name!r} missing from SYSTEM_INSTRUCTION"
+    for name, handler in ACTION_REGISTRY.items():
+        if getattr(handler, "requires_operator", False):
+            assert name not in SYSTEM_INSTRUCTION, (
+                f"operator-only action {name!r} must NOT appear in SYSTEM_INSTRUCTION"
+            )
+        else:
+            assert name in SYSTEM_INSTRUCTION, (
+                f"public action {name!r} missing from SYSTEM_INSTRUCTION"
+            )
 
 
 def test_real_system_instruction_surfaces_oauth_providers() -> None:
