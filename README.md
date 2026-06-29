@@ -240,6 +240,9 @@ Talk to it in natural language. Connect GitHub, Slack, and Google at `/connectio
 5. **Manage the schedule** — *"List my scheduled tasks" · "What's the status of job `<id>`, with its runs?" · "Cancel job `<id>`" · "What can you do?"*
    Exercises `task.list` / `task.status` / `task.cancel` (best-effort) / `task.list_actions`.
 
+6. **Prose polish (LLM)** — *"Right now, rewrite this rough release note into a professional announcement: 'fixed the login bug, added dark mode, the api is faster now'."*
+   Exercises `immediate` + `llm_polish` — an operator-funded, fixed-prompt, cost-capped rewrite (you bring no API key). Verify: `task.status` shows `result.polished` with the cleaned-up text. Chain it for a real workflow: *"…then post the polished version to Slack `#announcements`"* combines `llm_polish → slack_post`.
+
 Prompt 2 is the showcase: one sentence becomes a scheduled **GitHub → Slack → Gmail** workflow that keeps firing on its own and keeps an audit trail. Chains can also fan out — one upstream feeding Slack **and** email in parallel.
 
 ## How scheduling works

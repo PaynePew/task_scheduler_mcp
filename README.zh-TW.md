@@ -240,6 +240,9 @@ stdio 的 MCP 伺服器是對話客戶端的子行程，對話一關就停。排
 5. **管理排程** — *「列出我所有排程任務」·「job `<id>` 的狀態與執行紀錄？」·「取消 job `<id>`」·「你能做哪些事？」*
    練到 `task.list` / `task.status` / `task.cancel`（best-effort） / `task.list_actions`。
 
+6. **文字潤飾（LLM）** — *「現在立刻把這段粗略的 release note 改寫成正式公告:『修好登入 bug、加了暗色模式、api 也變快了』。」*
+   練到 `immediate` + `llm_polish` —— operator 出錢、固定提示詞、有成本上限的改寫(你不用提供 API key)。驗證:`task.status` 的 `result.polished` 會是潤飾後的文字。想接進實際工作流可串接:*「…再把潤飾後的版本貼到 Slack `#announcements`」* 就組成 `llm_polish → slack_post`。
+
 第 2 個是招牌：一句話變成一條會自己持續觸發、又留有稽核紀錄的 **GitHub → Slack → Gmail** 工作流程。串接也能 fan-out —— 一個上游同時餵 Slack **與** email。
 
 ## 排程是怎麼運作的
