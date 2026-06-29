@@ -26,6 +26,7 @@ Trust-only mode (when workos_client_id is not set):
 
 from __future__ import annotations
 
+import html
 import logging
 import secrets
 import urllib.parse
@@ -137,65 +138,222 @@ def _verify_id_token_sub(
 # HTML rendering
 # ---------------------------------------------------------------------------
 
-_HTML_STYLE = """
-body { font-family: system-ui, sans-serif; max-width: 700px; margin: 3rem auto; padding: 0 1rem; }
-table { border-collapse: collapse; width: 100%; }
-th, td { border: 1px solid #ddd; padding: .5rem 1rem; text-align: left; }
-th { background: #f4f4f4; }
-.btn { display: inline-block; padding: .4rem .9rem; border-radius: 4px;
-       text-decoration: none; font-size: .9rem; cursor: pointer; border: none; }
-.btn-connect { background: #2ea44f; color: #fff; }
-.btn-disconnect { background: #d73a49; color: #fff; }
-.status-ok { color: #2ea44f; }
-.status-no { color: #888; }
+# These pages share the landing page's design system (app/web/static): the
+# /style.css design tokens + chrome (.site-header, .brand, .lang, .btn,
+# .site-footer), the /owl.svg brand mark, and the SAME EN/zh-Hant language
+# toggle (localStorage key "tsmcp-lang", so the choice is shared with the
+# landing). Asset URLs are ABSOLUTE (/style.css, /owl.svg) because these pages
+# live under /connections — relative paths would resolve to /connections/...
+
+_FONTS = (
+    '<link rel="preconnect" href="https://fonts.googleapis.com">'
+    '<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>'
+    '<link rel="stylesheet" href="https://fonts.googleapis.com/css2'
+    "?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700"
+    "&family=IBM+Plex+Mono:wght@400;500;600"
+    '&family=IBM+Plex+Sans:wght@400;500;600&display=swap">'
+)
+
+# Connections-specific layout, layered on top of the shared tokens in /style.css.
+_CONN_CSS = """
+  .conn-main { max-width: 660px; margin: 0 auto; padding: clamp(2.2rem,6vw,4.5rem) 24px 3.5rem; }
+  .conn-eyebrow { font-family: var(--font-mono); font-size:.74rem; font-weight:500;
+    letter-spacing:.18em; text-transform:uppercase; color: var(--accent-2); margin-bottom:12px; }
+  .conn-title { font-family: var(--font-display); font-optical-sizing:auto; font-weight:600;
+    font-size: clamp(2rem,5vw,2.7rem); line-height:1.04; letter-spacing:-.02em; color: var(--ink); }
+  .conn-lead { margin-top:14px; max-width:44em; color: var(--ink-2); font-size:1.04rem; }
+  .conn-id { margin-top:22px; display:flex; align-items:center; flex-wrap:wrap; gap:8px;
+    font-family: var(--font-mono); font-size:.82rem; color: var(--ink-3); }
+  .conn-id code { background: var(--accent-soft); color: var(--accent-2); padding:3px 8px;
+    border-radius:6px; font-size:.8rem; word-break:break-all; }
+  .conn-id a { color: var(--accent-2); }
+  .conn-card { margin-top:24px; background: var(--card); border:1px solid var(--line);
+    border-radius:16px; box-shadow: var(--shadow); overflow:hidden; }
+  .provider { display:flex; align-items:center; gap:15px; padding:18px 22px;
+    border-top:1px solid var(--line-2); }
+  .provider:first-child { border-top:0; }
+  .provider-mark { flex:0 0 auto; width:40px; height:40px; display:grid; place-items:center;
+    border-radius:11px; background: var(--accent-soft);
+    border:1px solid color-mix(in srgb, var(--accent) 22%, var(--line)); color: var(--ink); }
+  .provider-mark svg { width:21px; height:21px; display:block; }
+  .provider-name { font-weight:600; font-size:1.04rem; color: var(--ink); flex:1 1 auto; }
+  .pill { font-family: var(--font-mono); font-size:.68rem; font-weight:500; letter-spacing:.07em;
+    text-transform:uppercase; padding:5px 11px; border-radius:999px; white-space:nowrap; }
+  .pill-on { color: var(--accent-2); background: var(--accent-soft);
+    border:1px solid color-mix(in srgb, var(--accent) 30%, transparent); }
+  .pill-off { color: var(--ink-3); background:transparent; border:1px solid var(--line); }
+  .provider form { margin:0; }
+  .provider .btn { padding:8px 16px; font-size:.88rem; }
+  .btn-danger { background:transparent; border-color: var(--line); color: var(--ink-2);
+    box-shadow:none; }
+  .btn-danger:hover { border-color:#c0533a; color:#c0533a; transform:none; box-shadow:none; }
+  @media (prefers-color-scheme: dark){ .btn-danger:hover{ border-color:#e69077; color:#e69077; } }
+  .conn-foot { margin-top:20px; font-family: var(--font-mono); font-size:.78rem; line-height:1.65;
+    color: var(--ink-3); padding-left:14px; border-left:2px solid var(--accent); max-width:48em; }
+  .conn-actions { margin-top:26px; }
+  @media (max-width:520px){
+    .provider { flex-wrap:wrap; }
+    .provider-name { flex:1 0 55%; }
+  }
 """
+
+# Provider brand marks (monochrome, currentColor). Single-line: SVG path data is
+# whitespace-sensitive, so do NOT reflow across implicit string concatenation.
+_SVG_GITHUB = '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>'  # noqa: E501
+_SVG_SLACK = '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M5.042 15.165a2.528 2.528 0 0 1-2.52 2.523A2.528 2.528 0 0 1 0 15.165a2.527 2.527 0 0 1 2.522-2.52h2.52v2.52zM6.313 15.165a2.527 2.527 0 0 1 2.521-2.52 2.527 2.527 0 0 1 2.521 2.52v6.313A2.528 2.528 0 0 1 8.834 24a2.528 2.528 0 0 1-2.521-2.522v-6.313zM8.834 5.042a2.528 2.528 0 0 1-2.521-2.52A2.528 2.528 0 0 1 8.834 0a2.528 2.528 0 0 1 2.521 2.522v2.52H8.834zM8.834 6.313a2.528 2.528 0 0 1 2.521 2.521 2.528 2.528 0 0 1-2.521 2.521H2.522A2.528 2.528 0 0 1 0 8.834a2.528 2.528 0 0 1 2.522-2.521h6.312zM18.956 8.834a2.528 2.528 0 0 1 2.522-2.521A2.528 2.528 0 0 1 24 8.834a2.528 2.528 0 0 1-2.522 2.521h-2.522V8.834zM17.688 8.834a2.528 2.528 0 0 1-2.523 2.521 2.527 2.527 0 0 1-2.52-2.521V2.522A2.527 2.527 0 0 1 15.165 0a2.528 2.528 0 0 1 2.523 2.522v6.312zM15.165 18.956a2.528 2.528 0 0 1 2.523 2.522A2.528 2.528 0 0 1 15.165 24a2.527 2.527 0 0 1-2.52-2.522v-2.522h2.52zM15.165 17.688a2.527 2.527 0 0 1-2.52-2.523 2.526 2.526 0 0 1 2.52-2.52h6.313A2.527 2.527 0 0 1 24 15.165a2.528 2.528 0 0 1-2.522 2.523h-6.313z"/></svg>'  # noqa: E501
+_SVG_GOOGLE = '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12.48 10.92v3.28h7.84c-.24 1.84-.853 3.187-1.787 4.133-1.147 1.147-2.933 2.4-6.053 2.4-4.827 0-8.6-3.893-8.6-8.72s3.773-8.72 8.6-8.72c2.6 0 4.507 1.027 5.907 2.347l2.307-2.307C18.747 1.44 16.133 0 12.48 0 5.867 0 .307 5.387.307 12s5.56 12 12.173 12c3.573 0 6.267-1.173 8.373-3.36 2.16-2.16 2.84-5.213 2.84-7.667 0-.76-.053-1.467-.173-2.053H12.48z"/></svg>'  # noqa: E501
+
+_PROVIDERS = (
+    ("GitHub", "github", _SVG_GITHUB),
+    ("Slack", "slack", _SVG_SLACK),
+    ("Google", "google", _SVG_GOOGLE),
+)
+
+_HEADER = """<header class="site-header">
+  <a class="brand" href="/" aria-label="Task Scheduler MCP home">
+    <img src="/owl.svg" alt="" width="40" height="40" class="brand-mark">
+    <span class="brand-name">Task&nbsp;Scheduler<span class="brand-mcp">MCP</span></span>
+  </a>
+  <nav class="site-nav" aria-label="Primary">
+    <a href="/" data-en="Home" data-zh="首頁">Home</a>
+    <a href="https://github.com/PaynePew/task_scheduler_mcp">GitHub</a>
+  </nav>
+  <div class="lang" role="group" aria-label="Language / 語言">
+    <button type="button" class="lang-btn" data-lang="en">EN</button>
+    <button type="button" class="lang-btn" data-lang="zh">中</button>
+  </div>
+</header>
+"""
+
+_FOOTER = """<footer class="site-footer">
+  <div class="wrap footer-wrap">
+    <div class="footer-brand">
+      <img src="/owl.svg" alt="" width="34" height="34">
+      <span>Task Scheduler MCP</span>
+    </div>
+    <nav class="footer-links" aria-label="Footer">
+      <a href="/" data-en="Home" data-zh="首頁">Home</a>
+      <a href="https://github.com/PaynePew/task_scheduler_mcp">GitHub</a>
+      <a href="https://status.paynepew.dev" data-en="Status" data-zh="狀態">Status</a>
+    </nav>
+  </div>
+</footer>
+"""
+
+_LANG_JS = """<script>
+(function(){var S="tsmcp-lang";
+var nodes=document.querySelectorAll("[data-en][data-zh]");
+var btns=document.querySelectorAll(".lang-btn");
+function apply(l){nodes.forEach(function(e){var v=e.getAttribute("data-"+l);if(v==null)return;
+if(e.tagName==="META"){e.setAttribute("content",v);}else{e.textContent=v;}});
+document.documentElement.lang=(l==="zh")?"zh-Hant":"en";
+btns.forEach(function(b){var on=b.getAttribute("data-lang")===l;b.classList.toggle("is-active",on);
+b.setAttribute("aria-pressed",on?"true":"false");});try{localStorage.setItem(S,l);}catch(e){}}
+var saved=null;try{saved=localStorage.getItem(S);}catch(e){}
+var initial=saved||(((navigator.language||"").toLowerCase().indexOf("zh")===0)?"zh":"en");
+btns.forEach(function(b){b.addEventListener("click",function(){apply(b.getAttribute("data-lang"));});});
+apply(initial);})();
+</script>"""
+
+
+def _page_head(title: str) -> str:
+    """Shared <head> for connection pages — links the landing design system."""
+    return (
+        '<!DOCTYPE html>\n<html lang="en">\n<head>\n'
+        '<meta charset="UTF-8">\n'
+        '<meta name="viewport" content="width=device-width, initial-scale=1.0">\n'
+        '<meta name="theme-color" content="#F3EADA">\n'
+        f"<title>{title}</title>\n"
+        '<link rel="icon" type="image/svg+xml" href="/favicon.svg">\n'
+        f"{_FONTS}\n"
+        '<link rel="stylesheet" href="/style.css">\n'
+        f"<style>{_CONN_CSS}</style>\n"
+        "</head>\n"
+    )
 
 
 def _render_dashboard(user_id: str, connections: list[str]) -> str:
-    """Return a simple HTML string for the connections dashboard."""
+    """Return the connections dashboard, themed to match the landing page."""
     rows = []
-    providers = [("GitHub", "github"), ("Slack", "slack"), ("Google", "google")]
-    for display_name, provider_slug in providers:
-        connected = provider_slug in connections
-        if connected:
-            status = '<span class="status-ok">Connected</span>'
-            disc_url = f"/connections/{provider_slug}/disconnect"
+    for name, slug, mark in _PROVIDERS:
+        if slug in connections:
+            pill = (
+                '<span class="pill pill-on" data-en="Connected" data-zh="已連接">Connected</span>'
+            )
             action = (
-                f'<form method="post" action="{disc_url}" style="display:inline">'
-                f'<button type="submit" class="btn btn-disconnect">Disconnect</button></form>'
+                f'<form method="post" action="/connections/{slug}/disconnect">'
+                '<button type="submit" class="btn btn-danger" '
+                'data-en="Disconnect" data-zh="中斷連接">Disconnect</button></form>'
             )
         else:
-            status = '<span class="status-no">Not connected</span>'
-            conn_url = f"/connections/{provider_slug}/connect"
-            action = f'<a href="{conn_url}" class="btn btn-connect">Connect</a>'
-        rows.append(f"<tr><td>{display_name}</td><td>{status}</td><td>{action}</td></tr>")
-
+            pill = (
+                '<span class="pill pill-off" data-en="Not connected" '
+                'data-zh="未連接">Not connected</span>'
+            )
+            action = (
+                f'<a class="btn btn-primary" href="/connections/{slug}/connect" '
+                'data-en="Connect" data-zh="連接">Connect</a>'
+            )
+        rows.append(
+            '<div class="provider">'
+            f'<span class="provider-mark">{mark}</span>'
+            f'<span class="provider-name">{name}</span>{pill}{action}</div>'
+        )
     rows_html = "\n".join(rows)
-    return f"""<!DOCTYPE html>
-<html lang="en">
-<head><meta charset="utf-8"><title>Connections</title><style>{_HTML_STYLE}</style></head>
-<body>
-  <h1>My Connections</h1>
-  <p>Signed in as <code>{user_id}</code> &nbsp;
-     <a href="/connections/logout">Sign out</a></p>
-  <table>
-    <thead><tr><th>Provider</th><th>Status</th><th>Action</th></tr></thead>
-    <tbody>{rows_html}</tbody>
-  </table>
-</body>
-</html>"""
+    safe_user = html.escape(user_id)
+    return (
+        _page_head("Connections · Task Scheduler MCP")
+        + "<body>\n"
+        + _HEADER
+        + '<main class="conn-main">\n'
+        '<p class="conn-eyebrow" data-en="Account" data-zh="帳號">Account</p>\n'
+        '<h1 class="conn-title" data-en="My Connections" data-zh="我的連線">My Connections</h1>\n'
+        '<p class="conn-lead" '
+        'data-en="Link the providers your scheduled actions act on. '
+        'Connect once, and your tasks run on your behalf." '
+        'data-zh="連接你的排程動作會用到的服務。連接一次後，任務就能代你執行。">'
+        "Link the providers your scheduled actions act on. "
+        "Connect once, and your tasks run on your behalf.</p>\n"
+        '<p class="conn-id"><span data-en="Signed in as" data-zh="登入身分">Signed in as</span> '
+        f"<code>{safe_user}</code> · "
+        '<a href="/connections/logout" data-en="Sign out" data-zh="登出">Sign out</a></p>\n'
+        f'<div class="conn-card">\n{rows_html}\n</div>\n'
+        '<p class="conn-foot" '
+        'data-en="GitHub, Slack and Google authorize over OAuth. Tokens are '
+        'encrypted at rest and revoked the moment you disconnect." '
+        'data-zh="GitHub、Slack 與 Google 透過 OAuth 授權。權杖加密儲存，'
+        '按下「中斷連接」即時撤銷。">'
+        "GitHub, Slack and Google authorize over OAuth. Tokens are "
+        "encrypted at rest and revoked the moment you disconnect.</p>\n"
+        '<div class="conn-actions">'
+        '<a class="btn btn-ghost btn-small" href="/" '
+        'data-en="← Back to home" data-zh="← 返回首頁">← Back to home</a>'
+        "</div>\n"
+        "</main>\n" + _FOOTER + _LANG_JS + "\n</body>\n</html>"
+    )
 
 
 def _render_login_page(redirect_url: str) -> str:
-    return f"""<!DOCTYPE html>
-<html lang="en">
-<head><meta charset="utf-8"><title>Sign in</title><style>{_HTML_STYLE}</style></head>
-<body>
-  <h1>Sign in required</h1>
-  <p>You need to sign in to manage your connections.</p>
-  <a href="{redirect_url}" class="btn btn-connect">Sign in</a>
-</body>
-</html>"""
+    """Themed 'sign in required' page (matches the landing design system)."""
+    safe_url = html.escape(redirect_url, quote=True)
+    return (
+        _page_head("Sign in · Task Scheduler MCP")
+        + "<body>\n"
+        + _HEADER
+        + '<main class="conn-main">\n'
+        '<p class="conn-eyebrow" data-en="Account" data-zh="帳號">Account</p>\n'
+        '<h1 class="conn-title" data-en="Sign in required" '
+        'data-zh="需要登入">Sign in required</h1>\n'
+        '<p class="conn-lead" '
+        'data-en="Sign in to manage the providers your scheduled tasks connect to." '
+        'data-zh="登入以管理你排程任務所連接的服務。">'
+        "Sign in to manage the providers your scheduled tasks connect to.</p>\n"
+        '<div class="conn-actions">'
+        f'<a class="btn btn-primary" href="{safe_url}" '
+        'data-en="Sign in" data-zh="登入">Sign in</a>'
+        "</div>\n"
+        "</main>\n" + _FOOTER + _LANG_JS + "\n</body>\n</html>"
+    )
 
 
 # ---------------------------------------------------------------------------
