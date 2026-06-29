@@ -318,7 +318,7 @@ add(
         text_el(
             W // 2,
             28,
-            "Task Scheduler MCP — Dual-Target Deployment Topology",
+            "Owl Task Scheduler MCP — Dual-Target Deployment Topology",
             font_size=22,
             bold=True,
             color=TEXT_DARK,
@@ -760,7 +760,7 @@ draw_rrect(RIGHT_X1, 145, RIGHT_X2 - RIGHT_X1, H - 165, ORANGE_FILL, "#fcd34d", 
 draw_text_centered(
     W // 2,
     30,
-    "Task Scheduler MCP - Dual-Target Deployment Topology",
+    "Owl Task Scheduler MCP - Dual-Target Deployment Topology",
     size=20,
     bold=True,
     color=TEXT_DARK,

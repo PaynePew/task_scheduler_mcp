@@ -1,4 +1,4 @@
-# Connecting Task Scheduler MCP to Claude Desktop
+# Connecting Owl Task Scheduler MCP to Claude Desktop
 
 > **Audience:** maintainers and power users. For a paste-able end-user version with no
 > internal jargon, see [claude-desktop-quickstart.md](./claude-desktop-quickstart.md).
@@ -55,7 +55,7 @@ Endpoint: `https://scheduler.paynepew.dev/mcp` · Dashboard: `https://scheduler.
 2. **Connectors** in the left nav.
 3. Scroll down → **Add custom connector** (or the **+** button).
 4. Fill in:
-   - **Name:** `Task Scheduler`
+   - **Name:** `owl-scheduler`
    - **Remote MCP server URL:** `https://scheduler.paynepew.dev/mcp`
    - **Advanced settings:** leave empty. The server supports **dynamic client registration**, so
      you do *not* need to supply an OAuth Client ID / Secret manually.
@@ -117,7 +117,7 @@ Claude Desktop has no native UI field for a custom `X-User-Id` header on a remot
 local HTTP server use the `mcp-remote` stdio bridge in `claude_desktop_config.json`:
 
 ```jsonc
-{ "mcpServers": { "task-scheduler": {
+{ "mcpServers": { "owl-scheduler": {
   "command": "npx",
   "args": ["mcp-remote", "http://localhost:8000/mcp", "--header", "X-User-Id:me"]
 }}}
@@ -139,7 +139,7 @@ it cannot fire scheduled jobs while the client is closed ([ADR-006](../adr/ADR-0
 The OAuth dashboard still lives in the HTTP web tier, so you still bring the stack up.
 
 ```jsonc
-{ "mcpServers": { "task-scheduler": {
+{ "mcpServers": { "owl-scheduler": {
   "command": "uv",
   "args": ["run", "python", "-m", "app.entrypoints.mcp_stdio"],
   "env": { "MCP_USER_ID": "me", "MCP_USER_TZ": "UTC" }
@@ -170,6 +170,11 @@ Cancel task <job_id>                 → task.cancel
 Supports cron recurrence, job chaining (`trigger_on_job_id` — the previous run's output feeds the
 next), and `${VAR}` env-var substitution. Rate limit: **1000 creates / 24h · 10 / min burst**
 ([ADR-042](../adr/ADR-042-postgres-backed-rate-limiting.md)).
+
+> **Forcing the route.** If Claude reaches for its own built-in scheduler instead of this
+> connector, start the request with **"use owl-scheduler to …"**. `owl-scheduler` is the routing
+> identifier (the connector Name / config key); it is a collision-free handle that the built-in
+> scheduler does not answer to. See [ADR-066](../adr/ADR-066-owl-brand-layer-and-routing-identity.md).
 
 ---
 

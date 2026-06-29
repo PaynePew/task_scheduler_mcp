@@ -3,20 +3,20 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="description" data-en="Task Scheduler MCP — a self-hostable MCP server that lets your LLM client schedule, chain, and cancel recurring tasks, backed by Postgres + SQS." data-zh="Task Scheduler MCP — 一個可自架的 MCP 伺服器，讓你的 LLM 客戶端排程、串接、取消週期性任務，由 Postgres + SQS 驅動。" content="Task Scheduler MCP — a self-hostable MCP server that lets your LLM client schedule, chain, and cancel recurring tasks, backed by Postgres + SQS." />
+  <meta name="description" data-en="Owl Task Scheduler MCP — a self-hostable MCP server that lets your LLM client schedule, chain, and cancel recurring tasks, backed by Postgres + SQS." data-zh="Owl Task Scheduler MCP — 一個可自架的 MCP 伺服器，讓你的 LLM 客戶端排程、串接、取消週期性任務，由 Postgres + SQS 驅動。" content="Owl Task Scheduler MCP — a self-hostable MCP server that lets your LLM client schedule, chain, and cancel recurring tasks, backed by Postgres + SQS." />
   <meta name="theme-color" content="#F3EADA" />
   <meta property="og:type" content="website" />
   <meta property="og:url" content="https://scheduler.paynepew.dev/" />
-  <meta property="og:title" content="Task Scheduler MCP" />
+  <meta property="og:title" content="Owl Task Scheduler MCP" />
   <meta property="og:description" content="A self-hostable MCP server that lets your LLM client schedule, chain, and cancel recurring tasks." />
   <meta property="og:image" content="https://scheduler.paynepew.dev/og-image.png" />
   <meta property="og:image:width" content="1200" />
   <meta property="og:image:height" content="630" />
   <meta name="twitter:card" content="summary_large_image" />
-  <meta name="twitter:title" content="Task Scheduler MCP" />
+  <meta name="twitter:title" content="Owl Task Scheduler MCP" />
   <meta name="twitter:description" content="A self-hostable MCP server that lets your LLM client schedule, chain, and cancel recurring tasks." />
   <meta name="twitter:image" content="https://scheduler.paynepew.dev/og-image.png" />
-  <title>Task Scheduler MCP</title>
+  <title>Owl Task Scheduler MCP</title>
   <link rel="icon" type="image/svg+xml" href="favicon.svg" />
   <link rel="apple-touch-icon" href="favicon.svg" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -26,9 +26,9 @@
 </head>
 <body>
   <header class="site-header">
-    <a class="brand" href="/" aria-label="Task Scheduler MCP home">
+    <a class="brand" href="/" aria-label="Owl Task Scheduler MCP home">
       <img src="owl.svg" alt="" width="40" height="40" class="brand-mark" />
-      <span class="brand-name">Task&nbsp;Scheduler<span class="brand-mcp">MCP</span></span>
+      <span class="brand-name">Owl&nbsp;Task&nbsp;Scheduler<span class="brand-mcp">MCP</span></span>
     </a>
     <nav class="site-nav" aria-label="Primary">
       <a href="#what" data-en="Overview" data-zh="總覽">Overview</a>
@@ -48,7 +48,7 @@
     <section class="hero">
       <div class="hero-copy">
         <p class="kicker" data-en="Self-hostable MCP server" data-zh="可自架的 MCP 伺服器">Self-hostable MCP server</p>
-        <h1 class="hero-title">Task Scheduler <span class="accent">MCP</span></h1>
+        <h1 class="hero-title">Owl Task Scheduler <span class="accent">MCP</span></h1>
         <p class="hero-tagline"
            data-en="Schedule, chain, and cancel recurring tasks straight from your LLM client. A persistent HTTP service backed by Postgres + SQS — it keeps firing jobs long after the chat window is closed."
            data-zh="直接從你的 LLM 客戶端排程、串接、取消週期性任務。一個由 Postgres + SQS 驅動的常駐 HTTP 服務 — 即使聊天視窗關掉，它仍會持續執行你的任務。">
@@ -115,7 +115,7 @@
             <div class="step-no">1</div>
             <div class="step-body">
               <h3 data-en="Add the server to your MCP client config" data-zh="將伺服器加入 MCP 客戶端設定">Add the server to your MCP client config</h3>
-              <pre class="code"><span class="code-tab">claude_desktop_config.json</span><code>{ "mcpServers": { "task-scheduler": {
+              <pre class="code"><span class="code-tab">claude_desktop_config.json</span><code>{ "mcpServers": { "owl-scheduler": {
   "url": <span class="s">"https://scheduler.paynepew.dev/mcp"</span>,
   "transport": <span class="s">"streamable-http"</span>
 }}}</code></pre>
@@ -149,6 +149,11 @@
               <p data-en="For example: “Every weekday at 9am, post a GitHub digest of my repo to #standup on Slack.” The scheduler persists the job and fires it on time — every time."
                  data-zh="例如：「每個工作日早上 9 點，把我 repo 的 GitHub 摘要貼到 Slack 的 #standup。」排程器會保存這個任務，並準時、每次都執行。">
                 For example: “Every weekday at 9am, post a GitHub digest of my repo to #standup on Slack.” The scheduler persists the job and fires it on time — every time.
+              </p>
+              <p class="fineprint"
+                 data-en="Tip: if Claude reaches for its own built-in scheduler, start with “use owl-scheduler to …” — a collision-free handle that routes straight here."
+                 data-zh="提示：若 Claude 改用它內建的排程器，請以「use owl-scheduler to …」開頭——這個無衝突的名稱會直接指向本服務。">
+                Tip: if Claude reaches for its own built-in scheduler, start with “use owl-scheduler to …” — a collision-free handle that routes straight here.
               </p>
             </div>
           </li>
@@ -211,7 +216,7 @@
     <div class="wrap footer-wrap">
       <div class="footer-brand">
         <img src="owl.svg" alt="" width="34" height="34" />
-        <span>Task Scheduler MCP</span>
+        <span>Owl Task Scheduler MCP</span>
       </div>
       <nav class="footer-links" aria-label="Footer">
         <a href="https://github.com/PaynePew/task_scheduler_mcp">GitHub</a>

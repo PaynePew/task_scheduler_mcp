@@ -1,4 +1,4 @@
-"""ChatGPT Task Scheduler — MCP-based job scheduler (Postgres + SQS).
+"""Owl Task Scheduler MCP — MCP-based job scheduler (Postgres + SQS).
 
 New here? Read these first, in order:
   1. ``CONTEXT.md`` (repo root) — domain glossary. Trust this over the PRD.

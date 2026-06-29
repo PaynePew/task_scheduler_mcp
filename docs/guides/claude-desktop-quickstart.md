@@ -1,4 +1,4 @@
-# Task Scheduler — Claude Desktop Quickstart
+# Owl Task Scheduler MCP — Claude Desktop Quickstart
 
 Schedule, chain, and cancel recurring tasks from a Claude chat. Setup takes about 2 minutes.
 
@@ -11,7 +11,7 @@ Schedule, chain, and cancel recurring tasks from a Claude chat. Setup takes abou
 1. Claude Desktop → **Settings** → **Connectors**.
 2. Click **Add custom connector**.
 3. Enter:
-   - **Name:** `Task Scheduler`
+   - **Name:** `owl-scheduler`
    - **URL:** `https://scheduler.paynepew.dev/mcp`
 4. Leave the advanced fields empty and click **Add**.
 
@@ -54,6 +54,10 @@ Cancel that task
 ```
 
 It handles repeating schedules and chaining one task's result into the next.
+
+> **If Claude tries to use its own built-in scheduler instead** (e.g. it says it can't do
+> something this connector clearly can), name the connector explicitly: start your request with
+> **"use owl-scheduler to …"**. `owl-scheduler` is a collision-free handle that routes straight here.
 
 ---
 
