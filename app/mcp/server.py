@@ -65,6 +65,13 @@ def build_system_instruction(registry: dict[str, ActionHandler], template: str) 
         )
     lines: list[str] = []
     for handler in sorted(registry.values(), key=lambda h: h.name):
+        # Operator-only actions (ADR-051) are deliberately omitted from the
+        # cold-start instructions so they are not advertised to delegated users
+        # (ADR-066). They remain fully functional and discoverable via
+        # task.list_actions.v1. getattr keeps test stub handlers (no
+        # requires_operator attr) working — they default to public.
+        if getattr(handler, "requires_operator", False):
+            continue
         suffix = f" (needs {handler.required_provider} OAuth)" if handler.required_provider else ""
         lines.append(f"- {handler.name}{suffix} -- {handler.summary_line}")
     return template.replace(_ACTIONS_BLOCK_PLACEHOLDER, "\n".join(lines))

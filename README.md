@@ -200,26 +200,47 @@ A stdio MCP server is a child process of the chat client, so it stops the moment
 
 **Tools (5):** `task.create.v1`, `task.list.v1`, `task.status.v1`, `task.cancel.v1`, `task.list_actions.v1`. A tool is what the LLM client invokes; `task.create.v1` takes an `action` field naming one of the handlers below.
 
-**Actions (8):** what the worker actually executes, grouped by how they get credentials.
+**Actions (6):** what the worker actually executes, grouped by how they get credentials. All six are available to every user.
 
 | Action | Needs | What it does |
 |---|---|---|
-| `echo` | nothing | Echoes input back. Smoke test for create and dispatch. |
-| `llm_summarize` | nothing | Summarizes text or an upstream result. Fixed prompt, with token and budget caps. |
-| `llm_polish` | nothing | Rewrites text more cleanly. Same fixed-prompt, capped path. |
 | `github_digest` | your GitHub | Pulls your issues and PRs for a repo. Good upstream for a digest. |
 | `slack_post` | your Slack | Posts a message to a channel in your workspace. |
 | `email_send` | your Google | Sends mail from your Gmail. Supports digest chaining. |
-| `http_call` | operator only | Generic HTTP call with `${VAR}` substitution. Restricted to the deployer (SSRF surface). |
-| `calendar_digest_ics` | operator only | Fetches an ICS calendar and lists events in a window. |
+| `llm_summarize` | nothing | Summarizes text or an upstream result. Fixed prompt, with token and budget caps. |
+| `llm_polish` | nothing | Rewrites text more cleanly (tone & language). Same fixed-prompt, capped path. |
+| `echo` | nothing | Echoes input back. Smoke test for create and dispatch. |
 
 The OAuth-backed actions run on each user's own scoped token. The two LLM actions run a fixed, cost-capped transform: no free-form prompt and no `${VAR}`. The model is pinned to a cheap one (`gpt-4o-mini`) with a hard per-call output-token limit plus per-user daily and global monthly budget ceilings, so cost stays bounded ([ADR-052](docs/adr/ADR-052-operator-subsidized-llm-actions-fixed-prompt-and-caps.md)).
+
+> Self-host extras (operator-only, not offered on the hosted demo): `http_call` and `calendar_digest_ics` exist for the deployer's own use and are rejected at `task.create` for everyone else ([ADR-051](docs/adr/ADR-051-action-surface-tiering-public-oauth-vs-operator-only.md)).
 
 **Resources (4):** `tasks://list`, `tasks://actions`, `tasks://job/{job_id}`, `tasks://recent-results` (last 24h of completed runs, useful as an on-connect briefing).
 
 **Prompts (2):** `daily_review`, `setup_summary`.
 
 **Scheduling features:** immediate, one-shot (`scheduled_at`), and recurring (`cron_expr`, including `@daily`/`@hourly` shortcuts) jobs; job chaining (`trigger_on_job_id` with `trigger_on_status`); cancel semantics; per-user rate limits and quotas.
+
+## Example prompts
+
+Talk to it in natural language. Connect GitHub, Slack, and Google at `/connections` first; replace `<owner>/<repo>` and the channel / email with your own. If your client reaches for its built-in scheduler instead, start with **"use owl-scheduler to …"**.
+
+1. **Immediate** — *"Right now, pull the open issues and stale PRs for `<owner>/<repo>` and summarize them for me."*
+   Exercises `immediate` + `github_digest`. Verify: result in ~10s via `task.status`.
+
+2. **One-shot, three-service chain (flagship)** — *"In 3 minutes, pull the open issues for `<owner>/<repo>`, post the summary to Slack `#eng-updates`, and once that succeeds, email the same summary to me."*
+   Exercises `one-shot` + the chain `github_digest → slack_post → email_send` (data flows downstream via `from_run_id` + the `digest_v1` template). Verify: after 3 minutes a Slack message appears, then the email; `task.list` shows the three linked jobs.
+
+3. **Recurring (daily standup)** — *"Every weekday at 9:00 AM Taipei time, post a digest of `<owner>/<repo>`'s open issues and stale PRs to Slack `#standup`."*
+   Exercises `recurring` (cron) + `github_digest → slack_post`. Demo tip: for a live demo say *"every 2 minutes"* to watch it fire repeatedly, then *"cancel that task"*.
+
+4. **Recurring (weekly report)** — *"Every Friday at 5:00 PM, summarize this week's GitHub activity for `<owner>/<repo>` and email me the report."*
+   Exercises weekly `recurring` + `github_digest → email_send` (`digest_v1`).
+
+5. **Manage the schedule** — *"List my scheduled tasks" · "What's the status of job `<id>`, with its runs?" · "Cancel job `<id>`" · "What can you do?"*
+   Exercises `task.list` / `task.status` / `task.cancel` (best-effort) / `task.list_actions`.
+
+Prompt 2 is the showcase: one sentence becomes a scheduled **GitHub → Slack → Gmail** workflow that keeps firing on its own and keeps an audit trail. Chains can also fan out — one upstream feeding Slack **and** email in parallel.
 
 ## How scheduling works
 

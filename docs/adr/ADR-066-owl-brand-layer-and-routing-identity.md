@@ -63,3 +63,14 @@ A further subtlety: dropping the token `task` from the routing name could *reduc
 **Verification (required after deploy):** run a set of natural-language scheduling phrases on Claude Desktop and measure how often routing lands on `owl-scheduler` vs the built-in. Treat this ADR's "fix" as confirmed only once that test passes.
 
 **Reversibility:** brand strings and `instructions` prose are cheap to revert; the `owl-scheduler` server self-name is a one-line change. The deliberate *non-action* (keeping `task_scheduler_mcp` infra) is what future contributors must not "tidy up" — hence the §0 entry in `CONTEXT.md`.
+
+## Amendment (2026-06-29) — operator-only actions excluded from the cold-start instructions
+
+Companion to the example-prompt / positioning work. Operator-only actions (`requires_operator`, ADR-051 — currently `http_call` and `calendar_digest_ics`) are now filtered out of the MCP `instructions` ACTIONS_BLOCK (`build_system_instruction`). The hosted product is positioned as an engineer assistant around **GitHub / Slack / Gmail**, and these actions are not part of that public story, so they should not be advertised to delegated users at handshake.
+
+They remain:
+- fully functional for the operator (nothing removed from `ACTION_REGISTRY`);
+- discoverable via `task.list_actions.v1` — an explicit "what can you do" query where they surface as operator-gated. Deliberately **not** filtered there (the lighter choice over per-caller filtering; revisit if needed);
+- documented in the README only as a small "self-host / operator-only" footnote plus the security model (ADR-050/051), never in the headline action list or on the landing page.
+
+Alongside this, README + landing drop the stale `r2_upload` (already removed in ADR-051) and surface the two public LLM actions (`llm_summarize`, `llm_polish`). A curated set of verifiable example prompts (immediate / one-shot / recurring / chained, across GitHub + Slack + Gmail) lives in both surfaces as the onboarding + interview reference.
