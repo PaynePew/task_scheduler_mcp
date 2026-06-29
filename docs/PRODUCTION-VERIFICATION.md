@@ -87,7 +87,7 @@ Invoke-RestMethod http://localhost:8000/healthz/shed
 
 **A. 自架 HTTP（主線）** — Claude Code / Cursor 的 mcp config（`~/.claude.json` 內 `projects[<本專案>].mcpServers`，或專案根的 `.mcp.json`）：
 ```jsonc
-{ "mcpServers": { "task-scheduler": {
+{ "mcpServers": { "owl-scheduler": {
   "type": "http",                        // ← 欄位叫 "type"，不是 "transport": "streamable-http"
   "url": "http://localhost:8000/mcp",
   "headers": { "X-User-Id": "me" }
@@ -97,7 +97,7 @@ Invoke-RestMethod http://localhost:8000/healthz/shed
 
 **B. 自架 stdio** — client 自己 spawn 子行程：
 ```jsonc
-{ "mcpServers": { "task-scheduler": {
+{ "mcpServers": { "owl-scheduler": {
   "type": "stdio",
   "command": "uv",
   "args": ["run", "python", "-m", "app.entrypoints.mcp_stdio"],
@@ -123,7 +123,7 @@ npx @modelcontextprotocol/inspector uv run python -m app.entrypoints.mcp_stdio
 列出 tools。**期望恰好 5 個**：
 `task.create.v1` · `task.list.v1` · `task.status.v1` · `task.cancel.v1` · `task.list_actions.v1`
 
-> 命名小提醒：server 端註冊的就是上面這 5 個**帶點**的名字（MCP Inspector 看到的即為此形）。但 **Claude Code / Cursor / Codex 會把點換成底線並加上 server 前綴**，所以你在那邊看到的會是 `mcp__task-scheduler__task_create_v1` 這種形式——名稱不同、數量一樣是 5 個，別誤判成「對不上」。
+> 命名小提醒：server 端註冊的就是上面這 5 個**帶點**的名字（MCP Inspector 看到的即為此形）。但 **Claude Code / Cursor / Codex 會把點換成底線並加上 server 前綴**，所以你在那邊看到的會是 `mcp__owl-scheduler__task_create_v1` 這種形式——名稱不同、數量一樣是 5 個，別誤判成「對不上」。
 
 ### 1.2 探索 actions 與授權狀態
 
@@ -404,7 +404,7 @@ OAuth 類 action 若 `not_connected`，回應應附 `connect_url`（指向 `http
 連線後（`/connections` → Connect Slack）：
 ```json
 { "action": "slack_post",
-  "action_params": {"channel":"#<你的測試頻道>", "message":"hello from task-scheduler verify", "template":"raw"},
+  "action_params": {"channel":"#<你的測試頻道>", "message":"hello from owl-scheduler verify", "template":"raw"},
   "schedule_type": "immediate" }
 ```
 **期望：** `completed`，`result.{channel, ts}`，Slack 頻道實際出現訊息。
@@ -414,7 +414,7 @@ OAuth 類 action 若 `not_connected`，回應應附 `connect_url`（指向 `http
 連線後（`/connections` → Connect Google）：
 ```json
 { "action": "email_send",
-  "action_params": {"to":["<你的信箱>"], "subject":"task-scheduler verify", "body":"hello", "template":"raw"},
+  "action_params": {"to":["<你的信箱>"], "subject":"owl-scheduler verify", "body":"hello", "template":"raw"},
   "schedule_type": "immediate" }
 ```
 **期望：** `completed`，`result.{recipients, subject, provider:"gmail"}`，信箱實際收到信。
@@ -485,7 +485,7 @@ OAuth 類 action 若 `not_connected`，回應應附 `connect_url`（指向 `http
 ### 7.1 Codex + 自架 stdio
 
 ```toml
-[mcp_servers.task-scheduler]
+[mcp_servers.owl-scheduler]
 command = "uv"
 args = ["run", "python", "-m", "app.entrypoints.mcp_stdio"]
 cwd = "C:/Users/MaxL/work/projects/live_sessions/chatgpt_task"
@@ -495,12 +495,12 @@ env = { MCP_USER_ID = "me", MCP_USER_TZ = "UTC" }
 ### 7.2 Codex + 自架 HTTP（建議；對齊你既有 HTTP 測法）
 
 ```toml
-[mcp_servers.task-scheduler]
+[mcp_servers.owl-scheduler]
 url = "http://localhost:8000/mcp"
 ```
 或用指令加（已實測 `codex mcp add` 的 HTTP 形式支援 `--url`）：
 ```powershell
-codex mcp add task-scheduler --url http://localhost:8000/mcp
+codex mcp add owl-scheduler --url http://localhost:8000/mcp
 ```
 > ⚠️ **修正（依實測 `codex mcp add --help`）**：Codex 的 HTTP MCP **不支援自訂 header**——只有 `--url` 與 `--bearer-token-env-var`（`--env` 明確「Only valid with stdio servers」）。所以**不要**寫 `http_headers = {...}`，那不是有效設定鍵。
 > 本地 **TrustOnly** 模式其實**不用帶 `X-User-Id`**：server 沒收到該 header 時會 fallback 到 mcp-server 容器自己的 `MCP_USER_ID`（本範本＝`me`），所以 Codex 走 HTTP 連進來就是以 `me` 身分操作。「每個 client 帶不同身分」才需要 header，本地這條路走不了——多租戶情境改用 7.3 的 hosted + WorkOS bearer。
@@ -508,9 +508,9 @@ codex mcp add task-scheduler --url http://localhost:8000/mcp
 ### 7.3 Codex + Hosted（scheduler.paynepew.dev，WorkOS Bearer）
 
 ```toml
-[mcp_servers.task-scheduler]
+[mcp_servers.owl-scheduler]
 url = "https://scheduler.paynepew.dev/mcp"
-# 方式一（OAuth）：先 `codex mcp login task-scheduler`，Codex 透過 RFC 9728 PRM 走 WorkOS OAuth
+# 方式一（OAuth）：先 `codex mcp login owl-scheduler`，Codex 透過 RFC 9728 PRM 走 WorkOS OAuth
 # 方式二（自備 JWT）：環境變數放一顆 WorkOS JWT，再用下面這行指定該 env var 名稱
 # bearer_token_env_var = "TASK_SCHEDULER_JWT"   # 對應 CLI flag --bearer-token-env-var
 ```
@@ -520,7 +520,7 @@ url = "https://scheduler.paynepew.dev/mcp"
 
 > ✅ **本機已驗證（2026-06-14）**：docker 全棧 Up；`codex mcp` 子指令（list/get/add/remove/login）皆在；直接對 `localhost:8000/mcp` 跑 MCP handshake（initialize→tools/list）回得到**正好 5 個 tool**。注意 `codex.exe` 可能不在 PATH（實際在 `…\AppData\Local\OpenAI\Codex\bin\codex.exe`），但在 Codex app 的整合終端機裡直接打 `codex` 即可。
 
-1. `codex mcp list` → 看到 `task-scheduler`。
+1. `codex mcp list` → 看到 `owl-scheduler`。
 2. 在 Codex 對話輸入：「**list my scheduled tasks**」→ 它應呼叫 `task.list.v1` 並回你前面建立的 job。
 3. 「**schedule an echo task that says hi, immediately**」→ 應呼叫 `task.create.v1`，`status:"scheduled"`，~10 秒後查 `completed`。
 

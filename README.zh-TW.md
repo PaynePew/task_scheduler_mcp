@@ -1,4 +1,4 @@
-# Task Scheduler MCP
+# Owl Task Scheduler MCP
 
 **繁體中文** | [English](README.md)
 
@@ -101,22 +101,22 @@ sequenceDiagram
 
 這是最快的試用方式，兩分鐘，不用 clone。
 
-**Claude Desktop**（Settings → Connectors → Add custom connector）：名稱填 `Task Scheduler`，URL 填 `https://scheduler.paynepew.dev/mcp`，其餘留空。點 Connect，在跳出的瀏覽器視窗登入，工具就會出現在對話裡。完整步驟：[docs/guides/claude-desktop-quickstart.md](docs/guides/claude-desktop-quickstart.md)。
+**Claude Desktop**（Settings → Connectors → Add custom connector）：名稱填 `owl-scheduler`，URL 填 `https://scheduler.paynepew.dev/mcp`，其餘留空。點 Connect，在跳出的瀏覽器視窗登入，工具就會出現在對話裡。完整步驟：[docs/guides/claude-desktop-quickstart.md](docs/guides/claude-desktop-quickstart.md)。
 
 **Claude Code：**
 
 ```bash
-claude mcp add --transport http task-scheduler https://scheduler.paynepew.dev/mcp
+claude mcp add --transport http owl-scheduler https://scheduler.paynepew.dev/mcp
 ```
 
 **Codex CLI**（`~/.codex/config.toml`）：
 
 ```toml
-[mcp_servers.task-scheduler]
+[mcp_servers.owl-scheduler]
 url = "https://scheduler.paynepew.dev/mcp"
 ```
 
-接著跑 `codex mcp login task-scheduler` 完成瀏覽器登入。
+接著跑 `codex mcp login owl-scheduler` 完成瀏覽器登入。
 
 登入後，開啟 [scheduler.paynepew.dev/connections](https://scheduler.paynepew.dev/connections)，確認頂端顯示的名字跟你剛剛用的帳號一致，再依需要對 GitHub、Slack 或 Google 點 Connect。健康檢查：`curl https://scheduler.paynepew.dev/healthz` 會回 `{"ok":true,"db":"connected"}`。
 
@@ -136,12 +136,12 @@ docker compose --profile full up -d
 
 ```bash
 # Claude Code
-claude mcp add --transport http task-scheduler http://localhost:8000/mcp --header "X-User-Id: me"
+claude mcp add --transport http owl-scheduler http://localhost:8000/mcp --header "X-User-Id: me"
 ```
 
 ```toml
 # Codex CLI config: ~/.codex/config.toml
-[mcp_servers.task-scheduler]
+[mcp_servers.owl-scheduler]
 url = "http://localhost:8000/mcp"
 http_headers = { "X-User-Id" = "me" }
 ```
@@ -166,7 +166,7 @@ docker compose --profile full up -d   # web tier（給 /connections）加上 Pos
 
 ```toml
 # Codex CLI config: ~/.codex/config.toml
-[mcp_servers.task-scheduler]
+[mcp_servers.owl-scheduler]
 command = "uv"
 args = ["run", "python", "-m", "app.entrypoints.mcp_stdio"]
 cwd = "/path/to/task_scheduler_mcp"
@@ -175,7 +175,7 @@ env = { MCP_USER_ID = "me", MCP_USER_TZ = "UTC" }
 
 ```jsonc
 // Claude Desktop / Cursor：客戶端按需 spawn 進程
-{ "mcpServers": { "task-scheduler": {
+{ "mcpServers": { "owl-scheduler": {
   "type": "stdio",
   "command": "uv",
   "args": ["run", "python", "-m", "app.entrypoints.mcp_stdio"],

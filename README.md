@@ -1,4 +1,4 @@
-# Task Scheduler MCP
+# Owl Task Scheduler MCP
 
 **English** | [繁體中文](README.zh-TW.md)
 
@@ -101,22 +101,22 @@ When an action needs an OAuth connection you haven't set up, the server replies 
 
 This is the fastest way to try it. Two minutes, no clone.
 
-**Claude Desktop** (Settings, Connectors, Add custom connector): name it `Task Scheduler`, URL `https://scheduler.paynepew.dev/mcp`, leave the rest blank. Click Connect, sign in through the browser window, and the tools appear in chat. Full walkthrough: [docs/guides/claude-desktop-quickstart.md](docs/guides/claude-desktop-quickstart.md).
+**Claude Desktop** (Settings, Connectors, Add custom connector): name it `owl-scheduler`, URL `https://scheduler.paynepew.dev/mcp`, leave the rest blank. Click Connect, sign in through the browser window, and the tools appear in chat. Full walkthrough: [docs/guides/claude-desktop-quickstart.md](docs/guides/claude-desktop-quickstart.md).
 
 **Claude Code:**
 
 ```bash
-claude mcp add --transport http task-scheduler https://scheduler.paynepew.dev/mcp
+claude mcp add --transport http owl-scheduler https://scheduler.paynepew.dev/mcp
 ```
 
 **Codex CLI** (`~/.codex/config.toml`):
 
 ```toml
-[mcp_servers.task-scheduler]
+[mcp_servers.owl-scheduler]
 url = "https://scheduler.paynepew.dev/mcp"
 ```
 
-Then run `codex mcp login task-scheduler` to do the browser sign-in.
+Then run `codex mcp login owl-scheduler` to do the browser sign-in.
 
 After signing in, open [scheduler.paynepew.dev/connections](https://scheduler.paynepew.dev/connections), check the name at the top matches the account you just used, and click Connect for GitHub, Slack, or Google as needed. Health check: `curl https://scheduler.paynepew.dev/healthz` returns `{"ok":true,"db":"connected"}`.
 
@@ -136,12 +136,12 @@ Point your client at the local endpoint. The `X-User-Id` header is your identity
 
 ```bash
 # Claude Code
-claude mcp add --transport http task-scheduler http://localhost:8000/mcp --header "X-User-Id: me"
+claude mcp add --transport http owl-scheduler http://localhost:8000/mcp --header "X-User-Id: me"
 ```
 
 ```toml
 # Codex CLI config: ~/.codex/config.toml
-[mcp_servers.task-scheduler]
+[mcp_servers.owl-scheduler]
 url = "http://localhost:8000/mcp"
 http_headers = { "X-User-Id" = "me" }
 ```
@@ -166,7 +166,7 @@ docker compose --profile full up -d   # web tier for /connections, plus Postgres
 
 ```toml
 # Codex CLI config: ~/.codex/config.toml
-[mcp_servers.task-scheduler]
+[mcp_servers.owl-scheduler]
 command = "uv"
 args = ["run", "python", "-m", "app.entrypoints.mcp_stdio"]
 cwd = "/path/to/task_scheduler_mcp"
@@ -175,7 +175,7 @@ env = { MCP_USER_ID = "me", MCP_USER_TZ = "UTC" }
 
 ```jsonc
 // Claude Desktop / Cursor: the client spawns the process on demand
-{ "mcpServers": { "task-scheduler": {
+{ "mcpServers": { "owl-scheduler": {
   "type": "stdio",
   "command": "uv",
   "args": ["run", "python", "-m", "app.entrypoints.mcp_stdio"],

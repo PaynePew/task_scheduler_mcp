@@ -1,4 +1,4 @@
-# Task Scheduler MCP
+# Owl Task Scheduler MCP
 
 MCP-based job scheduler exposing `task.create / list / status / cancel / list_actions` tools backed by Postgres + SQS (ElasticMQ locally). See `docs/PRD/prototype-w1.md` for the W1 prototype spec.
 

@@ -210,9 +210,9 @@ _PROVIDERS = (
 )
 
 _HEADER = """<header class="site-header">
-  <a class="brand" href="/" aria-label="Task Scheduler MCP home">
+  <a class="brand" href="/" aria-label="Owl Task Scheduler MCP home">
     <img src="/owl.svg" alt="" width="40" height="40" class="brand-mark">
-    <span class="brand-name">Task&nbsp;Scheduler<span class="brand-mcp">MCP</span></span>
+    <span class="brand-name">Owl&nbsp;Task&nbsp;Scheduler<span class="brand-mcp">MCP</span></span>
   </a>
   <nav class="site-nav" aria-label="Primary">
     <a href="/" data-en="Home" data-zh="首頁">Home</a>
@@ -229,7 +229,7 @@ _FOOTER = """<footer class="site-footer">
   <div class="wrap footer-wrap">
     <div class="footer-brand">
       <img src="/owl.svg" alt="" width="34" height="34">
-      <span>Task Scheduler MCP</span>
+      <span>Owl Task Scheduler MCP</span>
     </div>
     <nav class="footer-links" aria-label="Footer">
       <a href="/" data-en="Home" data-zh="首頁">Home</a>
@@ -302,7 +302,7 @@ def _render_dashboard(user_id: str, connections: list[str]) -> str:
     rows_html = "\n".join(rows)
     safe_user = html.escape(user_id)
     return (
-        _page_head("Connections · Task Scheduler MCP")
+        _page_head("Connections · Owl Task Scheduler MCP")
         + "<body>\n"
         + _HEADER
         + '<main class="conn-main">\n'
@@ -337,7 +337,7 @@ def _render_login_page(redirect_url: str) -> str:
     """Themed 'sign in required' page (matches the landing design system)."""
     safe_url = html.escape(redirect_url, quote=True)
     return (
-        _page_head("Sign in · Task Scheduler MCP")
+        _page_head("Sign in · Owl Task Scheduler MCP")
         + "<body>\n"
         + _HEADER
         + '<main class="conn-main">\n'

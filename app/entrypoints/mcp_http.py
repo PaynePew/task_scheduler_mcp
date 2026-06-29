@@ -463,7 +463,7 @@ def _run_stdio() -> None:
 
 def main() -> None:
     """Unified entrypoint: --transport http (default) or --transport stdio."""
-    parser = argparse.ArgumentParser(description="MCP Task Scheduler server")
+    parser = argparse.ArgumentParser(description="Owl Task Scheduler MCP server")
     parser.add_argument(
         "--transport",
         choices=["http", "stdio"],

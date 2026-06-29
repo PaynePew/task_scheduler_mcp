@@ -1,6 +1,22 @@
-# CONTEXT — ChatGPT Task Scheduler
+# CONTEXT — Owl Task Scheduler MCP
 
 Domain glossary for this project. Read this first when a term feels ambiguous; trust this file over the PRD or grilling-state when they disagree.
+
+## §0 Project naming
+
+The project carries **three distinct names on purpose** — they are deliberately decoupled, and confusing them (or "fixing" the divergence) is a trap. See ADR-066 (relates ADR-044, ADR-061).
+
+| Name | Value | Audience / where it lives |
+|---|---|---|
+| **display name** (brand) | `Owl Task Scheduler MCP` | Humans — README, landing page, OG metadata, docs prose |
+| **routing identifier** | `owl-scheduler` | The LLM — MCP server self-reported name (`Server("owl-scheduler", …)`) and the suggested `claude_desktop_config.json` key |
+| **infra identifier** | `task_scheduler_mcp` | Machines — GitHub repo, Python import root is `app`, container image, VPS `/opt/task_scheduler_mcp`, Terraform tags, R2 buckets |
+
+Why three, not one:
+
+- The **routing identifier** leads with the distinctive token `owl` because the bare term *"task scheduler"* collides with Claude's first-party scheduler — the LLM was routing to the built-in and denying our features. `owl-scheduler` is the collision-free handle a user can say ("use owl-scheduler to…") to force routing here. Disambiguation lives here + in the server `instructions` (capability-based routing directive, ADR-061), **not** in the human brand or the repo name (the LLM never reads those).
+- The **infra identifier** stays `task_scheduler_mcp` from ADR-044. It is invisible to end users and re-renaming it again (image paths, `/opt`, CI, Terraform) is pure churn with zero effect on the routing collision.
+- The **tool namespace** `task.*.v1` and resource scheme `tasks://` are **unchanged** (they are a versioned API contract, ADR-014); the `owl-scheduler` server namespace already disambiguates them (`owl-scheduler › task.create.v1`).
 
 ## §1 Core entities
 

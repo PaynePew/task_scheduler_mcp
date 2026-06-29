@@ -25,7 +25,7 @@ def _client() -> TestClient:
 def test_root_serves_landing_page() -> None:
     resp = _client().get("/")
     assert resp.status_code == 200
-    assert "Task Scheduler MCP" in resp.text
+    assert "Owl Task Scheduler MCP" in resp.text
     assert resp.headers["content-type"].startswith("text/html")
 
 

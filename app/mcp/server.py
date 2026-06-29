@@ -320,7 +320,10 @@ def create_server(
     own loop). Defaults to the module-level factory at runtime.
     """
     factory = session_factory or default_session_factory
-    server = Server("task-scheduler", instructions=SYSTEM_INSTRUCTION)
+    # Routing identifier (ADR-066): leads with the distinctive token "owl" so the
+    # LLM does not confuse this with a built-in/first-party scheduler. Display name
+    # stays "Owl Task Scheduler MCP"; infra identity stays task_scheduler_mcp.
+    server = Server("owl-scheduler", instructions=SYSTEM_INSTRUCTION)
 
     @server.list_prompts()
     async def list_prompts() -> list[types.Prompt]:
@@ -344,7 +347,9 @@ def create_server(
             types.Tool(
                 name="task.create.v1",
                 description=(
-                    "Create a new scheduled task. Returns {ok, data: {job_id, status}} "
+                    "Create a task that runs a registered action (see task.list_actions.v1) "
+                    "immediately, once at a future time, or on a recurring cron schedule; "
+                    "supports chaining and cancellation. Returns {ok, data: {job_id, status}} "
                     "on success or {ok: false, error: {code, message, field, expected}} on failure."
                 ),
                 inputSchema=_TASK_CREATE_SCHEMA,
