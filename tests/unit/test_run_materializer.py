@@ -1,7 +1,9 @@
-"""Unit tests for app/domain/run_materializer.py.
+"""Unit tests for app/domain/run_materializer.py (continuation model, ADR-067).
 
-Tests _spawn_run primitive, materialize_initial, materialize_successor, and _arm.
-These use mock sessions (no DB required) to verify the domain logic in isolation.
+Tests the _spawn_run primitive, materialize_initial (schedule-driven only),
+materialize_successor (no arming), and materialize_downstream (trigger-driven
+run created on an upstream terminal). These use mock sessions (no DB required)
+to verify the domain logic in isolation.
 
 Run with:
     uv run pytest -m "not integration" tests/unit/test_run_materializer.py
@@ -18,6 +20,7 @@ from app.db.models import Job, JobRun
 from app.domain.run_materializer import (
     ConcurrencyError,
     has_executing_run,
+    materialize_downstream,
     materialize_initial,
     materialize_successor,
 )
@@ -57,26 +60,22 @@ def _make_run(run_id=10, job_id=1, user_id="u1", status="SUCCEEDED", scheduled_a
     return run
 
 
-def _make_session(
-    no_live_run=True,
-    flushed_run_id=99,
-    downstream_jobs=None,
-):
+def _make_session(no_live_run=True, flushed_run_id=99):
     """Build a mock async session that supports add/flush/execute.
 
-    TextClause statements (pg_advisory_xact_lock calls, issue #237) are
-    returned a dummy result without advancing the call counter, so the
-    existing lock-check / downstream alternation is unchanged.
+    TextClause statements (pg_advisory_xact_lock calls, issue #237) pass through
+    without advancing the call counter. Every non-lock execute returns the
+    executing-run check result, so _spawn_run's single has_executing_run query is
+    answered. The continuation model no longer queries downstream jobs from the
+    materializer, so the old check/downstream alternation is gone.
     """
     from sqlalchemy.sql.elements import TextClause
 
     session = AsyncMock()
 
-    # Track objects added to the session
     session._added = []
     session.add = MagicMock(side_effect=lambda obj: session._added.append(obj))
 
-    # Flush assigns a run_id to the most recently added JobRun
     flush_call_count = [0]
 
     async def _flush():
@@ -88,44 +87,26 @@ def _make_session(
 
     session.flush = _flush
 
-    # execute returns no-executing-run by default (for forbid-concurrency check)
     scalar_result = MagicMock()
     scalar_result.scalar.return_value = not no_live_run  # scalar() False = no executing run
 
-    # For downstream jobs query
-    if downstream_jobs is None:
-        downstream_jobs = []
-
-    scalars_result = MagicMock()
-    scalars_result.scalars.return_value.all.return_value = downstream_jobs
-
-    execute_call_count = [0]
-
     async def _execute(stmt, *args, **kwargs):
-        # Advisory lock calls (TextClause) pass through without advancing the counter.
         if isinstance(stmt, TextClause):
-            dummy = MagicMock()
-            return dummy
-        execute_call_count[0] += 1
-        # First call is always the has_executing_run check (returns scalar bool)
-        # Subsequent calls are downstream job queries
-        if execute_call_count[0] % 2 == 1:  # odd calls = executing-run check
-            return scalar_result
-        else:  # even calls = downstream jobs
-            return scalars_result
+            return MagicMock()
+        return scalar_result
 
     session.execute = _execute
     return session
 
 
 # ---------------------------------------------------------------------------
-# materialize_initial — schedule-driven (no trigger)
+# materialize_initial — schedule-driven only
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_materialize_initial_schedule_driven_creates_pending_run():
-    """A schedule-driven job (no trigger) gets a PENDING run."""
+    """A schedule-driven job gets a PENDING run with no upstream dependency."""
     job = _make_job(job_id=1, cron_expr="@hourly")
     run_at = datetime.now(tz=UTC) + timedelta(hours=1)
 
@@ -134,32 +115,13 @@ async def test_materialize_initial_schedule_driven_creates_pending_run():
     run = await materialize_initial(session, job, run_at=run_at)
 
     assert run is not None
-    # The run was added to the session
     job_runs = [o for o in session._added if isinstance(o, JobRun)]
-    assert len(job_runs) >= 1
+    assert len(job_runs) == 1
     spawned = job_runs[0]
     assert spawned.status == "PENDING"
     assert spawned.scheduled_at == run_at
     assert spawned.job_id == job.job_id
     assert spawned.wait_for_run_id is None
-
-
-@pytest.mark.asyncio
-async def test_materialize_initial_trigger_driven_creates_waiting_run():
-    """A trigger-driven job (trigger_on_job_id set) gets a WAITING run armed against upstream."""
-    upstream_run = _make_run(run_id=42, job_id=10, status="RUNNING")
-    job = _make_job(job_id=2, trigger_on_job_id=10, trigger_on_status="SUCCEEDED")
-    run_at = datetime.now(tz=UTC)
-
-    session = _make_session(no_live_run=True)
-
-    await materialize_initial(session, job, run_at=run_at, wait_run=upstream_run)
-
-    job_runs = [o for o in session._added if isinstance(o, JobRun)]
-    assert len(job_runs) >= 1
-    spawned = job_runs[0]
-    assert spawned.status == "WAITING"
-    assert spawned.wait_for_run_id == upstream_run.run_id
 
 
 @pytest.mark.asyncio
@@ -175,7 +137,7 @@ async def test_materialize_initial_concurrency_raises():
 
 
 # ---------------------------------------------------------------------------
-# materialize_successor — next cron occurrence, arms downstream
+# materialize_successor — next cron occurrence, NO arming (ADR-067)
 # ---------------------------------------------------------------------------
 
 
@@ -195,7 +157,7 @@ async def test_materialize_successor_creates_pending_run():
     await materialize_successor(session, job, prev_run=prev_run, occurred_at=occurred_at)
 
     job_runs = [o for o in session._added if isinstance(o, JobRun)]
-    assert len(job_runs) >= 1
+    assert len(job_runs) == 1
     spawned = job_runs[0]
     assert spawned.status == "PENDING"
     assert spawned.job_id == job.job_id
@@ -203,11 +165,8 @@ async def test_materialize_successor_creates_pending_run():
 
 
 @pytest.mark.asyncio
-async def test_materialize_successor_arms_downstream():
-    """materialize_successor creates WAITING runs for each downstream job."""
-    # downstream job that triggers on job 1
-    downstream_job = _make_job(job_id=2, trigger_on_job_id=1, trigger_on_status="SUCCEEDED")
-
+async def test_materialize_successor_does_not_arm_downstream():
+    """No WAITING downstream run is materialised: continuation replaces arming."""
     job = _make_job(job_id=1, cron_expr="0 * * * *", timezone="UTC")
     prev_run = _make_run(
         run_id=5,
@@ -215,43 +174,54 @@ async def test_materialize_successor_arms_downstream():
         status="SUCCEEDED",
         scheduled_at=datetime(2026, 1, 1, 10, 0, tzinfo=UTC),
     )
-
-    # Session that returns the downstream job for the arm step
-    session = _make_session(no_live_run=True, flushed_run_id=99, downstream_jobs=[downstream_job])
+    session = _make_session(no_live_run=True)
     occurred_at = prev_run.scheduled_at + timedelta(minutes=30)
 
     await materialize_successor(session, job, prev_run=prev_run, occurred_at=occurred_at)
 
-    # Should have created: 1 PENDING root run + 1 WAITING downstream run
     job_runs = [o for o in session._added if isinstance(o, JobRun)]
-    assert len(job_runs) >= 2
+    assert len(job_runs) == 1, "successor must create only the root run — no arming"
+    assert all(r.status != "WAITING" for r in job_runs), "no WAITING run may be produced"
 
-    statuses = {r.status for r in job_runs}
-    assert "PENDING" in statuses
-    assert "WAITING" in statuses
 
-    waiting = next(r for r in job_runs if r.status == "WAITING")
-    assert waiting.job_id == downstream_job.job_id
+# ---------------------------------------------------------------------------
+# materialize_downstream — trigger-driven run on an upstream terminal (ADR-067)
+# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_materialize_successor_no_downstream_when_none():
-    """materialize_successor creates only the root run when there is no downstream."""
-    job = _make_job(job_id=1, cron_expr="0 * * * *", timezone="UTC")
-    prev_run = _make_run(
-        run_id=5,
-        job_id=1,
-        status="SUCCEEDED",
-        scheduled_at=datetime(2026, 1, 1, 10, 0, tzinfo=UTC),
+async def test_materialize_downstream_creates_pending_run_with_from_run_id():
+    """A downstream run is PENDING (not WAITING) and carries the upstream run_id."""
+    downstream = _make_job(job_id=2, trigger_on_job_id=1, trigger_on_status="ANY")
+    session = _make_session(no_live_run=True)
+    occurred_at = datetime(2026, 1, 1, 10, 30, tzinfo=UTC)
+
+    run = await materialize_downstream(
+        session,
+        downstream_job=downstream,
+        upstream_run_id=42,
+        occurred_at=occurred_at,
     )
-    session = _make_session(no_live_run=True, downstream_jobs=[])
-    occurred_at = prev_run.scheduled_at + timedelta(minutes=30)
 
-    await materialize_successor(session, job, prev_run=prev_run, occurred_at=occurred_at)
+    assert run.status == "PENDING", "continuation creates PENDING directly — no WAITING limbo"
+    assert run.wait_for_run_id == 42, "wait_for_run_id carries the upstream terminal run_id"
+    assert run.job_id == downstream.job_id
+    assert run.scheduled_at == occurred_at
 
-    job_runs = [o for o in session._added if isinstance(o, JobRun)]
-    assert len(job_runs) == 1
-    assert job_runs[0].status == "PENDING"
+
+@pytest.mark.asyncio
+async def test_materialize_downstream_slow_consumer_raises_concurrency():
+    """If the downstream already has an executing run, ConcurrencyError signals skip."""
+    downstream = _make_job(job_id=2, trigger_on_job_id=1, trigger_on_status="ANY")
+    session = _make_session(no_live_run=False)  # downstream already executing
+
+    with pytest.raises(ConcurrencyError):
+        await materialize_downstream(
+            session,
+            downstream_job=downstream,
+            upstream_run_id=42,
+            occurred_at=datetime.now(tz=UTC),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -300,284 +270,7 @@ async def test_spawn_derives_time_bucket():
 
 
 # ---------------------------------------------------------------------------
-# Cascade + fan-out unit tests (S2 / issue #226)
-# ---------------------------------------------------------------------------
-#
-# These tests require a smarter mock session that understands the per-job
-# downstream query and can answer for multi-level / multi-downstream topologies.
-
-
-def _make_cascade_session(
-    downstream_map: dict[int, list],
-    flushed_run_id: int = 100,
-    start_with_downstream: bool = False,
-):
-    """Build a mock session for cascade + fan-out tests.
-
-    downstream_map: {job_id: [downstream_Job, ...]}
-        Maps each job_id to the list of downstream jobs that trigger on it.
-        If a job_id has no entry, it has no downstream.
-
-    All has_executing_run checks return False (no executing run) so spawning
-    always succeeds.  flush() auto-assigns ascending run_ids.
-
-    start_with_downstream: set True when the first execute call comes from
-        _arm (downstream query) rather than _spawn_run (executing-run check).
-        Use this when calling _arm() directly without a preceding _spawn_run.
-
-    TextClause statements (pg_advisory_xact_lock, issue #237) are passed
-    through without advancing the state machine.
-    """
-    from sqlalchemy.sql.elements import TextClause
-
-    session = AsyncMock()
-
-    session._added = []
-    session.add = MagicMock(side_effect=lambda obj: session._added.append(obj))
-
-    run_id_counter = [flushed_run_id]
-
-    async def _flush():
-        for obj in session._added:
-            if isinstance(obj, JobRun) and not hasattr(obj, "_flushed"):
-                obj.run_id = run_id_counter[0]
-                run_id_counter[0] += 1
-                obj._flushed = True
-
-    session.flush = _flush
-
-    # State machine: True = next execute is an executing-run check; False = downstream query.
-    # _spawn_run first → first call is the executing-run check (start_with_downstream=False).
-    # _arm directly (skipping _spawn_run for root) → first call is the downstream query.
-    call_is_live_run = [not start_with_downstream]
-
-    async def _execute(stmt, *args, **kwargs):
-        # Advisory lock calls (TextClause) pass through without advancing the state machine.
-        if isinstance(stmt, TextClause):
-            return MagicMock()
-
-        if call_is_live_run[0]:
-            # executing-run check: return False (no executing run — spawning always succeeds)
-            call_is_live_run[0] = False
-            result = MagicMock()
-            result.scalar.return_value = False
-            return result
-        else:
-            # downstream-jobs query: look up by the most recently flushed JobRun's job_id.
-            call_is_live_run[0] = True
-            last_run = None
-            for obj in reversed(session._added):
-                if isinstance(obj, JobRun) and hasattr(obj, "_flushed"):
-                    last_run = obj
-                    break
-            if last_run is None:
-                downstreams = []
-            else:
-                downstreams = downstream_map.get(last_run.job_id, [])
-            result = MagicMock()
-            result.scalars.return_value.all.return_value = downstreams
-            return result
-
-    session.execute = _execute
-    return session
-
-
-@pytest.mark.asyncio
-async def test_arm_fans_out_to_multiple_downstream_jobs():
-    """Fan-out: a single upstream PENDING run arms WAITING runs for EVERY downstream job.
-
-    Topology: root(job_id=1) → [sink_a(job_id=2), sink_b(job_id=3)]
-    Expect 1 PENDING root run + 2 WAITING downstream runs (one per sink).
-    """
-    from app.domain.run_materializer import _arm
-
-    sink_a = _make_job(job_id=2, trigger_on_job_id=1, trigger_on_status="ANY")
-    sink_b = _make_job(job_id=3, trigger_on_job_id=1, trigger_on_status="ANY")
-
-    # After we spawn the root run (job_id=1), _arm looks up downstreams of job_id=1.
-    # Neither sink has downstreams.
-    downstream_map = {1: [sink_a, sink_b], 2: [], 3: []}
-    # start_with_downstream=True because we call _arm directly (first execute = downstream query)
-    session = _make_cascade_session(downstream_map, flushed_run_id=10, start_with_downstream=True)
-
-    # Manually spawn the root run so we can call _arm on it.
-    root_run = JobRun()
-    root_run.run_id = 10
-    root_run.job_id = 1
-    root_run.user_id = "u1"
-    root_run.scheduled_at = datetime.now(tz=UTC)
-    root_run.status = "PENDING"
-    root_run._flushed = True  # already "flushed"
-    session._added.append(root_run)
-
-    await _arm(session, root_run, depth=0)
-
-    waiting_runs = [o for o in session._added if isinstance(o, JobRun) and o.status == "WAITING"]
-    assert len(waiting_runs) == 2, (
-        f"Expected 2 WAITING downstream runs (fan-out), got {len(waiting_runs)}"
-    )
-    downstream_job_ids = {r.job_id for r in waiting_runs}
-    assert downstream_job_ids == {2, 3}, f"Expected job_ids {{2, 3}}, got {downstream_job_ids}"
-    # Each WAITING run points at the root run
-    for wr in waiting_runs:
-        assert wr.wait_for_run_id == root_run.run_id
-
-
-@pytest.mark.asyncio
-async def test_arm_cascades_two_levels():
-    """Cascade: _arm recurses to arm grandchildren.
-
-    Topology: root(1) → mid(2) → sink(3)
-    Arming root(1) should create WAITING mid(2) AND WAITING sink(3).
-    """
-    from app.domain.run_materializer import _arm
-
-    root_run = JobRun()
-    root_run.run_id = 10
-    root_run.job_id = 1
-    root_run.user_id = "u1"
-    root_run.scheduled_at = datetime.now(tz=UTC)
-    root_run.status = "PENDING"
-    root_run._flushed = True
-
-    mid_job = _make_job(job_id=2, trigger_on_job_id=1, trigger_on_status="ANY")
-    sink_job = _make_job(job_id=3, trigger_on_job_id=2, trigger_on_status="ANY")
-
-    # job 1 → [mid(2)]; job 2 → [sink(3)]; job 3 → []
-    downstream_map = {1: [mid_job], 2: [sink_job], 3: []}
-    # start_with_downstream=True because we call _arm directly (first execute = downstream query)
-    session = _make_cascade_session(downstream_map, flushed_run_id=11, start_with_downstream=True)
-    session._added.append(root_run)
-
-    await _arm(session, root_run, depth=0)
-
-    waiting_runs = [o for o in session._added if isinstance(o, JobRun) and o.status == "WAITING"]
-    assert len(waiting_runs) == 2, f"Expected 2 WAITING runs (mid + sink), got {len(waiting_runs)}"
-
-    # mid WAITING run points at root
-    mid_run = next(r for r in waiting_runs if r.job_id == 2)
-    assert mid_run.wait_for_run_id == root_run.run_id
-
-    # sink WAITING run points at mid (NOT at root — cascade, not fan-out)
-    sink_run = next(r for r in waiting_runs if r.job_id == 3)
-    assert sink_run.wait_for_run_id == mid_run.run_id, (
-        f"sink's wait_for_run_id={sink_run.wait_for_run_id} should point at mid"
-        f" (run_id={mid_run.run_id}), not root (run_id={root_run.run_id})"
-    )
-
-
-@pytest.mark.asyncio
-async def test_arm_respects_max_chain_depth():
-    """_arm stops recursing at MAX_CHAIN_DEPTH.
-
-    Build a linear chain long enough to exceed MAX_CHAIN_DEPTH.  At the depth
-    limit the recursion must stop rather than producing infinitely nested WAITING
-    runs.  The assertion: exactly MAX_CHAIN_DEPTH WAITING runs are created (one
-    per level), and the deepest job's downstream is NOT armed.
-    """
-    from app.domain.chain_validation import MAX_CHAIN_DEPTH
-    from app.domain.run_materializer import _arm
-
-    # Build a chain of MAX_CHAIN_DEPTH + 1 jobs (so the last level exceeds depth).
-    # Job i triggers on job i-1.  job_ids: 0 (root already done), 1..MAX_CHAIN_DEPTH+1.
-    n = MAX_CHAIN_DEPTH + 1
-    jobs = [
-        _make_job(job_id=i, trigger_on_job_id=i - 1, trigger_on_status="ANY")
-        for i in range(1, n + 1)
-    ]
-
-    # Linear chain: job_id i → job_id i+1 for i in 0..n-1; the last job (job_id n)
-    # has no downstream.  root is job_id=0 (the run we pass to _arm directly), and
-    # jobs[i] has job_id == i + 1 (the comprehension above runs over 1..n).
-    downstream_map: dict[int, list] = {i: [jobs[i]] for i in range(n)}
-    downstream_map[n] = []
-
-    root_run = JobRun()
-    root_run.run_id = 1
-    root_run.job_id = 0
-    root_run.user_id = "u1"
-    root_run.scheduled_at = datetime.now(tz=UTC)
-    root_run.status = "PENDING"
-    root_run._flushed = True
-
-    # start_with_downstream=True because we call _arm directly (first execute = downstream query)
-    session = _make_cascade_session(downstream_map, flushed_run_id=2, start_with_downstream=True)
-    session._added.append(root_run)
-
-    await _arm(session, root_run, depth=0)
-
-    waiting_runs = [o for o in session._added if isinstance(o, JobRun) and o.status == "WAITING"]
-    # depth 0 arms level 1; depth 1 arms level 2; ... depth MAX_CHAIN_DEPTH-1 arms level MAX.
-    # At depth == MAX_CHAIN_DEPTH, _arm returns early → level MAX+1 is NOT armed.
-    assert len(waiting_runs) == MAX_CHAIN_DEPTH, (
-        f"Expected exactly {MAX_CHAIN_DEPTH} WAITING runs (depth bound), got {len(waiting_runs)}"
-    )
-
-
-@pytest.mark.asyncio
-async def test_materialize_successor_full_fanout_shape():
-    """materialize_successor arms the full 3-level fan-out: root→mid→(sink1+sink2).
-
-    Simulates the digest topology:
-      root (job_id=1, cron) → mid (job_id=2) → sink_slack (job_id=3) + sink_email (job_id=4)
-
-    After materialize_successor on root:
-      - 1 PENDING root run
-      - 1 WAITING mid run (pointing at root)
-      - 1 WAITING sink_slack run (pointing at mid)
-      - 1 WAITING sink_email run (pointing at mid)
-    Total: 4 runs.
-    """
-    root_job = _make_job(job_id=1, cron_expr="@daily", timezone="UTC")
-    mid_job = _make_job(job_id=2, trigger_on_job_id=1, trigger_on_status="ANY")
-    sink_slack = _make_job(job_id=3, trigger_on_job_id=2, trigger_on_status="ANY")
-    sink_email = _make_job(job_id=4, trigger_on_job_id=2, trigger_on_status="ANY")
-
-    downstream_map = {
-        1: [mid_job],
-        2: [sink_slack, sink_email],
-        3: [],
-        4: [],
-    }
-
-    prev_run = _make_run(
-        run_id=5,
-        job_id=1,
-        status="SUCCEEDED",
-        scheduled_at=datetime(2026, 6, 10, 9, 0, tzinfo=UTC),
-    )
-    session = _make_cascade_session(downstream_map, flushed_run_id=10)
-    occurred_at = prev_run.scheduled_at + timedelta(minutes=30)
-
-    await materialize_successor(session, root_job, prev_run=prev_run, occurred_at=occurred_at)
-
-    job_runs = [o for o in session._added if isinstance(o, JobRun)]
-    assert len(job_runs) == 4, (
-        f"Expected 4 runs (root + mid + slack + email), got {len(job_runs)}: "
-        f"{[(r.job_id, r.status) for r in job_runs]}"
-    )
-
-    root_runs = [r for r in job_runs if r.status == "PENDING"]
-    assert len(root_runs) == 1
-    root_run = root_runs[0]
-
-    mid_runs = [r for r in job_runs if r.job_id == 2]
-    assert len(mid_runs) == 1
-    mid_run = mid_runs[0]
-    assert mid_run.status == "WAITING"
-    assert mid_run.wait_for_run_id == root_run.run_id
-
-    sink_runs = [r for r in job_runs if r.job_id in (3, 4)]
-    assert len(sink_runs) == 2
-    for sr in sink_runs:
-        assert sr.status == "WAITING"
-        assert sr.wait_for_run_id == mid_run.run_id, (
-            f"sink job_id={sr.job_id} should point at mid (run_id={mid_run.run_id}), "
-            f"got wait_for_run_id={sr.wait_for_run_id}"
-        )
-
-
-# has_executing_run — public predicate (shared by ChainWatcher + _spawn_run)
+# has_executing_run — public predicate (shared by the consumer + _spawn_run)
 # ---------------------------------------------------------------------------
 
 
@@ -621,10 +314,10 @@ def _make_capturing_session(scalar_value: bool):
 async def test_has_executing_run_counts_only_executing_statuses_not_waiting():
     """has_executing_run's SQL counts PENDING/QUEUED/RUNNING/RETRYING but NOT WAITING.
 
-    The executing-only predicate is the heart of #234: a WAITING run armed for the
-    next tick must not be counted, so it can coexist with the current tick's run.
-    Asserting on the compiled SQL guards the status set — a test that only checks
-    the (mocked) return value would still pass if WAITING crept back in.
+    The executing-only predicate is the heart of #234: a legacy WAITING run must
+    not be counted, so it never blocks a new run. Asserting on the compiled SQL
+    guards the status set — a test that only checks the (mocked) return value would
+    still pass if WAITING crept back in.
     """
     session, captured = _make_capturing_session(scalar_value=False)
 
@@ -640,11 +333,7 @@ async def test_has_executing_run_counts_only_executing_statuses_not_waiting():
 
 @pytest.mark.asyncio
 async def test_has_executing_run_builds_no_run_id_inequality():
-    """has_executing_run filters by (job_id, status) only — no run_id exclusion.
-
-    The old predicate took an exclude_run_id to skip the WAITING run being flipped.
-    With WAITING no longer counted, that exclusion is unnecessary and removed.
-    """
+    """has_executing_run filters by (job_id, status) only — no run_id exclusion."""
     session, captured = _make_capturing_session(scalar_value=True)
 
     result = await has_executing_run(session, job_id=1)
@@ -659,44 +348,32 @@ async def test_has_executing_run_builds_no_run_id_inequality():
 # Advisory lock — per-job serialization (issue #237)
 # ---------------------------------------------------------------------------
 #
-# _spawn_run and _flip_waiting_run must acquire pg_advisory_xact_lock(job_id)
-# BEFORE the has_executing_run check so that concurrent sessions cannot both
-# pass the check and both write (the non-locking SELECT-then-act race).
-# Lock ordering: spawn locks jobs depth-first (root first, then downstream);
-# flip locks only the downstream job being flipped. No cross-lock nesting
-# between paths, so no deadlock is possible.
+# _spawn_run must acquire pg_advisory_xact_lock(job_id) BEFORE the
+# has_executing_run check so that concurrent sessions cannot both pass the check
+# and both write (the non-locking SELECT-then-act race).
 
 
 def _make_capturing_session_with_lock_tracking(scalar_value: bool):
     """Mock session that records ALL statements in order.
 
     The order matters for #237: pg_advisory_xact_lock must appear BEFORE the
-    has_executing_run SELECT.  Statements are recorded with their type label
-    so tests can assert ordering.
+    has_executing_run SELECT.
     """
     from sqlalchemy.sql.elements import TextClause
 
     session = AsyncMock()
-    ordered_calls: list[str] = []  # "lock:<job_id>" or "check" or "downstream"
+    ordered_calls: list[str] = []  # "lock:<job_id>" or "check"
 
     scalar_result = MagicMock()
     scalar_result.scalar.return_value = scalar_value
 
-    scalars_result = MagicMock()
-    scalars_result.scalars.return_value.all.return_value = []
-
     async def _execute(stmt, *args, **kwargs):
         if isinstance(stmt, TextClause):
-            # Parameters passed as positional dict: execute(text(...), {"job_id": n})
             params = args[0] if args else kwargs.get("parameters", {}) or {}
             ordered_calls.append(f"lock:{params.get('job_id', '?')}")
             return MagicMock()
-        sql = str(stmt.compile(compile_kwargs={"literal_binds": True}))
-        if "pg_catalog.exists" in sql or "EXISTS" in sql.upper():
-            ordered_calls.append("check")
-            return scalar_result
-        ordered_calls.append("downstream")
-        return scalars_result
+        ordered_calls.append("check")
+        return scalar_result
 
     session.execute = _execute
 
@@ -724,13 +401,11 @@ async def test_spawn_run_acquires_advisory_lock_before_concurrency_check():
 
     await materialize_initial(session, job, run_at=run_at)
 
-    # The first call must be the advisory lock for job 42.
     assert calls, "no execute calls recorded"
     assert calls[0].startswith("lock:"), (
         f"first execute call must be the advisory lock, got: {calls[0]!r}"
     )
     assert "42" in calls[0], f"advisory lock must use the job's job_id (42), got: {calls[0]!r}"
-    # The check must follow the lock.
     check_idx = next((i for i, c in enumerate(calls) if c == "check"), None)
     lock_idx = next((i for i, c in enumerate(calls) if c.startswith("lock:")), None)
     assert lock_idx is not None, "no advisory lock call found"

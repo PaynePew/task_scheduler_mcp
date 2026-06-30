@@ -1,42 +1,48 @@
-"""RunMaterializer — single owner of run creation (ADR-065).
+"""RunMaterializer — single owner of run creation (ADR-065, ADR-067).
 
-Stateless domain module (sibling of chain_validation.py). Both historical
-run-creation sites delegate here:
+Stateless domain module (sibling of chain_validation.py). Every run-creation
+site delegates here:
 
-  - ``create_job`` (app/domain/jobs.py) → ``materialize_initial``
-  - ``RecurringJobWatcher`` (app/workers/recurring_watcher.py) → ``materialize_successor``
+  - ``create_job`` (app/domain/jobs.py) → ``materialize_initial`` — the first run
+    of a *schedule-driven* job. A trigger-driven (chained) job gets NO initial
+    run; its first run is created by the continuation consumer when its upstream
+    terminates (ADR-067).
+  - the continuation consumer (app/workers/recurring_watcher.py) →
+    ``materialize_successor`` (the next recurring tick) and ``materialize_downstream``
+    (one trigger-driven run per matching downstream job), both reacting to a
+    terminal ``RunEvent``.
 
-## Interface
+## Continuation model (ADR-067)
 
-``materialize_initial(session, job, *, run_at, wait_run=None) → JobRun``
-    First run for a job. Schedule-driven jobs get a PENDING run. Trigger-driven
-    jobs get a WAITING run armed against *wait_run* (the upstream's most-recent
-    non-terminal run, returned by validate_chain).
+A downstream run is **created when its upstream run reaches a terminal status**
+(continuation), not pre-armed at upstream-creation time. There is no ``WAITING``
+limbo and no recursive ``arm`` — one rule, *terminal event → materialise the next
+run*, governs recurrence and chaining alike. ``wait_for_run_id`` on a downstream
+run carries the **upstream terminal run_id** so the executor injects
+``from_run_id`` (the inter-handler data plane, ADR-064).
 
-``materialize_successor(session, job, *, prev_run, occurred_at) → JobRun``
-    Next cron occurrence for a recurring root. Computes run_at via
-    next_after(cron_expr, tz, anchor), spawns a PENDING run, then calls
-    ``_arm`` to create WAITING downstream runs in the same transaction.
+## Exactly-once (ADR-067 §4)
+
+Creation is idempotent at the data layer via two partial unique indexes on the
+run's cause: ``(job_id, wait_for_run_id)`` for trigger-driven runs and
+``(job_id, scheduled_at)`` for schedule-driven successors. A redelivered terminal
+event that retries a creation raises ``IntegrityError`` on the duplicate insert;
+the caller treats it as a no-op. The ``processed_by`` cursor is retained only as
+an efficiency layer (skip already-handled events), not the correctness mechanism.
+
+## Slow consumer (ADR-067 §6)
+
+``_spawn_run`` raises ``ConcurrencyError`` when the job already has an *executing*
+run (``has_executing_run``). For a downstream creation that means the upstream
+outpaced the downstream — the tick is **not created** (skip + audited drop by the
+caller), never created-then-cancelled.
 
 ## Internal primitives
 
 ``_spawn_run(session, job, *, run_at, status, wait_for_run_id=None) → JobRun``
-    The single low-level primitive: insert JobRun + emit CREATED RunEvent +
-    derive time_bucket + forbid-concurrency check.  Raises ConcurrencyError
-    if an *executing* run already exists for the job.
-
-``_arm(session, upstream_run, *, depth=0) → None``
-    For each downstream job (trigger_on_job_id == upstream_run.job_id, not
-    cancelled): _spawn_run a WAITING run with wait_for_run_id = upstream_run,
-    then recurse (bounded by MAX_CHAIN_DEPTH).  Runs in the same transaction
-    as the upstream insert — atomicity is the caller's responsibility.  Arming
-    is unconditional per tick: a freshly-armed WAITING run may coexist with the
-    previous tick's still-executing (or not-yet-flipped WAITING) downstream run.
-    Load-shedding happens later, at flip time (ChainWatcher), as a single audited
-    CANCELLED_SLOW_CONSUMER drop — see ADR-065 §4.
-
-Per ADR-033 and ADR-065, ChainWatcher (status coordination) and the executor
-(from_run_id injection) are unchanged.
+    The single low-level primitive: acquire the per-job advisory lock, check
+    forbid-concurrency, insert JobRun + emit CREATED RunEvent + derive time_bucket.
+    Raises ConcurrencyError if an *executing* run already exists for the job.
 """
 
 from __future__ import annotations
@@ -50,14 +56,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.cron import next_after
 from app.db.models import Job, JobRun, RunEvent
-from app.domain.chain_validation import MAX_CHAIN_DEPTH
 
 logger = logging.getLogger(__name__)
 
 # Executing statuses: a job may have at most one run in any of these at a time
-# (ADR-065 §4). WAITING is deliberately excluded — a WAITING run armed for the
-# next tick may coexist with the current tick's executing run; the flip-time
-# slow-consumer drop resolves the overlap.
+# (ADR-065 §4). WAITING is deliberately excluded — it is a legacy status no longer
+# produced under the continuation model (ADR-067) and never counts as executing.
 _EXECUTING = frozenset({"PENDING", "QUEUED", "RUNNING", "RETRYING"})
 
 
@@ -65,8 +69,9 @@ class ConcurrencyError(Exception):
     """Raised by _spawn_run when an executing run already exists for the job.
 
     ADR-065 §4: at most one *executing* run (PENDING/QUEUED/RUNNING/RETRYING)
-    per Job at any time. The caller decides whether to skip or cancel the
-    overlapping run.
+    per Job at any time. Under ADR-067 the continuation consumer treats this as
+    the slow-consumer skip (do not create), for both recurring successors and
+    trigger-driven downstreams.
     """
 
 
@@ -75,28 +80,10 @@ _ADVISORY_LOCK_SQL = text("SELECT pg_advisory_xact_lock(:job_id)")
 
 Acquired before every check-then-write on the executing-run invariant so that
 concurrent sessions cannot both pass the non-locking SELECT and both insert a
-second executing run (the classic SELECT-then-act race).
-
-Lock-acquisition order (deadlock prevention):
-  - Spawn path (``_spawn_run`` called from ``materialize_successor`` and
-    ``_arm``): locks the job being spawned — depth-first top-down through the
-    chain (root first, then each downstream as ``_arm`` recurses). The lock on
-    the root is held for the entire transaction; downstream locks are nested
-    inside it. Since the chain is a DAG (no cycles — validated at create time
-    by V4/V5), there is no circular dependency in this path.
-  - Flip path (``ChainWatcher._flip_waiting_run``): locks only the single
-    downstream job being flipped. It never locks an upstream job.
-
-Because the flip path never holds an upstream lock, it cannot deadlock with
-the spawn path (spawn holds root, then acquires downstream; flip only acquires
-the downstream). Two concurrent ``_arm`` calls for the same chain both acquire
-locks depth-first: the first wins each lock sequentially; the second blocks and
-serializes safely.
-
-The Watcher claim query (``FOR UPDATE SKIP LOCKED`` on ``job_runs.status =
-'PENDING'``) is on a different table and different row-level lock mechanism;
-advisory locks do not interact with row-level locks, so the claim path is
-unchanged (ADR-007).
+second executing run (the classic SELECT-then-act race). The lock is
+transaction-scoped: released automatically on COMMIT or ROLLBACK, and re-entrant
+within one transaction (the continuation consumer may materialise a successor and
+a downstream for the same job under one lock without self-deadlock).
 """
 
 
@@ -105,8 +92,6 @@ async def _acquire_job_lock(session: AsyncSession, job_id: int) -> None:
 
     Blocks until the lock is obtained; released automatically on COMMIT or
     ROLLBACK. Callers must be inside an open transaction.
-
-    See ``_ADVISORY_LOCK_SQL`` for the full lock-ordering rationale.
     """
     await session.execute(_ADVISORY_LOCK_SQL, {"job_id": job_id})
 
@@ -114,16 +99,12 @@ async def _acquire_job_lock(session: AsyncSession, job_id: int) -> None:
 async def has_executing_run(session: AsyncSession, job_id: int) -> bool:
     """Return True if job_id has at least one *executing* run.
 
-    Executing = PENDING / QUEUED / RUNNING / RETRYING (WAITING excluded). A
-    WAITING run armed for the next tick does not count, so it may be created
-    while the current tick's run is still in flight (ADR-065 §4).
+    Executing = PENDING / QUEUED / RUNNING / RETRYING. Shared predicate for the
+    spawn-time forbid-concurrency check and the continuation consumer's
+    slow-consumer skip.
 
-    Shared predicate for:
-    - ``_spawn_run`` / ``RecurringJobWatcher`` (spawn-time forbid-concurrency); and
-    - ``ChainWatcher`` (flip-time slow-consumer drop).
-
-    Callers must hold ``_acquire_job_lock(session, job_id)`` before calling
-    this function to prevent a non-locking SELECT-then-act race (issue #237).
+    Callers must hold ``_acquire_job_lock(session, job_id)`` before calling this
+    function to prevent a non-locking SELECT-then-act race (issue #237).
     """
     result = await session.execute(
         select(
@@ -154,7 +135,6 @@ async def _spawn_run(
     """
     # Serialize per job: acquire the advisory lock before the executing-run check
     # so concurrent sessions cannot both pass the SELECT-then-act (issue #237).
-    # See _ADVISORY_LOCK_SQL for the full lock-ordering rationale.
     await _acquire_job_lock(session, job.job_id)
     # Forbid-concurrency: at most one executing run per job at any time (ADR-065 §4).
     if await has_executing_run(session, job.job_id):
@@ -194,109 +174,29 @@ async def _spawn_run(
     return run
 
 
-async def _arm(
-    session: AsyncSession,
-    upstream_run: JobRun,
-    *,
-    depth: int = 0,
-) -> None:
-    """Arm downstream jobs by creating WAITING runs pointing at upstream_run.
-
-    For each active downstream job (trigger_on_job_id == upstream_run.job_id,
-    not cancelled), spawn a WAITING run with wait_for_run_id = upstream_run.run_id.
-    Then recurse for each newly created run (bounded by MAX_CHAIN_DEPTH).
-
-    Runs inside the caller's transaction (atomic with the upstream insert).
-    Arming a WAITING run never raises ConcurrencyError under the executing-only
-    invariant (a WAITING run is not an executing run, so it can always be armed).
-    The suppression here is defensive: if some future caller arms a non-WAITING
-    status into an already-executing job, this tick's arm for that downstream is
-    skipped rather than failing the whole materialization.
-    """
-    if depth >= MAX_CHAIN_DEPTH:
-        logger.warning(
-            "run_materializer: _arm reached MAX_CHAIN_DEPTH=%d for upstream run_id=%s; stopping",
-            MAX_CHAIN_DEPTH,
-            upstream_run.run_id,
-        )
-        return
-
-    # Find all active downstream jobs that trigger on the upstream job.
-    downstream_jobs_result = await session.execute(
-        select(Job).where(
-            Job.trigger_on_job_id == upstream_run.job_id,
-            Job.cancelled_at.is_(None),
-        )
-    )
-    downstream_jobs = downstream_jobs_result.scalars().all()
-
-    for downstream in downstream_jobs:
-        try:
-            waiting_run = await _spawn_run(
-                session,
-                downstream,
-                run_at=upstream_run.scheduled_at,
-                status="WAITING",
-                wait_for_run_id=upstream_run.run_id,
-            )
-            logger.info(
-                "run_materializer: armed WAITING run_id=%s for downstream job_id=%s"
-                " wait_for_run_id=%s (depth=%d)",
-                waiting_run.run_id,
-                downstream.job_id,
-                upstream_run.run_id,
-                depth,
-            )
-            # Recurse for fan-out (depth-bounded).
-            await _arm(session, waiting_run, depth=depth + 1)
-        except ConcurrencyError:
-            logger.info(
-                "run_materializer: downstream job_id=%s already has an executing run;"
-                " skipping arm for upstream run_id=%s (at-most-one-executing-run)",
-                downstream.job_id,
-                upstream_run.run_id,
-            )
-
-
 async def materialize_initial(
     session: AsyncSession,
     job: Job,
     *,
     run_at: datetime,
-    wait_run: JobRun | None = None,
 ) -> JobRun:
-    """Materialize the first run for a job.
+    """Materialize the first run for a *schedule-driven* job.
 
-    Schedule-driven (no trigger_on_job_id): creates a PENDING run at run_at.
-    Trigger-driven (trigger_on_job_id set): creates a WAITING run at run_at
-    with wait_for_run_id = wait_run.run_id.
-
-    Does NOT call _arm — the initial downstream arming is handled by
-    validate_chain returning wait_run, which create_job passes here as wait_run.
-    The initial run is for the downstream job itself; there is no further arming
-    needed at create time (the upstream is already live or running).
+    Creates a PENDING run at run_at. Only schedule-driven jobs (no
+    ``trigger_on_job_id``) get an initial run: under the continuation model
+    (ADR-067) a trigger-driven job has zero runs until its upstream terminates,
+    so ``create_job`` does not call this for chained jobs.
 
     Caller must be inside an open transaction.
     Raises ConcurrencyError if an executing run already exists for the job.
     """
-    if wait_run is not None:
-        # Trigger-driven: WAITING, armed against the upstream's most-recent run.
-        return await _spawn_run(
-            session,
-            job,
-            run_at=run_at,
-            status="WAITING",
-            wait_for_run_id=wait_run.run_id,
-        )
-    else:
-        # Schedule-driven: PENDING, no upstream dependency.
-        return await _spawn_run(
-            session,
-            job,
-            run_at=run_at,
-            status="PENDING",
-            wait_for_run_id=None,
-        )
+    return await _spawn_run(
+        session,
+        job,
+        run_at=run_at,
+        status="PENDING",
+        wait_for_run_id=None,
+    )
 
 
 async def materialize_successor(
@@ -313,8 +213,9 @@ async def materialize_successor(
     re-spawning the same tick when a fast action finishes before its scheduled_at
     (the Watcher's lookahead window can claim runs early; see recurring_watcher.py).
 
-    Then spawns a PENDING root run and calls _arm to create WAITING downstream
-    runs in the same transaction.
+    Then spawns a PENDING root run. No downstream arming: under ADR-067 a chained
+    downstream run is created by ``materialize_downstream`` when *this* run later
+    terminates, not pre-armed here.
 
     Caller must be inside an open transaction.
     Raises ConcurrencyError if the root job already has an executing run.
@@ -343,7 +244,34 @@ async def materialize_successor(
         job.timezone,
     )
 
-    # Arm downstream jobs in the same transaction (atomic with root run insert).
-    await _arm(session, root_run)
-
     return root_run
+
+
+async def materialize_downstream(
+    session: AsyncSession,
+    *,
+    downstream_job: Job,
+    upstream_run_id: int,
+    occurred_at: datetime,
+) -> JobRun:
+    """Materialize a trigger-driven downstream run caused by an upstream terminal run.
+
+    Continuation (ADR-067): the downstream run is created PENDING when its
+    upstream run reaches a terminal status — never pre-armed. ``wait_for_run_id``
+    is set to ``upstream_run_id`` (the upstream terminal run) so the executor
+    injects ``from_run_id`` (the data plane, ADR-064), and the
+    ``(job_id, wait_for_run_id)`` unique index makes a redelivered create a no-op.
+    ``run_at = occurred_at`` so the Watcher picks it up promptly.
+
+    Caller must be inside an open transaction (a savepoint, so a duplicate insert
+    can be caught without poisoning the outer transaction).
+    Raises ConcurrencyError if the downstream already has an executing run
+    (slow consumer → the caller skips with an audited drop, ADR-067 §6).
+    """
+    return await _spawn_run(
+        session,
+        downstream_job,
+        run_at=occurred_at,
+        status="PENDING",
+        wait_for_run_id=upstream_run_id,
+    )

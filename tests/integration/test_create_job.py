@@ -358,8 +358,12 @@ async def test_chain_v3_terminated_trigger_job_is_rejected(session_factory):
 
 
 @pytest.mark.integration
-async def test_chain_creates_waiting_run_with_wait_for_run_id(session_factory):
-    """Chained job gets a WAITING run pointing at the upstream's active run."""
+async def test_chain_creates_no_run_until_upstream_terminates(session_factory):
+    """Continuation (ADR-067): a chained job has ZERO runs at create time.
+
+    No pre-armed WAITING run is created. The downstream's first run is created by
+    the continuation consumer only when the upstream terminates.
+    """
     future2 = (datetime.now(tz=UTC) + timedelta(hours=2)).isoformat()
 
     # Create upstream job (immediate, so run starts as PENDING)
@@ -371,13 +375,6 @@ async def test_chain_creates_waiting_run_with_wait_for_run_id(session_factory):
             action_params={"message": "upstream"},
             schedule_type="immediate",
         )
-
-    # Get upstream run_id
-    async with session_factory() as session:
-        async with session.begin():
-            upstream_run = (
-                await session.execute(select(JobRun).where(JobRun.job_id == upstream.job_id))
-            ).scalar_one()
 
     # Create downstream chained job
     async with session_factory() as session:
@@ -394,12 +391,16 @@ async def test_chain_creates_waiting_run_with_wait_for_run_id(session_factory):
 
     async with session_factory() as session:
         async with session.begin():
-            downstream_run = (
-                await session.execute(select(JobRun).where(JobRun.job_id == downstream.job_id))
-            ).scalar_one()
+            downstream_runs = (
+                (await session.execute(select(JobRun).where(JobRun.job_id == downstream.job_id)))
+                .scalars()
+                .all()
+            )
 
-    assert downstream_run.status == "WAITING"
-    assert downstream_run.wait_for_run_id == upstream_run.run_id
+    assert downstream_runs == [], (
+        "a chained job must have no pre-armed run — continuation creates it on the "
+        f"upstream terminal event, got {[(r.run_id, r.status) for r in downstream_runs]}"
+    )
 
 
 # ---------------------------------------------------------------------------

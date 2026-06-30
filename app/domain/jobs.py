@@ -220,10 +220,12 @@ async def create_job(
                 return existing
 
         # Chain validation (V1-V5) runs inside the same transaction so the
-        # ancestor walk and the insert are atomic — no TOCTOU window.
-        wait_run: JobRun | None = None
+        # ancestor walk and the insert are atomic — no TOCTOU window. Under the
+        # continuation model (ADR-067) the returned run is not used to pre-arm a
+        # downstream; V3 still rejects chaining off a fully-terminated trigger
+        # (it would never fire), so the validation is kept for its guards.
         if trigger_on_job_id is not None:
-            wait_run = await validate_chain(
+            await validate_chain(
                 session,
                 user_id=user_id,
                 trigger_on_job_id=trigger_on_job_id,
@@ -248,11 +250,12 @@ async def create_job(
         session.add(job)
         await session.flush()
 
-        # Delegate run creation to RunMaterializer (ADR-065).
-        # materialize_initial: PENDING for schedule-driven jobs, WAITING (armed
-        # against wait_run) for trigger-driven jobs. Emits CREATED RunEvent in
-        # the same transaction.
-        await materialize_initial(session, job, run_at=run_at, wait_run=wait_run)
+        # Delegate run creation to RunMaterializer (ADR-065, ADR-067). Only
+        # schedule-driven jobs get an initial run; a trigger-driven (chained) job
+        # has zero runs until its upstream terminates — its first run is created
+        # by the continuation consumer (no pre-armed WAITING run).
+        if trigger_on_job_id is None:
+            await materialize_initial(session, job, run_at=run_at)
 
     return job
 

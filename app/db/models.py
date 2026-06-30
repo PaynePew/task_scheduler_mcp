@@ -165,6 +165,28 @@ class JobRun(Base):
             unique=True,
             postgresql_where="status IN ('PENDING','QUEUED','WAITING','RUNNING','RETRYING')",
         ),
+        # Exactly-once run creation keyed on the run's *cause* (ADR-067 §4). A
+        # redelivered terminal event cannot double-create the run it materialises;
+        # the processed_by cursor is retained only as an efficiency layer.
+        # Trigger-driven (chained) run: caused by one upstream terminal run carried
+        # in wait_for_run_id — one downstream run per (downstream job, upstream run).
+        Index(
+            "uq_job_runs_trigger_cause",
+            "job_id",
+            "wait_for_run_id",
+            unique=True,
+            postgresql_where="wait_for_run_id IS NOT NULL",
+        ),
+        # Schedule-driven run (recurring successor / one-shot / immediate): caused
+        # by a clock tick carried in scheduled_at — one run per (job, scheduled
+        # tick). Successive cron ticks always carry a strictly-later scheduled_at.
+        Index(
+            "uq_job_runs_recurring_tick",
+            "job_id",
+            "scheduled_at",
+            unique=True,
+            postgresql_where="wait_for_run_id IS NULL",
+        ),
     )
 
 

@@ -272,8 +272,13 @@ async def test_recurring_watcher_does_not_reprocess_stamped_event(session_factor
 
 
 @pytest.mark.integration
-async def test_recurring_watcher_ignores_one_shot_jobs(session_factory):
-    """Terminal event for a one_shot job (no cron_expr) → ignored."""
+async def test_one_shot_job_processed_but_no_successor_spawned(session_factory):
+    """Terminal event for a one_shot job (no cron, no downstream): processed, no new run.
+
+    The unified continuation consumer (ADR-067) sees every terminal event, but a
+    non-recurring job with no downstream yields no successor and no downstream run —
+    the event is still stamped (count == 1), and no JobRun is added.
+    """
     scheduled = datetime.now(tz=UTC) - timedelta(hours=1)
     async with session_factory() as session:
         async with session.begin():
@@ -309,9 +314,21 @@ async def test_recurring_watcher_ignores_one_shot_jobs(session_factory):
                     status_to="SUCCEEDED",
                 )
             )
+            job_id = job.job_id
+            run_id = run.run_id
 
     count = await poll_once(session_factory)
-    assert count == 0
+    assert count == 1, "the continuation consumer processes every terminal event"
+
+    async with session_factory() as session:
+        async with session.begin():
+            all_runs = (
+                (await session.execute(select(JobRun).where(JobRun.job_id == job_id)))
+                .scalars()
+                .all()
+            )
+    assert len(all_runs) == 1, "no successor or downstream run for a non-recurring, unchained job"
+    assert all_runs[0].run_id == run_id
 
 
 @pytest.mark.integration
