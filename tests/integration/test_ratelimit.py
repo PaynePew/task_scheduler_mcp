@@ -51,9 +51,9 @@ async def _bulk_insert_jobs(
                 text(
                     "INSERT INTO jobs "
                     "(user_id, description, action, action_params, job_type, "
-                    "scheduled_at, timezone, active, created_at, updated_at) "
+                    "scheduled_at, timezone, state, created_at, updated_at) "
                     "SELECT :user_id, 'rate-limit-seed', 'echo', '{}', 'one_shot', "
-                    "now() + interval '1 hour', 'UTC', true, :created_at, :created_at "
+                    "now() + interval '1 hour', 'UTC', 'active', :created_at, :created_at "
                     "FROM generate_series(1, :count)"
                 ),
                 {"user_id": user_id, "created_at": created_at, "count": count},

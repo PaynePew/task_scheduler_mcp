@@ -15,7 +15,6 @@ from datetime import date, datetime
 
 from sqlalchemy import (
     BigInteger,
-    Boolean,
     CheckConstraint,
     Date,
     DateTime,
@@ -67,7 +66,14 @@ class Job(Base):
     )
     trigger_on_status: Mapped[str | None] = mapped_column(Text, nullable=True)
     idempotency_key: Mapped[str | None] = mapped_column(Text, nullable=True)
-    active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
+    # Job-level lifecycle (ADR-068): 'active' (has resident load — can still
+    # produce or run a future JobRun) | 'completed' (schedule exhausted, NOT
+    # "succeeded" — run success/failure lives on JobRun.status) | 'cancelled'
+    # (user stopped it). Replaces the never-cleared `active` boolean. The
+    # containment quota counts state='active', so terminal jobs leave the set.
+    # Plain TEXT (no CHECK) keeps the enum extensible (e.g. 'paused' later)
+    # without schema churn.
+    state: Mapped[str] = mapped_column(Text, nullable=False, server_default="active")
     created_at: Mapped[datetime] = mapped_column(TZ, nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(TZ, nullable=False, server_default=func.now())
 
@@ -87,12 +93,13 @@ class Job(Base):
         # Hot index for task.list.v1 ("show me my recent jobs"). Newest-first.
         # In DynamoDB this would be the GSI with PK=user_id, SK=created_at.
         Index("idx_jobs_user_created", "user_id", text("created_at DESC")),
-        # Partial index: only indexes rows the RecurringJobWatcher cares about,
-        # keeping the index small even as terminated recurring jobs accumulate.
+        # Partial index: only indexes rows the RecurringJobWatcher / containment
+        # quota care about, keeping the index small even as terminated recurring
+        # jobs accumulate. Keyed on state='active' (ADR-068), not the old boolean.
         Index(
             "idx_jobs_active_recurring",
             "job_type",
-            postgresql_where="active AND job_type = 'recurring'",
+            postgresql_where="state = 'active' AND job_type = 'recurring'",
         ),
         Index("idx_jobs_action", "action"),
     )

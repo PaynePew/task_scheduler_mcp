@@ -39,11 +39,13 @@ async def _bulk_insert_recurring(
     count: int,
     *,
     created_at_offset: str = "now()",
+    state: str = "active",
 ) -> None:
-    """Insert *count* active recurring jobs for *user_id* (bypasses ORM defaults).
+    """Insert *count* recurring jobs for *user_id* in *state* (bypasses ORM defaults).
 
     *created_at_offset* is a Postgres expression for created_at/updated_at.
     Pass e.g. ``"now() - interval '2 hours'"`` to seed outside rate-limit windows.
+    *state* is the ADR-068 lifecycle value ('active' | 'completed' | 'cancelled').
     """
     async with factory() as session:
         async with session.begin():
@@ -51,12 +53,12 @@ async def _bulk_insert_recurring(
                 text(
                     "INSERT INTO jobs "
                     "(user_id, description, action, action_params, job_type, "
-                    f"cron_expr, timezone, active, cancelled_at, created_at, updated_at) "
+                    f"cron_expr, timezone, state, created_at, updated_at) "
                     f"SELECT :user_id, 'containment-seed', 'echo', '{{}}', 'recurring', "
-                    f"'* * * * *', 'UTC', true, NULL, {created_at_offset}, {created_at_offset} "
+                    f"'* * * * *', 'UTC', :state, {created_at_offset}, {created_at_offset} "
                     "FROM generate_series(1, :count)"
                 ),
-                {"user_id": user_id, "count": count},
+                {"user_id": user_id, "count": count, "state": state},
             )
 
 
@@ -66,10 +68,12 @@ async def _bulk_insert_one_shot(
     count: int,
     *,
     created_at_offset: str = "now()",
+    state: str = "active",
 ) -> None:
-    """Insert *count* active one-shot jobs for *user_id*.
+    """Insert *count* one-shot jobs for *user_id* in *state*.
 
     *created_at_offset* is a Postgres expression for created_at/updated_at.
+    *state* is the ADR-068 lifecycle value ('active' | 'completed' | 'cancelled').
     """
     async with factory() as session:
         async with session.begin():
@@ -77,13 +81,13 @@ async def _bulk_insert_one_shot(
                 text(
                     "INSERT INTO jobs "
                     "(user_id, description, action, action_params, job_type, "
-                    f"scheduled_at, timezone, active, cancelled_at, created_at, updated_at) "
+                    f"scheduled_at, timezone, state, created_at, updated_at) "
                     f"SELECT :user_id, 'containment-seed', 'echo', '{{}}', 'one_shot', "
-                    f"now() + interval '1 hour', 'UTC', true, NULL, "
+                    f"now() + interval '1 hour', 'UTC', :state, "
                     f"{created_at_offset}, {created_at_offset} "
                     "FROM generate_series(1, :count)"
                 ),
-                {"user_id": user_id, "count": count},
+                {"user_id": user_id, "count": count, "state": state},
             )
 
 
@@ -164,16 +168,58 @@ async def test_checker_reject_global_active_recurring(session_factory):
 
 @pytest.mark.integration
 async def test_checker_cancelled_jobs_not_counted(session_factory):
-    """Cancelled recurring jobs don't count towards the active recurring cap."""
+    """Cancelled recurring jobs (state='cancelled') don't count towards the cap."""
     user_id = "ct-user-cancelled"
-    # Insert 5 recurring jobs, then cancel them all
+    # Insert 5 recurring jobs, then cancel them all (cancel = CAS state -> cancelled).
     await _bulk_insert_recurring(session_factory, user_id, 5)
     async with session_factory() as session:
         async with session.begin():
             await session.execute(
-                text("UPDATE jobs SET cancelled_at = now() WHERE user_id = :user_id"),
+                text(
+                    "UPDATE jobs SET state = 'cancelled', cancelled_at = now()"
+                    " WHERE user_id = :user_id"
+                ),
                 {"user_id": user_id},
             )
+
+    limits = ContainmentLimits(
+        active_recurring_per_user=5,
+        active_total_per_user=50,
+        global_active_recurring=500,
+    )
+    async with session_factory() as session:
+        decision = await check_containment(user_id, session, limits)
+
+    assert isinstance(decision, Allow)
+
+
+@pytest.mark.integration
+async def test_checker_completed_jobs_leave_the_active_count(session_factory):
+    """Terminal (state='completed') jobs leave the active count — the quota-lockout fix.
+
+    50 completed one-shots used to count forever against active_total; under
+    ADR-068 they leave the active set, so a fresh create is allowed.
+    """
+    user_id = "ct-user-completed"
+    await _bulk_insert_one_shot(session_factory, user_id, 50, state="completed")
+
+    limits = ContainmentLimits(
+        active_recurring_per_user=5,
+        active_total_per_user=50,
+        global_active_recurring=500,
+    )
+    async with session_factory() as session:
+        decision = await check_containment(user_id, session, limits)
+
+    assert isinstance(decision, Allow)
+
+
+@pytest.mark.integration
+async def test_checker_counts_only_active_in_mixed_set(session_factory):
+    """With 49 completed + 1 active one-shot, only the active one counts (1 < 50)."""
+    user_id = "ct-user-mixed"
+    await _bulk_insert_one_shot(session_factory, user_id, 49, state="completed")
+    await _bulk_insert_one_shot(session_factory, user_id, 1, state="active")
 
     limits = ContainmentLimits(
         active_recurring_per_user=5,

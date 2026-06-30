@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db.engine import create_async_engine
 from app.db.models import Job, JobRun, RunEvent
-from app.domain.jobs import create_job
+from app.domain.jobs import create_job, settle_job
 from app.mcp.handlers.cancel import handle_task_cancel
 
 # ---------------------------------------------------------------------------
@@ -65,6 +65,25 @@ async def _force_run_status(
                 text("UPDATE job_runs SET status = :s WHERE job_id = :jid"),
                 {"s": status, "jid": job_id},
             )
+
+
+async def _settle_completed(
+    factory: async_sessionmaker[AsyncSession],
+    job_id: int,
+) -> None:
+    """Settle a one-shot to state='completed' (what the executor does on terminal)."""
+    async with factory() as session:
+        async with session.begin():
+            await settle_job(session, job_id=job_id)
+
+
+async def _get_job_state(
+    factory: async_sessionmaker[AsyncSession],
+    job_id: int,
+) -> str:
+    """Return the current Job.state for assertions."""
+    async with factory() as session:
+        return (await session.execute(select(Job.state).where(Job.job_id == job_id))).scalar_one()
 
 
 async def _add_run(
@@ -140,15 +159,17 @@ async def test_cancel_pending_job_writes_run_event(session_factory):
     assert len(cancel_events) == 1
     assert cancel_events[0].status_from == "PENDING"
     assert cancel_events[0].status_to == "CANCELLED"
-    # AC5: cancelled_at is set on the Job row
+    # AC5: cancelled_at is set on the Job row (retained as audit) and state flips.
     assert db_job.cancelled_at is not None
+    assert db_job.state == "cancelled"
 
 
 @pytest.mark.integration
 async def test_cancel_succeeded_job_returns_invalid_state(session_factory):
-    """Cancelling a SUCCEEDED job returns INVALID_STATE."""
+    """Cancelling a settled (completed) job whose run SUCCEEDED returns INVALID_STATE."""
     job = await _create_echo_job(session_factory)
     await _force_run_status(session_factory, job.job_id, "SUCCEEDED")
+    await _settle_completed(session_factory, job.job_id)
 
     result = await handle_task_cancel(
         {"job_id": job.job_id},
@@ -163,9 +184,10 @@ async def test_cancel_succeeded_job_returns_invalid_state(session_factory):
 
 @pytest.mark.integration
 async def test_cancel_failed_job_returns_invalid_state(session_factory):
-    """Cancelling a FAILED job returns INVALID_STATE."""
+    """Cancelling a settled (completed) job whose run FAILED returns INVALID_STATE."""
     job = await _create_echo_job(session_factory)
     await _force_run_status(session_factory, job.job_id, "FAILED")
+    await _settle_completed(session_factory, job.job_id)
 
     result = await handle_task_cancel(
         {"job_id": job.job_id},
@@ -336,3 +358,80 @@ async def test_running_run_can_complete_after_cancel(session_factory):
 
     assert len(succeeded_events) == 1, "Natural SUCCEEDED event must be written"
     assert db_job.cancelled_at is not None, "cancelled_at must not be cleared by run completion"
+
+
+# ---------------------------------------------------------------------------
+# Terminal-race: one-shot completion vs cancel are both CAS-from-active (ADR-068)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+async def test_cancel_mid_run_then_settle_is_noop(session_factory):
+    """Cancel-mid-run wins the CAS; the later settle no-ops, leaving state='cancelled'.
+
+    The job's run is RUNNING when the user cancels (state -> cancelled). The run
+    then finishes and the executor settles (CAS active -> completed) — but state
+    is no longer 'active', so settle is a no-op. Lifecycle reflects user intent
+    (cancelled) while the run's own outcome stays accurate.
+    """
+    job = await _create_echo_job(session_factory)
+    await _force_run_status(session_factory, job.job_id, "RUNNING")
+
+    cancel_result = await handle_task_cancel(
+        {"job_id": job.job_id},
+        user_id="cancel-test-user",
+        session_factory=session_factory,
+    )
+    assert cancel_result["ok"] is True
+    assert await _get_job_state(session_factory, job.job_id) == "cancelled"
+
+    # The RUNNING run finishes naturally, then the executor settles.
+    await _force_run_status(session_factory, job.job_id, "SUCCEEDED")
+    async with session_factory() as session:
+        async with session.begin():
+            settled = await settle_job(session, job_id=job.job_id)
+
+    assert settled is False, "settle must no-op once the job is cancelled"
+    assert await _get_job_state(session_factory, job.job_id) == "cancelled"
+
+
+@pytest.mark.integration
+async def test_settle_then_cancel_returns_invalid_state(session_factory):
+    """Settle wins the CAS first; a later cancel finds state='completed' → INVALID_STATE."""
+    job = await _create_echo_job(session_factory)
+    await _force_run_status(session_factory, job.job_id, "SUCCEEDED")
+
+    async with session_factory() as session:
+        async with session.begin():
+            settled = await settle_job(session, job_id=job.job_id)
+    assert settled is True
+    assert await _get_job_state(session_factory, job.job_id) == "completed"
+
+    result = await handle_task_cancel(
+        {"job_id": job.job_id},
+        user_id="cancel-test-user",
+        session_factory=session_factory,
+    )
+    assert result["ok"] is False
+    assert result["error"]["code"] == "INVALID_STATE"
+
+
+@pytest.mark.integration
+async def test_settle_skips_recurring_root(session_factory):
+    """A recurring root is never settled by a terminal run — it stays active (ADR-068)."""
+    async with session_factory() as session:
+        job = await create_job(
+            session,
+            user_id="cancel-test-user",
+            action="echo",
+            action_params={"message": "hi"},
+            schedule_type="recurring",
+            cron_expr="0 8 * * *",
+        )
+
+    async with session_factory() as session:
+        async with session.begin():
+            settled = await settle_job(session, job_id=job.job_id)
+
+    assert settled is False, "recurring roots must not settle to completed"
+    assert await _get_job_state(session_factory, job.job_id) == "active"
