@@ -30,6 +30,8 @@ The system stores three distinct things. Confusing them is the most common sourc
 
 A recurring `Job` has many `JobRun`s over time. A one-shot `Job` has exactly one `JobRun`.
 
+**`active`** — a `Job` is *active* when it still carries **resident load**: it can still produce or run a future `JobRun`. An `immediate`/`one-shot` job stops being active the moment its single `JobRun` reaches a terminal status; a `recurring` job stays active until cancelled; a `trigger-driven` job's activeness follows its `inherited recurrence` (§7). *Active* is **not** "ever created and not cancelled" — it is the predicate the containment caps (ADR-055) bound, because resident load, not lifetime job count, is what consumes the box.
+
 ## §2 Status lifecycle
 
 The system uses 8 internal statuses but only exposes 5 to MCP clients.
@@ -97,6 +99,7 @@ Mapping happens at the MCP handler boundary. DB keeps the precise truth; LLM get
 
 - **`chain-fed handler`** — an `ActionHandler` whose `params_model` includes the optional field `from_run_id: int | None`. When `from_run_id` is non-null at execution time, the handler reads the upstream `JobRun.result` as its primary input instead of (or in addition to) its own params. See ADR-033.
 - **`inter-handler data plane`** — the column `JobRun.result` (a JSON string) is the data carrier between chained handlers. The upstream handler serializes its output into `ActionResult.result`; the downstream handler reads it via `app.chain.upstream_reader.read_upstream`. `ChainWatcher` handles status coordination (WAITING → PENDING) but never touches `result` — those are separate concerns.
+  - **`result` is internal-only.** No MCP surface exposes it to the client: `task.status.v1`, `tasks://job/{id}`, and `tasks://recent-results` (ADR-037) are all *metadata* (status, timestamps, error excerpt). `result` exists solely to feed a downstream handler. Corollary: the operator-funded LLM actions (`llm_polish` / `llm_summarize`, ADR-052) deliver value **only as chain upstreams** — a standalone run executes and stores its output, but the user cannot read it back. Documentation and demo prompts must present them as chain steps (e.g. `llm_polish → slack_post`), never as a standalone "rewrite this and show me."
 
 ## §5 Data patterns
 
