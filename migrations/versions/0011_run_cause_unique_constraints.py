@@ -54,7 +54,40 @@ def upgrade() -> None:
         postgresql_where=sa.text("wait_for_run_id IS NULL"),
     )
 
+    # Cutover stamp for the renamed continuation cursor (ADR-067).
+    #
+    # S3 renamed the consumer's processed_by cursor key from "recurring_watcher"
+    # to "continuation" and dropped the old cron_expr filter, so poll_once() now
+    # selects EVERY terminal run_events row whose processed_by JSONB lacks the
+    # "continuation" key. No existing event carries that key (the old key was
+    # "recurring_watcher"; one-shot/chained terminal events were never stamped at
+    # all), so on deploy the consumer would rescan the entire historical
+    # terminal-event log and, for every historical chained upstream whose
+    # downstream did not yet exist, materialise a brand-new downstream run —
+    # real, retroactive Slack/email/LLM sends. The unique indexes above only stop
+    # double-creation when a downstream row ALREADY exists; they do nothing for
+    # these historical gaps.
+    #
+    # So stamp every EXISTING terminal event as already handled by the
+    # "continuation" consumer. After deploy it then reacts only to NEW terminal
+    # events. processed_by is a JSONB dict {consumer_name: ISO-timestamp} that
+    # defaults to {}; COALESCE guards any legacy NULL before the || merge so an
+    # existing "recurring_watcher" stamp is preserved.
+    #
+    # Known, negligible cutover edge: a recurring job whose terminal event lands
+    # in the exact deploy window may get stamped before the consumer reacts; it
+    # self-heals on the job's next run. The severe issue (retroactive chained
+    # sends across all history) is eliminated.
+    op.execute(
+        "UPDATE run_events "
+        "SET processed_by = COALESCE(processed_by, '{}'::jsonb) "
+        "|| jsonb_build_object('continuation', (now() AT TIME ZONE 'utc')::text) "
+        "WHERE event_type IN ('SUCCEEDED','FAILED','CANCELLED')"
+    )
+
 
 def downgrade() -> None:
+    # Reverse the cutover stamp (symmetry with upgrade's backfill).
+    op.execute("UPDATE run_events SET processed_by = processed_by - 'continuation'")
     op.drop_index("uq_job_runs_recurring_tick", table_name="job_runs")
     op.drop_index("uq_job_runs_trigger_cause", table_name="job_runs")

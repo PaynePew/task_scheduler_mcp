@@ -609,6 +609,86 @@ def test_0010_backfills_job_state():
     assert active_total == 2, f"expected 2 active jobs after backfill, got {active_total}"
 
 
+# ---------------------------------------------------------------------------
+# Migration 0011: cutover-stamp existing terminal events for the continuation consumer
+# ---------------------------------------------------------------------------
+
+
+def _insert_run_event(url: str, *, event_type: str, processed_by: str = "{}") -> int:
+    """Insert a run_events row at the current schema and return its event_id.
+
+    run_events has no FK to job_runs/jobs (ADR-009), so arbitrary run_id/job_id
+    are fine for exercising the 0011 backfill in isolation.
+    """
+    engine = sa.create_engine(url, poolclass=sa.pool.NullPool)
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    "INSERT INTO run_events"
+                    " (run_id, job_id, event_type, occurred_at, processed_by)"
+                    " VALUES (1, 1, :etype, NOW(), CAST(:pb AS jsonb))"
+                    " RETURNING event_id"
+                ),
+                {"etype": event_type, "pb": processed_by},
+            ).fetchone()
+            conn.commit()
+            return row[0]
+    finally:
+        engine.dispose()
+
+
+def _get_event_processed_by(url: str, event_id: int) -> dict:
+    """Return run_events.processed_by (a JSONB dict) for one event_id."""
+    engine = sa.create_engine(url, poolclass=sa.pool.NullPool)
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text("SELECT processed_by FROM run_events WHERE event_id = :eid"),
+                {"eid": event_id},
+            ).fetchone()
+            return row[0] if row else None
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.integration
+def test_0011_cutover_stamps_existing_terminal_events():
+    """0011's backfill stamps existing terminal events as continuation-handled.
+
+    Guards the HIGH bug from the S3 review: renaming the consumer cursor key
+    (recurring_watcher -> continuation) and dropping the cron_expr filter makes
+    poll_once() reprocess the entire historical terminal-event log on deploy and
+    retroactively materialise downstream runs (real Slack/email/LLM sends). The
+    backfill marks every pre-existing terminal event as already handled, so the
+    consumer only reacts to NEW terminal events after deploy. Non-terminal events
+    must be left untouched.
+    """
+    url = os.environ["ALEMBIC_DATABASE_URL"]
+
+    # Pre-state: revision 0010 — run_events exists; 0011's indexes/backfill not yet applied.
+    _run_alembic("downgrade", "0010")
+
+    # A terminal event with an empty cursor (never stamped) — the dangerous case.
+    terminal_id = _insert_run_event(url, event_type="SUCCEEDED", processed_by="{}")
+    # A non-terminal event must be left alone by the backfill.
+    pending_id = _insert_run_event(url, event_type="PENDING", processed_by="{}")
+
+    # Apply 0011 (and any later migrations).
+    _run_alembic("upgrade", "head")
+
+    terminal_pb = _get_event_processed_by(url, terminal_id)
+    assert "continuation" in terminal_pb, (
+        "0011 must stamp existing terminal events as continuation-handled"
+        f" (processed_by={terminal_pb})"
+    )
+
+    pending_pb = _get_event_processed_by(url, pending_id)
+    assert "continuation" not in pending_pb, (
+        f"0011 must NOT stamp non-terminal events (processed_by={pending_pb})"
+    )
+
+
 @pytest.mark.integration
 def test_0006_creates_and_drops_oauth_connections():
     """Migration 0006 creates oauth_connections; downgrade drops it."""
