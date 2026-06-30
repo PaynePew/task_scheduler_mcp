@@ -163,6 +163,68 @@ async def test_queued_echo_run_completes_to_succeeded(session_factory, sqs):
 
 
 @pytest.mark.integration
+async def test_one_shot_run_settles_job_to_completed(session_factory, sqs):
+    """A one-shot run reaching SUCCEEDED settles its Job to state='completed' (ADR-068)."""
+    job, run = await _insert_queued_run(session_factory)
+    message = _make_sqs_message(run.run_id, job.job_id)
+    # Synthetic message — swallow the fake receipt instead of forwarding it.
+    sqs.delete_message = lambda _r: None  # noqa: E731
+
+    await process_one(session_factory, sqs, message, registry=ACTION_REGISTRY)
+
+    async with session_factory() as session:
+        db_job = (await session.execute(select(Job).where(Job.job_id == job.job_id))).scalar_one()
+        db_run = (
+            await session.execute(select(JobRun).where(JobRun.run_id == run.run_id))
+        ).scalar_one()
+
+    assert db_run.status == "SUCCEEDED"
+    assert db_job.state == "completed", "one-shot must settle to completed on terminal run"
+
+
+@pytest.mark.integration
+async def test_recurring_run_does_not_settle_job(session_factory, sqs):
+    """A recurring root's terminal run leaves the Job 'active' — it is never settled."""
+    scheduled = datetime.now(tz=UTC) - timedelta(seconds=10)
+    async with session_factory() as session:
+        async with session.begin():
+            job = Job(
+                user_id="executor-test",
+                description="recurring job",
+                action="echo",
+                action_params={"message": "tick"},
+                job_type="recurring",
+                cron_expr="0 8 * * *",
+            )
+            session.add(job)
+            await session.flush()
+            bucket = scheduled.replace(minute=0, second=0, microsecond=0).isoformat()
+            run = JobRun(
+                time_bucket=bucket,
+                job_id=job.job_id,
+                user_id=job.user_id,
+                scheduled_at=scheduled,
+                status="QUEUED",
+            )
+            session.add(run)
+
+    message = _make_sqs_message(run.run_id, job.job_id)
+    # Synthetic message — swallow the fake receipt instead of forwarding it.
+    sqs.delete_message = lambda _r: None  # noqa: E731
+
+    await process_one(session_factory, sqs, message, registry=ACTION_REGISTRY)
+
+    async with session_factory() as session:
+        db_job = (await session.execute(select(Job).where(Job.job_id == job.job_id))).scalar_one()
+        db_run = (
+            await session.execute(select(JobRun).where(JobRun.run_id == run.run_id))
+        ).scalar_one()
+
+    assert db_run.status == "SUCCEEDED"
+    assert db_job.state == "active", "recurring root must stay active after a terminal run"
+
+
+@pytest.mark.integration
 async def test_handler_permanent_failure_marks_run_failed(session_factory, sqs):
     """Handler returning ok=False, retryable=False → FAILED + RunEvent(FAILED) + DeleteMessage."""
 

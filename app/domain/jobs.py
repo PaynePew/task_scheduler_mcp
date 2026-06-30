@@ -46,14 +46,14 @@ class JobNotFoundError(Exception):
 class InvalidStateError(Exception):
     """Raised when a job cannot transition into the requested state (INVALID_STATE).
 
-    For cancel_job, this means every run has completed naturally
-    (SUCCEEDED/FAILED) and there is no pending or in-flight work to cancel —
-    see ADR-022 for the best-effort semantics.
+    For cancel_job, this means the job's schedule is already exhausted
+    (``Job.state == 'completed'``) — there is no future work to stop — see
+    ADR-068 §5 for the lifecycle and ADR-022 for the best-effort semantics.
 
-    Carries the current internal status as its single arg so the transport
-    layer can map it to a user-facing external status (ADR-014). The domain
-    must not depend on the MCP presentation layer (ADR-010), so message
-    formatting happens in the handler, not here.
+    Carries a run-status hint as its single arg so the transport layer can map
+    it to a user-facing external status (ADR-014): a succeeded one-shot maps to
+    'completed', a failed one to 'failed'. The domain must not depend on the MCP
+    presentation layer (ADR-010), so message formatting happens in the handler.
     """
 
 
@@ -338,10 +338,66 @@ async def get_job_with_runs(
     )
 
 
-# Statuses that represent natural job completion — not caused by a cancel request.
-_NATURALLY_TERMINAL: frozenset[str] = frozenset({"SUCCEEDED", "FAILED"})
 # Statuses that are safe to flip to CANCELLED; RUNNING runs are left to complete.
 _CANCELLABLE_STATUSES: frozenset[str] = frozenset({"PENDING", "QUEUED", "WAITING", "RETRYING"})
+
+
+async def settle_job(session: AsyncSession, *, job_id: int) -> bool:
+    """CAS ``Job.state`` active → completed for a finished one-shot/immediate job.
+
+    Called by the executor in the SAME transaction that writes a one-shot run's
+    terminal status (ADR-068 decision A). ``completed`` means the schedule is
+    *exhausted* — NOT that the run succeeded; run success/failure stays on
+    ``JobRun.status``, so a one-shot whose only run failed still settles to
+    ``completed``.
+
+    The transition is a compare-and-set from ``active`` (``UPDATE ... WHERE
+    state='active'``) so it races safely against a concurrent ``task.cancel``:
+    the first commit wins and the loser matches zero rows; either way the job
+    leaves the active count. Recurring roots (``job_type='recurring'``) stay
+    ``active`` until cancelled, and trigger-driven downstreams
+    (``trigger_on_job_id`` set) are deferred to the WAITING-removal slice (#250);
+    both are excluded here, which also makes the call a safe no-op when the
+    executor settles their runs.
+
+    Returns True if this call performed the transition, False on a no-op (already
+    terminal, recurring, or chained). Caller must be inside an open transaction.
+    """
+    result = await session.execute(
+        update(Job)
+        .where(
+            Job.job_id == job_id,
+            Job.state == "active",
+            Job.job_type != "recurring",
+            Job.trigger_on_job_id.is_(None),
+        )
+        .values(state="completed", updated_at=datetime.now(tz=UTC))
+        .returning(Job.job_id)
+        # No session sync: the executor never holds the Job ORM instance here, and
+        # we read only RETURNING — avoid the evaluate strategy mutating in-memory
+        # state on a zero-row CAS (anti-pattern #1).
+        .execution_options(synchronize_session=False)
+    )
+    return result.first() is not None
+
+
+async def _terminal_status_hint(session: AsyncSession, job_id: int) -> str:
+    """Latest run status for a terminal job — the hint InvalidStateError carries.
+
+    The external 'cannot cancel' message distinguishes a succeeded one-shot
+    ('completed') from a failed one ('failed'); Job.state='completed' alone does
+    not carry that, so the hint comes from the run outcome. Defaults to SUCCEEDED
+    (external 'completed') when the job has no runs.
+    """
+    status = (
+        await session.execute(
+            select(JobRun.status)
+            .where(JobRun.job_id == job_id)
+            .order_by(func.coalesce(JobRun.start_at, JobRun.scheduled_at).desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    return status or "SUCCEEDED"
 
 
 async def cancel_job(
@@ -350,50 +406,70 @@ async def cancel_job(
     user_id: str,
     job_id: int,
 ) -> JobView:
-    """Job-level cancel: set cancelled_at, flip non-RUNNING pending runs to CANCELLED.
+    """Job-level cancel: CAS ``Job.state`` active → cancelled, flip pending runs.
 
-    Best-effort semantics (ADR-022):
-    - RUNNING runs are left untouched so they complete naturally.
+    Best-effort semantics (ADR-022, ADR-068):
+    - The job's lifecycle is the source of truth: cancel is a compare-and-set
+      from ``state='active'``, which races safely with a one-shot's settle (first
+      commit wins). ``cancelled_at`` is retained as an audit timestamp only.
+    - Pending/queued/waiting/retrying runs flip to CANCELLED so they never
+      dispatch; a RUNNING run is left to finish naturally.
     - Re-cancel on an already-cancelled job is idempotent (returns success).
-    - INVALID_STATE only when all runs finished naturally (SUCCEEDED/FAILED).
+    - INVALID_STATE when the schedule is already exhausted (``state='completed'``).
 
     Raises JobNotFoundError if job_id does not exist or belongs to another user.
-    Raises InvalidStateError(internal_status) if job fully terminated naturally.
+    Raises InvalidStateError(hint) if the job is already completed.
     Returns a JobView reflecting post-cancel state (internal_status='CANCELLED').
     """
     async with session.begin():
-        job_result = await session.execute(
-            select(Job).where(Job.job_id == job_id, Job.user_id == user_id)
-        )
-        job = job_result.scalar_one_or_none()
+        job = (
+            await session.execute(select(Job).where(Job.job_id == job_id, Job.user_id == user_id))
+        ).scalar_one_or_none()
         if job is None:
             raise JobNotFoundError(job_id)
 
-        # Idempotent: cancelled_at is the single source of truth for "was this job cancelled".
-        if job.cancelled_at is not None:
+        # Already cancelled → idempotent success.
+        if job.state == "cancelled":
             return JobView(
-                job_id=job.job_id,
-                action=job.action,
-                internal_status="CANCELLED",
-                runs=None,
+                job_id=job.job_id, action=job.action, internal_status="CANCELLED", runs=None
             )
 
-        runs_result = await session.execute(select(JobRun).where(JobRun.job_id == job_id))
-        all_runs = runs_result.scalars().all()
+        # Schedule already exhausted → nothing to cancel (ADR-068 §5).
+        if job.state == "completed":
+            raise InvalidStateError(await _terminal_status_hint(session, job_id))
 
-        # INVALID_STATE only when every run completed naturally (no in-flight or pending work).
-        if all_runs and all(r.status in _NATURALLY_TERMINAL for r in all_runs):
-            # Either SUCCEEDED or FAILED — both naturally-terminal, so any run's status
-            # is a valid hint for the external error message.
-            current_status = all_runs[0].status
-            raise InvalidStateError(current_status)
-
-        # Mark job as cancelled.
-        job.cancelled_at = datetime.now(tz=UTC)
+        # CAS active → cancelled. The WHERE state='active' guard makes this atomic
+        # against a concurrent settle (one-shot completion); the race loser
+        # matches zero rows and is handled below.
+        now = datetime.now(tz=UTC)
+        cas = await session.execute(
+            update(Job)
+            .where(Job.job_id == job_id, Job.state == "active")
+            .values(state="cancelled", cancelled_at=now, updated_at=now)
+            .returning(Job.job_id)
+            # No session sync: we keep reading the loaded `job` (its action/job_id)
+            # and re-read state from the DB on a lost CAS — never the in-memory
+            # value the evaluate strategy would mutate (anti-pattern #1).
+            .execution_options(synchronize_session=False)
+        )
+        if cas.first() is None:
+            # Lost the race: a concurrent settle/cancel moved us out of 'active'.
+            fresh_state = (
+                await session.execute(select(Job.state).where(Job.job_id == job_id))
+            ).scalar_one()
+            if fresh_state == "cancelled":
+                return JobView(
+                    job_id=job.job_id, action=job.action, internal_status="CANCELLED", runs=None
+                )
+            raise InvalidStateError(await _terminal_status_hint(session, job_id))
 
         # Flip only the pending/queued/waiting/retrying runs; leave RUNNING alone.
-        to_cancel = [r for r in all_runs if r.status in _CANCELLABLE_STATUSES]
-        for run in to_cancel:
+        runs = (
+            (await session.execute(select(JobRun).where(JobRun.job_id == job_id))).scalars().all()
+        )
+        for run in runs:
+            if run.status not in _CANCELLABLE_STATUSES:
+                continue
             # Capture pre-update status before SQLAlchemy's synchronize_session mutates it.
             original_status = run.status
             await session.execute(
@@ -401,21 +477,17 @@ async def cancel_job(
                 .where(JobRun.run_id == run.run_id, JobRun.time_bucket == run.time_bucket)
                 .values(status="CANCELLED")
             )
-            event = RunEvent(
-                run_id=run.run_id,
-                job_id=job_id,
-                event_type="CANCELLED",
-                status_from=original_status,
-                status_to="CANCELLED",
+            session.add(
+                RunEvent(
+                    run_id=run.run_id,
+                    job_id=job_id,
+                    event_type="CANCELLED",
+                    status_from=original_status,
+                    status_to="CANCELLED",
+                )
             )
-            session.add(event)
 
-    return JobView(
-        job_id=job.job_id,
-        action=job.action,
-        internal_status="CANCELLED",
-        runs=None,
-    )
+    return JobView(job_id=job.job_id, action=job.action, internal_status="CANCELLED", runs=None)
 
 
 @dataclass

@@ -30,7 +30,13 @@ The system stores three distinct things. Confusing them is the most common sourc
 
 A recurring `Job` has many `JobRun`s over time. A one-shot `Job` has exactly one `JobRun`.
 
-**`active`** — a `Job` is *active* when it still carries **resident load**: it can still produce or run a future `JobRun`. An `immediate`/`one-shot` job stops being active the moment its single `JobRun` reaches a terminal status; a `recurring` job stays active until cancelled; a `trigger-driven` job's activeness follows its `inherited recurrence` (§7). *Active* is **not** "ever created and not cancelled" — it is the predicate the containment caps (ADR-055) bound, because resident load, not lifetime job count, is what consumes the box.
+**`Job.state`** — the Job's lifecycle, an explicit enum `active | completed | cancelled` (ADR-068), kept **separate** from the run-level `job_runs.status` (§2). It answers *"can this schedule still do anything?"*, never *"did an execution succeed?"* — that stays on `JobRun.status`. Replaces a never-cleared `active` boolean that made every job ever created count against the quota forever (the quota-lockout bug).
+
+- **`active`** — the Job still carries **resident load**: it can still produce or run a future `JobRun`. *Active* is **not** "ever created and not cancelled" — it is the predicate the containment caps (ADR-055) bound, because resident load, not lifetime job count, is what consumes the box.
+- **`completed`** — the schedule is **exhausted**; no more runs. This is **not** "succeeded": an `immediate`/`one-shot` job settles to `completed` the moment its single `JobRun` reaches *any* terminal status (success/failure lives on `JobRun.status`). A `recurring` root is **never** auto-completed — it stays `active` until cancelled.
+- **`cancelled`** — a user explicitly stopped it (`task.cancel`); no more future runs, and any in-flight `JobRun` is left to finish (ADR-022). `cancelled_at` is retained as an audit timestamp only.
+
+The containment quota counts `state = 'active'`; `completed`/`cancelled` jobs leave the active set. The one-shot `→ completed` settle and a concurrent `→ cancelled` are both compare-and-set from `active` (first writer wins), so a one-shot whose run finishes while a cancel lands stays `cancelled` (user intent) with `JobRun.status = succeeded` (what happened). A `trigger-driven` (chained) job's activeness follows its trigger parent and `inherited recurrence` (§7); its event-driven settle arrives with the continuation refactor.
 
 ## §2 Status lifecycle
 

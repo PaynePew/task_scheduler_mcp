@@ -472,6 +472,143 @@ def test_0008_back_fills_user_id_from_parent_job():
     _run_alembic_with_operator("upgrade", "head")
 
 
+# ---------------------------------------------------------------------------
+# Migration 0010: replace the active boolean with the Job.state lifecycle (ADR-068)
+# ---------------------------------------------------------------------------
+
+
+def _has_column(url: str, table: str, column: str) -> bool:
+    """Return True if table.column exists in the public schema."""
+    engine = sa.create_engine(url, poolclass=sa.pool.NullPool)
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    "SELECT 1 FROM information_schema.columns"
+                    " WHERE table_schema = 'public' AND table_name = :t AND column_name = :c"
+                ),
+                {"t": table, "c": column},
+            ).fetchone()
+            return row is not None
+    finally:
+        engine.dispose()
+
+
+def _get_state(url: str, job_id: int) -> str:
+    """Return jobs.state for a single job_id."""
+    engine = sa.create_engine(url, poolclass=sa.pool.NullPool)
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text("SELECT state FROM jobs WHERE job_id = :jid"), {"jid": job_id}
+            ).fetchone()
+            return row[0]
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.integration
+def test_0010_backfills_job_state():
+    """Seed old-shape rows at 0009, upgrade, assert each reclassifies per ADR-068 §6.
+
+    This is the backfill that unblocks the live demo/operator account: terminal
+    one-shots become 'completed' and leave the active count, while recurring and
+    still-pending jobs stay 'active'. A buggy backfill that left terminal jobs
+    'active' would reproduce the quota-lockout, so the active-count assertion is
+    the real guard here.
+    """
+    url = os.environ["ALEMBIC_DATABASE_URL"]
+
+    # Pre-state: revision 0009 — the `active` boolean exists, `state` does not.
+    _run_alembic("downgrade", "0009")
+    assert _has_column(url, "jobs", "active"), "active boolean must exist at 0009"
+    assert not _has_column(url, "jobs", "state"), "state must not exist yet at 0009"
+
+    engine = sa.create_engine(url, poolclass=sa.pool.NullPool)
+    try:
+        with engine.begin() as conn:
+            # (a) terminal one-shot (active=true, single SUCCEEDED run) -> completed
+            terminal_id = conn.execute(
+                text(
+                    "INSERT INTO jobs"
+                    " (user_id, description, action, action_params, job_type,"
+                    "  scheduled_at, active, created_at, updated_at)"
+                    " VALUES ('mig-0010', 't', 'echo', '{}'::jsonb, 'one_shot',"
+                    "  NOW(), TRUE, NOW(), NOW()) RETURNING job_id"
+                )
+            ).scalar_one()
+            conn.execute(
+                text(
+                    "INSERT INTO job_runs"
+                    " (time_bucket, job_id, user_id, scheduled_at, status,"
+                    "  retry_count, max_retries, created_at, updated_at)"
+                    " VALUES (TO_CHAR(NOW(), 'YYYY-MM-DD HH24:00:00'), :jid, 'mig-0010',"
+                    "  NOW(), 'SUCCEEDED', 0, 3, NOW(), NOW())"
+                ),
+                {"jid": terminal_id},
+            )
+
+            # (b) cancelled job (cancelled_at set) -> cancelled
+            cancelled_id = conn.execute(
+                text(
+                    "INSERT INTO jobs"
+                    " (user_id, description, action, action_params, job_type,"
+                    "  scheduled_at, active, cancelled_at, created_at, updated_at)"
+                    " VALUES ('mig-0010', 't', 'echo', '{}'::jsonb, 'one_shot',"
+                    "  NOW(), TRUE, NOW(), NOW(), NOW()) RETURNING job_id"
+                )
+            ).scalar_one()
+
+            # (c) recurring, not cancelled -> active
+            recurring_id = conn.execute(
+                text(
+                    "INSERT INTO jobs"
+                    " (user_id, description, action, action_params, job_type,"
+                    "  cron_expr, active, created_at, updated_at)"
+                    " VALUES ('mig-0010', 't', 'echo', '{}'::jsonb, 'recurring',"
+                    "  '0 8 * * *', TRUE, NOW(), NOW()) RETURNING job_id"
+                )
+            ).scalar_one()
+
+            # (d) still-pending one-shot (active=true, PENDING run) -> active
+            pending_id = conn.execute(
+                text(
+                    "INSERT INTO jobs"
+                    " (user_id, description, action, action_params, job_type,"
+                    "  scheduled_at, active, created_at, updated_at)"
+                    " VALUES ('mig-0010', 't', 'echo', '{}'::jsonb, 'one_shot',"
+                    "  NOW(), TRUE, NOW(), NOW()) RETURNING job_id"
+                )
+            ).scalar_one()
+            conn.execute(
+                text(
+                    "INSERT INTO job_runs"
+                    " (time_bucket, job_id, user_id, scheduled_at, status,"
+                    "  retry_count, max_retries, created_at, updated_at)"
+                    " VALUES (TO_CHAR(NOW(), 'YYYY-MM-DD HH24:00:00'), :jid, 'mig-0010',"
+                    "  NOW(), 'PENDING', 0, 3, NOW(), NOW())"
+                ),
+                {"jid": pending_id},
+            )
+    finally:
+        engine.dispose()
+
+    # Apply 0010 (and any later migrations).
+    _run_alembic("upgrade", "head")
+
+    assert not _has_column(url, "jobs", "active"), "active boolean must be dropped by 0010"
+    assert _has_column(url, "jobs", "state"), "state column must exist after 0010"
+
+    assert _get_state(url, terminal_id) == "completed"
+    assert _get_state(url, cancelled_id) == "cancelled"
+    assert _get_state(url, recurring_id) == "active"
+    assert _get_state(url, pending_id) == "active"
+
+    # The quota query counts state='active': only the recurring + pending rows.
+    active_total = _count_rows(url, "jobs", "user_id = 'mig-0010' AND state = 'active'", {})
+    assert active_total == 2, f"expected 2 active jobs after backfill, got {active_total}"
+
+
 @pytest.mark.integration
 def test_0006_creates_and_drops_oauth_connections():
     """Migration 0006 creates oauth_connections; downgrade drops it."""

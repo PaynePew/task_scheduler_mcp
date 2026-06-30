@@ -5,7 +5,10 @@ See ADR-055 for design rationale. Three caps enforced in order:
   2. Active total per user — prevents one user hoarding the box.
   3. Global active recurring ceiling — protects the single core.
 
-'Active' is defined as: active=True AND cancelled_at IS NULL.
+'Active' is defined as ``Job.state = 'active'`` (ADR-068): a job with resident
+load that can still produce or run a future JobRun. Terminal jobs (state
+'completed' or 'cancelled') leave the active set, so the quota counts current
+load, not lifetime history — this is the fix for the quota-lockout bug.
 """
 
 from __future__ import annotations
@@ -68,9 +71,8 @@ async def check_containment(
             select(func.count())
             .select_from(Job)
             .where(Job.user_id == user_id)
-            .where(Job.active.is_(True))
+            .where(Job.state == "active")
             .where(Job.job_type == "recurring")
-            .where(Job.cancelled_at.is_(None))
         )
     ).scalar_one()
     if recurring_count >= limits.active_recurring_per_user:
@@ -82,8 +84,7 @@ async def check_containment(
             select(func.count())
             .select_from(Job)
             .where(Job.user_id == user_id)
-            .where(Job.active.is_(True))
-            .where(Job.cancelled_at.is_(None))
+            .where(Job.state == "active")
         )
     ).scalar_one()
     if total_count >= limits.active_total_per_user:
@@ -94,9 +95,8 @@ async def check_containment(
         await session.execute(
             select(func.count())
             .select_from(Job)
-            .where(Job.active.is_(True))
+            .where(Job.state == "active")
             .where(Job.job_type == "recurring")
-            .where(Job.cancelled_at.is_(None))
         )
     ).scalar_one()
     if global_recurring >= limits.global_active_recurring:

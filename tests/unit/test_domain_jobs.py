@@ -200,25 +200,28 @@ async def test_cancel_job_raises_not_found_when_no_job():
 
 
 @pytest.mark.asyncio
-async def test_cancel_job_raises_invalid_state_when_all_runs_terminal():
-    """cancel_job raises InvalidStateError when all runs are already in a terminal status."""
-    from app.db.models import Job, JobRun
+async def test_cancel_job_raises_invalid_state_when_schedule_completed():
+    """cancel_job raises InvalidStateError when the job's schedule is already completed.
+
+    Under ADR-068 the job lifecycle (Job.state), not a scan of run statuses, is
+    the source of truth: a 'completed' job cannot be cancelled. The error carries
+    the latest run's status as the external-message hint.
+    """
+    from app.db.models import Job
 
     mock_job = MagicMock(spec=Job)
     mock_job.job_id = 42
-    mock_job.cancelled_at = None  # not yet cancelled — should reach INVALID_STATE check
-
-    mock_run = MagicMock(spec=JobRun)
-    mock_run.status = "SUCCEEDED"
+    mock_job.state = "completed"
 
     job_result = MagicMock()
     job_result.scalar_one_or_none.return_value = mock_job
 
-    runs_result = MagicMock()
-    runs_result.scalars.return_value.all.return_value = [mock_run]
+    # _terminal_status_hint's SELECT of the latest run status.
+    hint_result = MagicMock()
+    hint_result.scalar_one_or_none.return_value = "SUCCEEDED"
 
     session = AsyncMock()
-    session.execute = AsyncMock(side_effect=[job_result, runs_result])
+    session.execute = AsyncMock(side_effect=[job_result, hint_result])
     session.begin = _make_begin_cm()
 
     with pytest.raises(InvalidStateError, match="SUCCEEDED"):

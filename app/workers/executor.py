@@ -30,6 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.actions.base import ActionHandler, ActionResult
 from app.actions.registry import ACTION_REGISTRY
 from app.db.models import Job, JobRun, RunEvent
+from app.domain.jobs import settle_job
 from app.obs.logging import bind_job_id, bind_run_id, unbind_job_id, unbind_run_id
 from app.queue.sqs import SQSClient
 
@@ -113,6 +114,11 @@ async def _write_terminal(
             event_data=action_result.result,
         )
     )
+    # Settle the job lifecycle in the same transaction (ADR-068 decision A): a
+    # one-shot/immediate run reaching a terminal status exhausts the schedule, so
+    # CAS state active → completed. Recurring/chained jobs are excluded inside
+    # settle_job, so this is a safe no-op for them.
+    await settle_job(session, job_id=job_id)
 
 
 async def _write_permanent_failure(
@@ -142,6 +148,9 @@ async def _write_permanent_failure(
             event_data=event_data,
         )
     )
+    # A pre-dispatch permanent failure is still a terminal status for the run, so
+    # a one-shot's schedule is exhausted — settle it (same transaction, ADR-068).
+    await settle_job(session, job_id=job_id)
 
 
 async def _write_retrying(

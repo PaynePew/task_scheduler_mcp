@@ -69,7 +69,10 @@ def _make_session(
     Slot 1 — ``_claim``'s prev_status ``SELECT``: drives ``RunEvent(STARTED).status_from``.
     Slot 2 — ``_claim``'s ``UPDATE ... RETURNING``: ``.first()`` drives ``claim_wins``.
     Slot 3 — ``process_one``'s run-load ``SELECT``: ``.scalar_one_or_none()`` returns ``run``.
-    Slot 4 — terminal / retrying / permanent-failure ``UPDATE`` (separate ``session.begin()``).
+    Beyond slot 3 — terminal / retrying / permanent-failure ``UPDATE`` plus the
+    ``settle_job`` CAS that ``_write_terminal`` / ``_write_permanent_failure`` now
+    issue (ADR-068). These get a generic result so the number of trailing writes
+    doesn't matter to the mock.
     """
     prev_status_result = MagicMock()
     prev_status_result.scalar_one_or_none.return_value = prev_status
@@ -80,12 +83,15 @@ def _make_session(
     run_result = MagicMock()
     run_result.scalar_one_or_none.return_value = run
 
-    terminal_result = MagicMock()
+    ordered = [prev_status_result, claim_result, run_result]
+
+    def _execute(*_args, **_kwargs) -> MagicMock:
+        # Return the ordered slots first, then a generic result for any trailing
+        # write (terminal UPDATE, settle CAS, ...).
+        return ordered.pop(0) if ordered else MagicMock()
 
     session = MagicMock()
-    session.execute = AsyncMock(
-        side_effect=[prev_status_result, claim_result, run_result, terminal_result]
-    )
+    session.execute = AsyncMock(side_effect=_execute)
     session.get = AsyncMock(return_value=job)
     session.add = MagicMock()
     session.begin = MagicMock(return_value=_async_cm(None))
@@ -151,7 +157,8 @@ async def test_write_terminal_succeeded():
         session, run_id=1, job_id=1, terminal_status="SUCCEEDED", action_result=result
     )
 
-    session.execute.assert_awaited_once()
+    # Two executes: the terminal status UPDATE + the settle_job CAS (ADR-068).
+    assert session.execute.await_count == 2
     session.add.assert_called_once()
     added = session.add.call_args[0][0]
     assert added.event_type == "SUCCEEDED"
@@ -413,7 +420,8 @@ async def test_write_permanent_failure_updates_run_and_inserts_event():
         event_data={"error": "missing field"},
     )
 
-    session.execute.assert_awaited_once()
+    # Two executes: the FAILED status UPDATE + the settle_job CAS (ADR-068).
+    assert session.execute.await_count == 2
     session.add.assert_called_once()
     added = session.add.call_args[0][0]
     assert added.event_type == "FAILED"
