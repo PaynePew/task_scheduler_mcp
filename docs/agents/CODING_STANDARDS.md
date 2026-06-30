@@ -82,13 +82,14 @@ mcp/handlers/   →   domain/   →   db/repositories/ (W2: read+write split)
 
 Every status transition writes a `RunEvent` in the **same transaction** as the `job_runs.status` update. Wrap both writes in one `async with session.begin():` block.
 
-Downstream consumers (`RecurringJobWatcher`, `ChainWatcher`) read **`run_events`**, never `job_runs.status` directly. The status column is mutable; the event log is the immutable source of truth.
+The downstream consumer (the single **continuation consumer**) reads **`run_events`**, never `job_runs.status` directly. The status column is mutable; the event log is the immutable source of truth.
 
-### Run creation & chaining (ADR-065 — strict)
+### Run creation & chaining (ADR-065 + ADR-067 — strict)
 
-- **Single owner of run creation.** All `JobRun` creation goes through the `RunMaterializer` domain module (`materialize_initial` / `materialize_successor`). Do NOT hand-roll `JobRun` + `RunEvent` inserts in `create_job`, `RecurringJobWatcher`, or elsewhere — scattered run-creation is the bug ADR-065 fixed. Arming downstream runs is an internal, atomic step of materialisation (same transaction as the upstream insert).
-- **`ChainWatcher` is status-only.** It flips `WAITING → PENDING/CANCELLED` and nothing else — it never creates a `JobRun`, never reads or writes `JobRun.result` (ADR-033, reaffirmed ADR-065). Having `ChainWatcher` create runs or move data is a review block.
-- **One live run per `Job`.** At most one non-terminal `JobRun` per `Job` (forbid-concurrency via `has_live_run`). An overlapping tick is dropped (`WAITING → CANCELLED`), never run concurrently or queued.
+- **Single owner of run creation.** All `JobRun` creation goes through the `RunMaterializer` domain module — `materialize_initial` (a schedule-driven job's first run), `materialize_successor` (the next recurring tick), `materialize_downstream` (a trigger-driven downstream run). Do NOT hand-roll `JobRun` + `RunEvent` inserts in `create_job`, the continuation consumer, or elsewhere — scattered run-creation is the bug ADR-065 fixed.
+- **Continuation, not pre-arm (ADR-067).** A trigger-driven downstream run is **created when its upstream run reaches a terminal status**, by the single continuation consumer (the generalised `RecurringJobWatcher`) — never pre-armed as a `WAITING` run at upstream-creation time. `trigger_on_status` is a **create predicate** (create the downstream iff the upstream terminal status matches); a predicate miss creates no run and records a lightweight audit event. No new `WAITING` run is produced; `ChainWatcher` is idle (its removal is the next slice). Re-introducing pre-armed `WAITING` runs or `arm`/`re-arm` is a review block.
+- **Exactly-once at the data layer (ADR-067 §4).** Run creation is idempotent via partial unique indexes on the run's cause — `(job_id, wait_for_run_id)` for trigger-driven runs, `(job_id, scheduled_at)` for schedule-driven successors. A redelivered terminal event that retries a create is a no-op; the `processed_by` cursor is retained **only** as an efficiency layer, not the correctness mechanism. Terminal events are processed in `event_id` order.
+- **One executing run per `Job`; slow consumer = skip-create.** At most one *executing* `JobRun` per `Job` — forbid-concurrency via `has_executing_run` (`PENDING`/`QUEUED`/`RUNNING`/`RETRYING`). When the downstream already has an executing run, the overlapping tick is **not created** (skip + audited drop), never created-then-cancelled and never run concurrently or queued.
 
 ### Action registry (ADR-013)
 
@@ -115,7 +116,7 @@ Each entrypoint is **~10 lines**: import the loop / server, wire config, run. Bu
 - **`Tool` ≠ `Action`.** `Tool` is the MCP surface (`task.create.v1`); `Action` is what the worker dispatches (`echo`, `http_call`). A new action is one registry entry, not a new tool.
 - **`schedule_type`** is one of `immediate | one-shot | recurring` — **all three are supported** (recurring + one-shot run in prod). The W1-only `UnsupportedScheduleTypeError` restriction is obsolete — do NOT reintroduce it or flag recurring/one-shot code as unsupported.
 - **Run source (ADR-065).** Every `JobRun` has exactly one run source: **schedule-driven** (`cron_expr` / `scheduled_at`) **XOR** **trigger-driven** (`trigger_on_job_id`), mutually exclusive per `Job`. A chained job carries **no `cron_expr`** — recurrence is *inherited* from its trigger. `trigger_on_job_id` + `cron_expr` together → rejected at create time (`USER_INPUT`, rule V6).
-- **Run-source vocabulary (CONTEXT.md §7).** `RunMaterializer` (single owner of run creation), `arm` / `re-arm` (materialise a `WAITING` downstream run per upstream run), `inherited recurrence`, `fan-out` (one upstream → many downstream — allowed) vs `fan-in` (one downstream ← many upstreams, `from_run_ids` — deferred, ADR-040). Reject drift from these terms.
+- **Run-source vocabulary (CONTEXT.md §7).** `RunMaterializer` (single owner of run creation), `continuation` (a downstream run is created when its upstream run terminates — replaces the old pre-armed `arm` / `WAITING` model, ADR-067), `create predicate` (`trigger_on_status` applied at create time), `inherited recurrence`, `fan-out` (one upstream → many downstream — allowed) vs `fan-in` (one downstream ← many upstreams, `from_run_ids` — deferred, ADR-040). Reject drift from these terms.
 - New terminology = update CONTEXT.md in the same branch. The reviewer must reject vocabulary drift even if the code works.
 
 ## Anti-patterns (real bugs from this project — do not repeat)
@@ -138,7 +139,7 @@ Each entrypoint is **~10 lines**: import the loop / server, wire config, run. Bu
 
 9. **Forwarding ElasticMQ-synthesised receipt handles to the real ElasticMQ.** A previous test fixture round-tripped synthetic receipts and got `ReceiptHandleIsInvalid`. If you need a fake receipt for a unit test, keep it in the test boundary; do not call `delete_message` with it.
 
-10. **A test that fakes the very seam it claims to exercise.** `test_chain_recurring` built downstream runs by hand (`_insert_downstream_run` pre-set `wait_for_run_id`) while claiming to test recurring chains — so the suite was green while the real `RecurringJobWatcher` → arm → `ChainWatcher` spawn path never ran. A faked-seam test is worse than no test: it disguises *unverified* as *verified*. If a test mocks or fakes the exact mechanism under test, rewrite it to drive the real path. (ADR-065 / #224.)
+10. **A test that fakes the very seam it claims to exercise.** `test_chain_recurring` built downstream runs by hand (`_insert_downstream_run` pre-set `wait_for_run_id`) while claiming to test recurring chains — so the suite was green while the real spawn path never ran. A faked-seam test is worse than no test: it disguises *unverified* as *verified*. If a test mocks or fakes the exact mechanism under test, rewrite it to drive the real path — now the continuation consumer → `materialize_downstream` path. (ADR-065 / #224; rewritten for continuation in ADR-067 / #254.)
 
 ## Commits
 

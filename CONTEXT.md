@@ -66,6 +66,8 @@ WAITING ──▶ CANCELLED  (when blocking-job terminates unfavourably)
 
 Mapping happens at the MCP handler boundary. DB keeps the precise truth; LLM gets the simple model.
 
+> **`WAITING` is legacy (ADR-067).** Under continuation run-creation (§7) no new `WAITING` run is produced — a chained downstream has zero runs until its upstream terminates, then a `PENDING` run is created directly. The status and its `WAITING → PENDING/CANCELLED` transitions remain in the machine only because `ChainWatcher` and the column still exist; both are removed in a follow-up slice.
+
 ## §3 Schedule types
 
 `Job.schedule_type` is one of:
@@ -91,8 +93,8 @@ Mapping happens at the MCP handler boundary. DB keeps the precise truth; LLM get
 | **`mcp-server`** | Handles MCP tool calls (stdio or HTTP) | Stateless; scale horizontally |
 | **`Watcher`** | Scans for due `JobRun`s within the `lookahead window` (5 min), publishes to queue | Multiple instances safe via `FOR UPDATE SKIP LOCKED` (no leader election) |
 | **`Worker`** | Pulls from queue, claims via DB UPDATE, dispatches to `ActionHandler` | Multiple instances safe via `claim-and-mark` |
-| **`RecurringJobWatcher`** | Reads `run_events` for terminal events of recurring jobs; inserts next `JobRun` | Single instance for W1 |
-| **`ChainWatcher`** | Reads `run_events` for terminal events; flips `WAITING` runs to `PENDING` (or `CANCELLED`) based on `trigger_on_status` | Single instance for W1 |
+| **`continuation consumer`** (the generalised `RecurringJobWatcher`) | Reads `run_events` for terminal events in `event_id` order; per event materializes the recurring successor **and** each matching trigger-driven downstream run via `RunMaterializer` (ADR-067) | Single instance for W1 |
+| **`ChainWatcher`** | Legacy `WAITING → PENDING/CANCELLED` flipper. **Idle** since ADR-067 — no new `WAITING` run is produced; still deployed, removed in a follow-up slice | Single instance for W1 |
 | **`migrate`** | One-shot; runs Alembic migrations before app services start | Compose `service_completed_successfully` |
 
 ### Key primitives
@@ -109,7 +111,7 @@ Mapping happens at the MCP handler boundary. DB keeps the precise truth; LLM get
 
 ## §5 Data patterns
 
-- **`outbox`** (transactional outbox pattern) — every status transition writes a `RunEvent` in the **same transaction** as the `job_runs.status` update. Downstream consumers (`RecurringJobWatcher`, `ChainWatcher`) read the immutable event log, never the mutable status column. Eliminates a class of races.
+- **`outbox`** (transactional outbox pattern) — every status transition writes a `RunEvent` in the **same transaction** as the `job_runs.status` update. The downstream `continuation consumer` reads the immutable event log, never the mutable status column. Eliminates a class of races.
 - **`time_bucket`** — partition key column on `job_runs` (e.g. `date_trunc('hour', scheduled_at)`). W1: column + composite PK + partial index. W2: upgraded to native `PARTITION BY RANGE`. Lets the Watcher's "what's due in the next 5 min" query stay O(log n) within the current hour.
 - **`idempotency_key`** — `Job.idempotency_key` is `UNIQUE`. Same key + same `user_id` returns the existing `Job` instead of creating a duplicate. Caller-side retry safety.
 - **`FOR UPDATE SKIP LOCKED`** — Postgres locking clause used by the Watcher's claim query. Skips rows another transaction is locking; multiple watchers never contend on the same row.
@@ -237,34 +239,35 @@ Every `JobRun` is materialized by exactly one **`run source`**. There are two ki
 
 ### `RunMaterializer` — the single owner of run creation
 
-All run creation routes through one stateless domain module (not a process), the **`RunMaterializer`**. It owns *what runs should exist and in what initial state*, and **arming the downstream is an internal, atomic step of materialization** — you cannot create a run without arming its downstream in the same transaction. This is what makes chain coordination structural rather than convention-based.
+All run creation routes through one stateless domain module (not a process), the **`RunMaterializer`**. It owns *what runs should exist and in what initial state*:
 
-- `create_job` → `materialize_initial` (first run: a scheduled run, or a `WAITING` run armed against the trigger's current run)
-- `RecurringJobWatcher` → `materialize_successor` (the next cron occurrence)
-- both, internally → `arm` (recursively)
+- `create_job` → `materialize_initial` (a schedule-driven job's first `PENDING` run; a trigger-driven job gets **no** initial run)
+- the continuation consumer → `materialize_successor` (the next cron occurrence) **and** `materialize_downstream` (a trigger-driven downstream run)
 
-**`arm` / `re-arm`** — materializing a fresh `WAITING` downstream `JobRun` whose `wait_for_run_id` points at a specific upstream run. Done **once per upstream run, unconditionally** — even while the previous tick's downstream run is still in flight — cascading down the chain (and across `fan-out`). This is the **control plane**. `ChainWatcher` then flips `WAITING → PENDING/CANCELLED` (status only); the executor injects `from_run_id = wait_for_run_id` (the **data plane**, ADR-064). Three separate concerns: materialize *creates*, ChainWatcher *coordinates status*, executor *moves data* — never merged (ADR-033). Load-shedding is **not** an arm-time concern; the overlap is resolved later at flip time (see `slow consumer`).
+**`continuation`** — a trigger-driven downstream run is **created when its upstream run reaches a terminal status** (ADR-067), by the single continuation consumer, in the same transaction that materializes the recurring successor. There is no pre-armed `WAITING` run and no recursive `arm`: one rule — *terminal event → materialise the next run* — governs recurrence **and** chaining. The new downstream run is `PENDING` with `wait_for_run_id` set to the upstream terminal `run_id` (the **data plane**: the executor injects `from_run_id = wait_for_run_id`, ADR-064). Creation is idempotent at the data layer — partial unique indexes on the run's cause, `(job_id, wait_for_run_id)` for trigger-driven and `(job_id, scheduled_at)` for schedule-driven successors — so a redelivered terminal event is a no-op; the `processed_by` cursor is only an efficiency layer. Terminal events are processed in `event_id` order.
 
-### `trigger_on_status` — the flip predicate
+> The legacy `WAITING` status, `ChainWatcher` (status flip), and pre-armed `arm`/`re-arm` model (ADR-065) are **superseded by ADR-067**. After the continuation refactor no new `WAITING` run is produced and `ChainWatcher` is idle; its removal (and dropping `WAITING` from §2) is a follow-up slice.
 
-- `SUCCEEDED` — flip to `PENDING` only if blocker succeeded; else `CANCELLED`
-- `FAILED` — flip to `PENDING` only if blocker failed; else `CANCELLED`
-- `ANY` — flip to `PENDING` on any terminal status (including `CANCELLED`)
+### `trigger_on_status` — the create predicate
 
-Recommended **Design B**: `trigger_on_status=ANY` + downstream internal ok/error branching, so the sink always notifies (success or fallback). Do **not** create source-coupled handler classes like `slack_post_from_github_digest` — specialisation is via params, not class names (ADR-033).
+Applied at **create** time (ADR-067), not flip time:
+
+- `SUCCEEDED` — create the downstream run only if the upstream **succeeded**
+- `FAILED` — create only if the upstream **failed**
+- `ANY` — create on any terminal status (including `CANCELLED`)
+
+A **predicate miss** creates no run and records a lightweight audit `RunEvent` (`CHAIN_SKIPPED_PREDICATE_MISS`) — there is no `CANCELLED_BY_CHAIN_MISS` run. Recommended **Design B**: `trigger_on_status=ANY` + downstream internal ok/error branching, so the sink always notifies (success or fallback). Do **not** create source-coupled handler classes like `slack_post_from_github_digest` — specialisation is via params, not class names (ADR-033).
 
 ### `fan-out` vs `fan-in` (the real meaning of "no DAG")
 
-- **`fan-out`** — one upstream → many downstream (e.g. `llm_summarize → slack_post` **+** `email_send`). **Allowed.** Each downstream is its own linear chain off the shared upstream run, with its own `WAITING` run pointing at it.
+- **`fan-out`** — one upstream → many downstream (e.g. `llm_summarize → slack_post` **+** `email_send`). **Allowed.** On the shared upstream terminal event, one run is created per matching downstream job, independently.
 - **`fan-in`** — one downstream reading *many* upstreams (`from_run_ids: list[int]`). **Deferred** (ADR-033 future / ADR-040). This — not fan-out — is what "linear only, no DAG" excludes.
 
 ### `slow consumer`
 
-If an upstream produces runs faster than a downstream finishes, the overlapping downstream tick is **dropped** (load-shedding), preserving the invariant **at most one *executing* `JobRun` per `Job`** — where *executing* means `PENDING` / `QUEUED` / `RUNNING` / `RETRYING`. A `WAITING` run armed for the next tick is **not** executing, so it may coexist with the current tick's executing (or not-yet-flipped `WAITING`) run; the shared `has_executing_run` predicate excludes `WAITING`. The drop happens at **flip time** (`ChainWatcher`: `WAITING → CANCELLED` with an audited `CANCELLED_SLOW_CONSUMER` event), which is the single load-shedding path — arming is unconditional. The dropped tick's data is simply not consumed; the downstream catches the next idle tick.
+If an upstream produces terminal events faster than a downstream finishes, the overlapping downstream tick is **not created** (load-shedding), preserving the invariant **at most one *executing* `JobRun` per `Job`** — where *executing* means `PENDING` / `QUEUED` / `RUNNING` / `RETRYING`. When the upstream terminates, the continuation consumer checks the shared `has_executing_run` predicate for the downstream job: if it already has an executing run, the create is **skipped** with an audited `CHAIN_SKIPPED_SLOW_CONSUMER` event — nothing is created then cancelled. The dropped tick's data is simply not consumed; the downstream catches the next idle tick.
 
-> **Supersedes #227** (operator decision, 2026-06-12): the earlier wording was "at most one *live* (non-terminal) run", with a spawn-time forbid-concurrency check applied to **all** spawns. That let `re-arm` of tick N+1 silently fail with `ConcurrencyError` whenever tick N's downstream run was still live (the common case under concurrent watchers), so a chained downstream missed every other tick with no audit record. Counting only *executing* runs and routing all load-shedding through the flip-time drop fixes the race. A transient overlap of two `WAITING` runs (current tick not yet flipped + next tick just armed) is now expected, not a violation. See ADR-065 §4.
-
-History: W1 schema; W2 `ChainWatcher` + cron expansion (`croniter`); W4 `from_run_id` convention + `upstream_reader`; the `RunMaterializer` + `inherited recurrence` model is ADR-065 (the realisation of the "subscription" run source ADR-020 deferred and ADR-064 mistakenly assumed already existed).
+History: W1 schema; W2 `ChainWatcher` + cron expansion (`croniter`); W4 `from_run_id` convention + `upstream_reader`; the `RunMaterializer` + `inherited recurrence` model is ADR-065; **continuation run-creation (this section) is ADR-067** — recurrence and chaining unified under one terminal-event rule, exactly-once moved to a data-layer unique constraint, replacing the pre-armed `WAITING`/`ChainWatcher` control plane and its arm-race class (#227 / #234-237).
 
 ## §8 Operational vocab
 

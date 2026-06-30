@@ -38,9 +38,8 @@ from app.db.engine import create_async_engine
 from app.db.models import JobRun, RunEvent
 from app.entrypoints.mcp_http import build_app
 from app.queue.sqs import SQSClient
-from app.workers.chain_watcher import poll_once as chain_watcher_tick
 from app.workers.executor import process_one
-from app.workers.recurring_watcher import poll_once as recurring_watcher_tick
+from app.workers.recurring_watcher import poll_once as continuation_tick
 from app.workers.watcher import claim_and_publish
 
 # ---------------------------------------------------------------------------
@@ -364,9 +363,9 @@ async def test_w2_bonuses(mcp_client, session_factory, sqs):
                     )
                 )
 
-        # Recurring watcher sees the SUCCEEDED event and spawns the next run.
-        spawned = await recurring_watcher_tick(session_factory)
-        assert spawned >= 1, "step 7: recurring watcher should process at least one event"
+        # Continuation consumer sees the SUCCEEDED event and spawns the next run.
+        spawned = await continuation_tick(session_factory)
+        assert spawned >= 1, "step 7: continuation consumer should process at least one event"
 
         # Verify there is now a second PENDING run for the recurring job.
         async with session_factory() as session:
@@ -403,9 +402,9 @@ async def test_w2_bonuses(mcp_client, session_factory, sqs):
             )
         run_count_before = len(all_runs_before)
 
-        # Tick the recurring watcher — it should see the CANCELLED event from
+        # Tick the continuation consumer — it should see the CANCELLED event from
         # cancel but NOT spawn another run because cancelled_at is set.
-        await recurring_watcher_tick(session_factory)
+        await continuation_tick(session_factory)
 
         async with session_factory() as session:
             all_runs_after = (
@@ -420,7 +419,8 @@ async def test_w2_bonuses(mcp_client, session_factory, sqs):
 
         # ------------------------------------------------------------------
         # Step 9: Chaining — create A (immediate), create B triggered on A;
-        # complete A; ChainWatcher flips B's run to PENDING; B completes.
+        # complete A; the continuation consumer CREATES B's run (PENDING) on A's
+        # terminal event (no pre-armed WAITING run); B completes.
         # ------------------------------------------------------------------
         create_a = await _mcp_call(
             client,
@@ -464,9 +464,9 @@ async def test_w2_bonuses(mcp_client, session_factory, sqs):
         assert len(msgs_a) == 1, "step 9: SQS should have A's message"
         await process_one(session_factory, sqs, msgs_a[0])
 
-        # ChainWatcher sees A's SUCCEEDED event and flips B's WAITING run → PENDING.
-        flipped = await chain_watcher_tick(session_factory)
-        assert flipped >= 1, "step 9: chain watcher should flip at least one run"
+        # Continuation consumer sees A's SUCCEEDED event and CREATES B's run (PENDING).
+        created = await continuation_tick(session_factory)
+        assert created >= 1, "step 9: continuation consumer should process A's terminal event"
 
         # Verify B's run is now PENDING.
         async with session_factory() as session:
