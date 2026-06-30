@@ -317,7 +317,7 @@ OAuth 類 action 若 `not_connected`，回應應附 `connect_url`（指向 `http
   "schedule_type": "immediate",
   "trigger_on_job_id": <U>, "trigger_on_status": "SUCCEEDED" }
 ```
-**期望：** D `completed`，其 `result.polished` 是「潤飾過的 U 摘要」。
+**期望：** D `completed`（鏈路資料流成功：D 以 U 的輸出為輸入執行完成）。`result` 屬於內部資料平面，不透過 MCP 介面回傳；要收到輸出，把 D 改成 `slack_post` 或 `email_send`（見第 4.8 節）。
 > `from_run_id` 要填上游那次 **run 的 id**（在 `task.status.v1(U, include_runs:true)` 的 `runs[0].run_id`），不是 job_id。
 
 ### 3.4 串接驗證的 negative cases
@@ -343,7 +343,7 @@ OAuth 類 action 若 `not_connected`，回應應附 `connect_url`（指向 `http
   "action_params": {"text":"<貼一段 300+ 字英文或中文>", "length":"medium", "style":"paragraph", "language":"zh-TW", "focus":["風險","結論"]},
   "schedule_type": "immediate" }
 ```
-**期望：** `completed`，`result.summary` 有內容、`result.tokens.{input,output,total}` 有數字。
+**期望：** `completed`（無 error）。`result` 屬於內部資料平面，不透過 MCP 介面回傳；要實際收到輸出，把它串接到 `slack_post` 或 `email_send`（見第 4.8 節）。
 **預設模型** `gpt-4o-mini`、**輸入截斷** 16000 字元、**輸出上限** 1024 tokens、**每人每日** 10000 tokens 預算（`.env.docker`）。
 
 ### 4.2 llm_polish（無 OAuth）
@@ -353,7 +353,7 @@ OAuth 類 action 若 `not_connected`，回應應附 `connect_url`（指向 `http
   "action_params": {"text":"this sentence have some grammar issue and need fix", "tone":"concise", "language":"en"},
   "schedule_type": "immediate" }
 ```
-**期望：** `completed`，`result.polished` 為修順後的句子。
+**期望：** `completed`（無 error）。`result` 屬於內部資料平面，不透過 MCP 介面回傳；要實際收到輸出，把它串接到 `slack_post` 或 `email_send`（見第 4.8 節）。
 
 ### 4.3 http_call（**operator-only**）
 
@@ -564,7 +564,7 @@ stdio 子行程會**隨對話關閉而死**。但排程器的本質是「到了 
 | 3.1 | chain SUCCEEDED | B 在 A 成功後 `completed` | |
 | 3.2 | chain FAILED | B2 在 A2 失敗後 `completed` | |
 | 3.3/3.4 | from_run_id + negative | 資料流入下游；V1/V6 被拒 | |
-| 4.1–4.2 | llm_summarize/polish | result 有內容 + tokens | |
+| 4.1–4.2 | llm_summarize/polish | completed（無 error）；result 不透過 MCP 介面回傳 | |
 | 4.3–4.4 | http_call/calendar（operator） | 200/events；`${VAR}` 代換成功 | |
 | 4.5–4.7 | github/slack/email OAuth | 未連 `MISSING_CONNECTION`；連後實際送達 | |
 | 4.8 | digest_v1 真串接 | Slack/Email 收到排版摘要 | |
