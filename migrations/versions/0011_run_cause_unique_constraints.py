@@ -74,10 +74,18 @@ def upgrade() -> None:
     # defaults to {}; COALESCE guards any legacy NULL before the || merge so an
     # existing "recurring_watcher" stamp is preserved.
     #
-    # Known, negligible cutover edge: a recurring job whose terminal event lands
-    # in the exact deploy window may get stamped before the consumer reacts; it
-    # self-heals on the job's next run. The severe issue (retroactive chained
-    # sends across all history) is eliminated.
+    # Cutover edge (near-zero, but NOT self-healing — do not assume otherwise):
+    # if a recurring root's terminal event is stamped here before its successor
+    # was created, the new consumer skips it and that job silently STOPS recurring
+    # (no successor -> no future run -> no future event to react to; it cannot
+    # self-heal). The real safety net during the S3 deploy is the still-running
+    # OLD recurring-watcher (distinct cursor key "recurring_watcher"), which drains
+    # its pending recurring events and creates their successors before this
+    # migration runs; uq_job_runs_recurring_tick then makes any double-create a
+    # no-op. The old watcher polls every <=5s (far faster than a deploy), so the
+    # window is tiny — but to be safe, let the old recurring-watcher drain before
+    # `migrate` runs. The severe issue (retroactive chained sends across all
+    # history) is eliminated regardless.
     op.execute(
         "UPDATE run_events "
         "SET processed_by = COALESCE(processed_by, '{}'::jsonb) "
