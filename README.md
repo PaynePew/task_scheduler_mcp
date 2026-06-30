@@ -207,11 +207,11 @@ A stdio MCP server is a child process of the chat client, so it stops the moment
 | `github_digest` | your GitHub | Pulls your issues and PRs for a repo. Good upstream for a digest. |
 | `slack_post` | your Slack | Posts a message to a channel in your workspace. |
 | `email_send` | your Google | Sends mail from your Gmail. Supports digest chaining. |
-| `llm_summarize` | nothing | Summarizes text or an upstream result. Fixed prompt, with token and budget caps. |
-| `llm_polish` | nothing | Rewrites text more cleanly (tone & language). Same fixed-prompt, capped path. |
+| `llm_summarize` | nothing | Summarizes text or an upstream result; chain to `slack_post` or `email_send` to deliver the output. Fixed prompt, token and budget caps. |
+| `llm_polish` | nothing | Rewrites text more cleanly (tone & language); chain to `slack_post` or `email_send` to deliver the output. Fixed prompt, token and budget caps. |
 | `echo` | nothing | Echoes input back. Smoke test for create and dispatch. |
 
-The OAuth-backed actions run on each user's own scoped token. The two LLM actions run a fixed, cost-capped transform: no free-form prompt and no `${VAR}`. The model is pinned to a cheap one (`gpt-4o-mini`) with a hard per-call output-token limit plus per-user daily and global monthly budget ceilings, so cost stays bounded ([ADR-052](docs/adr/ADR-052-operator-subsidized-llm-actions-fixed-prompt-and-caps.md)).
+The OAuth-backed actions run on each user's own scoped token. The two LLM actions run a fixed, cost-capped transform: no free-form prompt and no `${VAR}`. The model is pinned to a cheap one (`gpt-4o-mini`) with a hard per-call output-token limit plus per-user daily and global monthly budget ceilings, so cost stays bounded ([ADR-052](docs/adr/ADR-052-operator-subsidized-llm-actions-fixed-prompt-and-caps.md)). Their output feeds a downstream handler via the internal data plane — no MCP surface returns it to the caller. Chain `llm_polish` or `llm_summarize` to `slack_post` or `email_send` to actually receive the result.
 
 > Self-host extras (operator-only, not offered on the hosted demo): `http_call` and `calendar_digest_ics` exist for the deployer's own use and are rejected at `task.create` for everyone else ([ADR-051](docs/adr/ADR-051-action-surface-tiering-public-oauth-vs-operator-only.md)).
 
@@ -240,8 +240,8 @@ Talk to it in natural language. Connect GitHub, Slack, and Google at `/connectio
 5. **Manage the schedule** — *"List my scheduled tasks" · "What's the status of job `<id>`, with its runs?" · "Cancel job `<id>`" · "What can you do?"*
    Exercises `task.list` / `task.status` / `task.cancel` (best-effort) / `task.list_actions`.
 
-6. **Prose polish (LLM)** — *"Right now, rewrite this rough release note into a professional announcement: 'fixed the login bug, added dark mode, the api is faster now'."*
-   Exercises `immediate` + `llm_polish` — an operator-funded, fixed-prompt, cost-capped rewrite (you bring no API key). Verify: `task.status` shows `result.polished` with the cleaned-up text. Chain it for a real workflow: *"…then post the polished version to Slack `#announcements`"* combines `llm_polish → slack_post`.
+6. **Prose polish → Slack (LLM chain)** — *"Right now, rewrite this rough release note — 'fixed the login bug, added dark mode, the api is faster now' — into a professional announcement and post it to Slack `#announcements`."*
+   Exercises `immediate` + `llm_polish → slack_post`. `llm_polish` is an operator-funded, fixed-prompt, cost-capped rewrite (no API key needed); its output flows to `slack_post` via the chain — the result is not returned through any MCP surface. Verify: after ~15 s a polished message appears in `#announcements`; `task.list` shows the two linked jobs.
 
 Prompt 2 is the showcase: one sentence becomes a scheduled **GitHub → Slack → Gmail** workflow that keeps firing on its own and keeps an audit trail. Chains can also fan out — one upstream feeding Slack **and** email in parallel.
 

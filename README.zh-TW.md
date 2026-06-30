@@ -207,11 +207,11 @@ stdio 的 MCP 伺服器是對話客戶端的子行程，對話一關就停。排
 | `github_digest` | 你的 GitHub | 拉某個 repo 的 issues 與 PR。很適合當摘要的上游。 |
 | `slack_post` | 你的 Slack | 把訊息貼到你工作區的某個頻道。 |
 | `email_send` | 你的 Google | 用你的 Gmail 寄信。支援摘要串接。 |
-| `llm_summarize` | 無 | 摘要文字或上游結果。固定提示詞，有 token 與預算上限。 |
-| `llm_polish` | 無 | 把文字改寫得更通順（語氣與語言）。同樣是固定提示詞、有上限的路徑。 |
+| `llm_summarize` | 無 | 摘要文字或上游結果；須串接到 `slack_post` 或 `email_send` 才能收到輸出。固定提示詞，有 token 與預算上限。 |
+| `llm_polish` | 無 | 把文字改寫得更通順（語氣與語言）；須串接到 `slack_post` 或 `email_send` 才能收到輸出。固定提示詞，有 token 與預算上限。 |
 | `echo` | 無 | 把輸入回拋。建立與分派的冒煙測試。 |
 
-走 OAuth 的動作，跑在每位使用者自己的受限權杖上。兩個 LLM 動作只執行一個固定、有成本上限的轉換：不能自帶任意提示詞，也不能引用 `${VAR}`。模型釘死在便宜的 `gpt-4o-mini`，並有硬性的單次輸出 token 上限，以及每位使用者每日與全域每月的預算天花板，把成本框住（[ADR-052](docs/adr/ADR-052-operator-subsidized-llm-actions-fixed-prompt-and-caps.md)）。
+走 OAuth 的動作，跑在每位使用者自己的受限權杖上。兩個 LLM 動作只執行一個固定、有成本上限的轉換：不能自帶任意提示詞，也不能引用 `${VAR}`。模型釘死在便宜的 `gpt-4o-mini`，並有硬性的單次輸出 token 上限，以及每位使用者每日與全域每月的預算天花板，把成本框住（[ADR-052](docs/adr/ADR-052-operator-subsidized-llm-actions-fixed-prompt-and-caps.md)）。它們的輸出透過內部資料平面餵給下游處理器——沒有任何 MCP 介面會把它回傳給呼叫者。把 `llm_polish` 或 `llm_summarize` 串接到 `slack_post` 或 `email_send`，才能實際收到結果。
 
 > 自架附帶（僅限 operator，不在託管 demo 提供）：`http_call` 與 `calendar_digest_ics` 是給部署者自己用的，其他人在 `task.create` 會被拒絕（[ADR-051](docs/adr/ADR-051-action-surface-tiering-public-oauth-vs-operator-only.md)）。
 
@@ -240,8 +240,8 @@ stdio 的 MCP 伺服器是對話客戶端的子行程，對話一關就停。排
 5. **管理排程** — *「列出我所有排程任務」·「job `<id>` 的狀態與執行紀錄？」·「取消 job `<id>`」·「你能做哪些事？」*
    練到 `task.list` / `task.status` / `task.cancel`（best-effort） / `task.list_actions`。
 
-6. **文字潤飾（LLM）** — *「現在立刻把這段粗略的 release note 改寫成正式公告:『修好登入 bug、加了暗色模式、api 也變快了』。」*
-   練到 `immediate` + `llm_polish` —— operator 出錢、固定提示詞、有成本上限的改寫(你不用提供 API key)。驗證:`task.status` 的 `result.polished` 會是潤飾後的文字。想接進實際工作流可串接:*「…再把潤飾後的版本貼到 Slack `#announcements`」* 就組成 `llm_polish → slack_post`。
+6. **文字潤飾 → Slack（LLM 串接）** — *「現在立刻把這段粗略的 release note——『修好登入 bug、加了暗色模式、api 也變快了』——改寫成正式公告，再貼到 Slack `#announcements`。」*
+   練到 `immediate` + `llm_polish → slack_post`。`llm_polish` 是 operator 出錢、固定提示詞、有成本上限的改寫（你不用提供 API key）；輸出透過串接流到下游的 `slack_post`——沒有任何 MCP 介面會把 result 回傳給呼叫者。驗證：約 15 秒後 `#announcements` 出現潤飾過的訊息；`task.list` 顯示兩個串接的 job。
 
 第 2 個是招牌：一句話變成一條會自己持續觸發、又留有稽核紀錄的 **GitHub → Slack → Gmail** 工作流程。串接也能 fan-out —— 一個上游同時餵 Slack **與** email。
 
