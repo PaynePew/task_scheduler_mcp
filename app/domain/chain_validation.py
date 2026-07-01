@@ -6,7 +6,8 @@ error vocabulary.
 
 V1  Trigger Job exists                           → ChainJobNotFoundError
 V2  Trigger Job has same user_id as caller       → ChainJobNotFoundError (404, not 403)
-V3  Trigger Job is not already fully terminated  → ChainJobTerminatedError
+V3  Trigger Job's lifecycle is not terminal      → ChainJobTerminatedError
+    (Job.state = 'active', ADR-068)
 V4  No cycle via trigger_on_job_id ancestry      → ChainCycleError
 V5  Chain depth ≤ 10 from new job through ancs   → ChainDepthError
 V6  trigger_on_job_id and cron_expr are mutually → ChainRunSourceError
@@ -21,10 +22,7 @@ from __future__ import annotations
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Job, JobRun
-
-# Terminal statuses — a job whose only runs are in this set is fully done.
-_TERMINAL = frozenset({"SUCCEEDED", "FAILED", "CANCELLED"})
+from app.db.models import Job
 
 MAX_CHAIN_DEPTH = 10
 
@@ -115,12 +113,15 @@ async def validate_chain(
     *,
     user_id: str,
     trigger_on_job_id: int,
-) -> JobRun:
-    """Enforce V1-V5 and return the upstream run that the new job should wait on.
+) -> None:
+    """Enforce chain-creation rules V1-V5 for a new job's trigger_on_job_id.
 
-    The returned JobRun is the upstream job's most-recent non-terminal run.
     Raises ChainJobNotFoundError, ChainJobTerminatedError, ChainCycleError, or
     ChainDepthError on violation.  Caller must be inside an open transaction.
+
+    Returns nothing: under continuation (ADR-067) a chained downstream is not
+    pre-armed, so ``wait_for_run_id`` is set by the continuation consumer when it
+    materialises the downstream run — never here at create time.
     """
     # V1 + V2: trigger job must exist AND belong to the same user.
     trigger_job = (
@@ -134,20 +135,18 @@ async def validate_chain(
     if trigger_job.user_id != user_id:
         raise ChainJobNotFoundError(trigger_on_job_id)
 
-    # V3: find the most-recent non-terminal run of the trigger job.
-    #     If none exists, the trigger job is fully terminated — reject.
-    runs_result = await session.execute(
-        select(JobRun).where(JobRun.job_id == trigger_on_job_id).order_by(JobRun.run_id.desc())
-    )
-    all_runs = runs_result.scalars().all()
-
-    wait_run: JobRun | None = None
-    for run in all_runs:
-        if run.status not in _TERMINAL:
-            wait_run = run
-            break
-
-    if wait_run is None:
+    # V3: reject only when the trigger job's lifecycle is already terminal —
+    #     Job.state 'completed'/'cancelled' (ADR-068). Such a job will never emit
+    #     another terminal event, so waiting on it would hang forever. An 'active'
+    #     trigger is always chainable, whether it is a scheduled job about to run
+    #     or a chained job still waiting for its own trigger.
+    #
+    #     This MUST key on Job.state, not on "does the trigger have a non-terminal
+    #     run?": continuation (ADR-067) removed the pre-armed WAITING run, so a
+    #     not-yet-fired chained job now has zero runs. The old run-scan therefore
+    #     mis-classified an active chained job as terminated and rejected every
+    #     3+-hop chain (e.g. github_digest → slack_post → email_send).
+    if trigger_job.state != "active":
         raise ChainJobTerminatedError(trigger_on_job_id)
 
     # V4 + V5: recursive CTE walks ancestors of trigger_on_job_id.
@@ -166,5 +165,3 @@ async def validate_chain(
     # Reject if that would exceed MAX_CHAIN_DEPTH.
     if (row.max_depth or 0) >= MAX_CHAIN_DEPTH:
         raise ChainDepthError(trigger_on_job_id)
-
-    return wait_run

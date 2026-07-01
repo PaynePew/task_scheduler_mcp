@@ -226,9 +226,10 @@ async def create_job(
 
         # Chain validation (V1-V5) runs inside the same transaction so the
         # ancestor walk and the insert are atomic — no TOCTOU window. Under the
-        # continuation model (ADR-067) the returned run is not used to pre-arm a
-        # downstream; V3 still rejects chaining off a fully-terminated trigger
-        # (it would never fire), so the validation is kept for its guards.
+        # continuation model (ADR-067) nothing is pre-armed here; V3 rejects
+        # chaining off a trigger whose Job.state is already terminal (it would
+        # never fire again), while an active trigger — including a not-yet-fired
+        # chained one — is allowed, which is what lets 3+-hop chains be created.
         if trigger_on_job_id is not None:
             await validate_chain(
                 session,

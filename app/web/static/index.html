@@ -34,6 +34,7 @@
       <a href="#what" data-en="Overview" data-zh="總覽">Overview</a>
       <a href="#quickstart" data-en="Quickstart" data-zh="快速開始">Quickstart</a>
       <a href="#try" data-en="Examples" data-zh="範例">Examples</a>
+      <a href="#architecture" data-en="Architecture" data-zh="架構">Architecture</a>
       <a href="#surface" data-en="What it does" data-zh="功能">What it does</a>
       <a href="https://scheduler.paynepew.dev/connections" data-en="Connections" data-zh="連線">Connections</a>
       <a href="https://github.com/PaynePew/task_scheduler_mcp">GitHub</a>
@@ -88,8 +89,9 @@
         <div class="client-row">
           <span class="client-label" data-en="Works with" data-zh="支援">Works with</span>
           <span class="chip">Claude Desktop</span>
+          <span class="chip">Claude Code</span>
+          <span class="chip">Codex CLI</span>
           <span class="chip">Cursor</span>
-          <span class="chip">Claude in Chrome</span>
           <span class="chip">MCP Inspector</span>
         </div>
         <p class="fineprint"
@@ -187,7 +189,22 @@
           <li class="step">
             <div class="step-no">2</div>
             <div class="step-body">
-              <h3 data-en="One-shot · GitHub → Slack → Email" data-zh="一次性 · GitHub → Slack → Email">One-shot · GitHub → Slack → Email</h3>
+              <h3 data-en="LLM polish → Slack" data-zh="LLM 潤飾 → Slack">LLM polish → Slack</h3>
+              <p data-en="“Right now, rewrite this rough release note — ‘fixed the login bug, added dark mode, the api is faster now’ — into a professional announcement and post it to Slack #announcements.”"
+                 data-zh="「現在把這段粗略的發布說明——『fixed the login bug, added dark mode, the api is faster now』——改寫成專業的公告，並貼到 Slack #announcements。」">
+                “Right now, rewrite this rough release note — ‘fixed the login bug, added dark mode, the api is faster now’ — into a professional announcement and post it to Slack #announcements.”
+              </p>
+              <p class="fineprint"
+                 data-en="Operator-funded LLM — no API key needed. The rewrite flows to Slack through the chain."
+                 data-zh="由營運者贊助的 LLM——不需 API key。潤飾結果透過串接送到 Slack。">
+                Operator-funded LLM — no API key needed. The rewrite flows to Slack through the chain.
+              </p>
+            </div>
+          </li>
+          <li class="step">
+            <div class="step-no">3</div>
+            <div class="step-body">
+              <h3 data-en="One-shot chain · GitHub → Slack → Email (flagship)" data-zh="一次性串接 · GitHub → Slack → Email（旗艦）">One-shot chain · GitHub → Slack → Email (flagship)</h3>
               <p data-en="“In 3 minutes, pull the open issues for &lt;owner&gt;/&lt;repo&gt;, post the summary to Slack #eng-updates, and once that succeeds, email the same summary to me.”"
                  data-zh="「請排定在三分鐘後，把 &lt;owner&gt;/&lt;repo&gt; 的現有 issues 抓取並整理，通知 Slack #eng-updates 頻道，成功後再寄一封 email 把整理好的內容寄給我自己。」">
                 “In 3 minutes, pull the open issues for &lt;owner&gt;/&lt;repo&gt;, post the summary to Slack #eng-updates, and once that succeeds, email the same summary to me.”
@@ -195,9 +212,19 @@
             </div>
           </li>
           <li class="step">
-            <div class="step-no">3</div>
+            <div class="step-no">4</div>
             <div class="step-body">
-              <h3 data-en="Recurring" data-zh="週期">Recurring</h3>
+              <h3 data-en="Fan-out · one digest, two sinks" data-zh="扇出 · 一次摘要、兩個去向">Fan-out · one digest, two sinks</h3>
+              <p data-en="“In 2 minutes, digest &lt;owner&gt;/&lt;repo&gt; and both post it to Slack #eng-updates and email it to me.”"
+                 data-zh="「請在兩分鐘後把 &lt;owner&gt;/&lt;repo&gt; 整理成摘要，同時貼到 Slack #eng-updates 並寄 email 給我。」">
+                “In 2 minutes, digest &lt;owner&gt;/&lt;repo&gt; and both post it to Slack #eng-updates and email it to me.”
+              </p>
+            </div>
+          </li>
+          <li class="step">
+            <div class="step-no">5</div>
+            <div class="step-body">
+              <h3 data-en="Recurring · daily standup" data-zh="週期 · 每日站會">Recurring · daily standup</h3>
               <p data-en="“Every weekday at 9:00 AM Taipei time, post a digest of &lt;owner&gt;/&lt;repo&gt;’s open issues and stale PRs to Slack #standup.”"
                  data-zh="「每個工作日早上 9:00（台北時間），把 &lt;owner&gt;/&lt;repo&gt; 的未處理 issues 與卡住的 PR 整理後貼到 Slack #standup。」">
                 “Every weekday at 9:00 AM Taipei time, post a digest of &lt;owner&gt;/&lt;repo&gt;’s open issues and stale PRs to Slack #standup.”
@@ -207,9 +234,42 @@
         </ol>
 
         <p class="fineprint"
-           data-en="Demo tip: for recurring jobs, say “every 2 minutes” to watch it fire live, then “cancel that task”. More examples — weekly email reports and list / status / cancel commands — in the README."
-           data-zh="Demo 技巧：週期任務現場展示可改說「每兩分鐘」看它連續觸發，再說「取消那個任務」。更多範例（每週 email 報告,以及 list／status／cancel 指令）見 README。">
-          Demo tip: for recurring jobs, say “every 2 minutes” to watch it fire live, then “cancel that task”. More examples — weekly email reports and list / status / cancel commands — in the README.
+           data-en="Live-demo tip: run 1 → 2 → 3 → 5, then on a recurring job say “every 2 minutes” to watch it fire live and “cancel that task”. Steps 1–2 need no GitHub, so they always work. Failure-only alerts (trigger on FAILED), weekly email reports, and list / status / cancel are in the README’s full ladder."
+           data-zh="現場展示技巧：依序跑 1 → 2 → 3 → 5，週期任務可改說「每兩分鐘」看它連續觸發，再說「取消那個任務」。步驟 1–2 不需 GitHub，隨時可用。只在失敗時通知（trigger on FAILED）、每週 email 報告，以及 list／status／cancel 指令，完整清單見 README。">
+          Live-demo tip: run 1 → 2 → 3 → 5, then on a recurring job say “every 2 minutes” to watch it fire live and “cancel that task”. Steps 1–2 need no GitHub, so they always work. Failure-only alerts (trigger on FAILED), weekly email reports, and list / status / cancel are in the README’s full ladder.
+        </p>
+      </div>
+    </section>
+
+    <!-- ARCHITECTURE -->
+    <section id="architecture" class="band band-alt">
+      <div class="wrap">
+        <p class="eyebrow" data-en="How it works" data-zh="運作方式">How it works</p>
+        <h2 data-en="A persistent pipeline, not a chat subprocess" data-zh="常駐管線，而非聊天子行程">A persistent pipeline, not a chat subprocess</h2>
+        <p class="lead"
+           data-en="Your client only creates and queries jobs over MCP. The server schedules on wall-clock time with its own Postgres and worker pool, so jobs fire whether or not a chat window is open."
+           data-zh="你的客戶端只透過 MCP 建立與查詢任務。伺服器以自己的 Postgres 與工作行程按實際時間排程，無論聊天視窗是否開啟，任務都會觸發。">
+          Your client only creates and queries jobs over MCP. The server schedules on wall-clock time with its own Postgres and worker pool, so jobs fire whether or not a chat window is open.
+        </p>
+        <div class="pipeline" aria-label="Request pipeline">
+          <span class="chip">MCP client</span>
+          <span class="pipe-arrow" aria-hidden="true">→</span>
+          <span class="chip">mcp-server</span>
+          <span class="pipe-arrow" aria-hidden="true">→</span>
+          <span class="chip">Postgres · outbox</span>
+          <span class="pipe-arrow" aria-hidden="true">→</span>
+          <span class="chip">Watcher</span>
+          <span class="pipe-arrow" aria-hidden="true">→</span>
+          <span class="chip">Queue</span>
+          <span class="pipe-arrow" aria-hidden="true">→</span>
+          <span class="chip">Worker</span>
+          <span class="pipe-arrow" aria-hidden="true">→</span>
+          <span class="chip">GitHub · Slack · Gmail</span>
+        </div>
+        <p class="fineprint"
+           data-en="Follow-ups react to an append-only event outbox: one continuation consumer creates the next recurring run and every chained downstream the moment an upstream finishes — exactly-once via a database unique index. OAuth 2.1 login, per-user KMS-encrypted tokens, quotas and load-shedding keep a single $5 box safe. Full diagrams and ADRs in the README."
+           data-zh="後續動作只讀取一份 append-only 的事件 outbox：單一 continuation 消費者在上游完成的當下，建立下一個週期 run 與每個被串接的下游——由資料庫唯一索引保證 exactly-once。OAuth 2.1 登入、每位使用者的 KMS 加密權杖、配額與載荷卸除，讓單台 $5 主機安全運行。完整架構圖與 ADR 見 README。">
+          Follow-ups react to an append-only event outbox: one continuation consumer creates the next recurring run and every chained downstream the moment an upstream finishes — exactly-once via a database unique index. OAuth 2.1 login, per-user KMS-encrypted tokens, quotas and load-shedding keep a single $5 box safe. Full diagrams and ADRs in the README.
         </p>
       </div>
     </section>
@@ -259,6 +319,19 @@
           <span class="chip" data-en="Cancel semantics" data-zh="取消語意">Cancel semantics</span>
           <span class="chip" data-en="OAuth connections" data-zh="OAuth 連線">OAuth connections</span>
           <span class="chip" data-en="Rate limiting" data-zh="速率限制">Rate limiting</span>
+        </div>
+
+        <div class="feature-strip">
+          <span class="feature-label" data-en="Built with" data-zh="技術">Built with</span>
+          <span class="chip">Python 3.12</span>
+          <span class="chip">MCP SDK</span>
+          <span class="chip">Starlette</span>
+          <span class="chip">PostgreSQL</span>
+          <span class="chip">SQLAlchemy</span>
+          <span class="chip">SQS</span>
+          <span class="chip">WorkOS</span>
+          <span class="chip">AWS KMS</span>
+          <span class="chip">Docker · Caddy</span>
         </div>
       </div>
     </section>

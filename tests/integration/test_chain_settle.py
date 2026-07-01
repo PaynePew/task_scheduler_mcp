@@ -6,10 +6,10 @@ run — one-hop parent propagation driven by the continuation consumer. Cancelli
 job cascades that settle to its downstreams, so a cancelled upstream stops its
 not-yet-run downstreams and frees their quota (which counts ``state='active'``).
 
-Chains are seeded directly (bypassing create_job's V3, which rejects chaining off a
-job with no non-terminal run) so each topology and state is set exactly; the settle
-paths under test are the real ones — ``cancel_job`` and the continuation consumer's
-``poll_once`` → ``settle_check``.
+Chains are seeded directly (not via create_job) so each topology and Job.state is
+set exactly — including terminal-state parents that create_job's V3 refuses to chain
+onto; the settle paths under test are the real ones — ``cancel_job`` and the
+continuation consumer's ``poll_once`` → ``settle_check``.
 
 Run: uv run pytest -m integration tests/integration/test_chain_settle.py
 """
