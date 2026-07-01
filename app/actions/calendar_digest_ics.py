@@ -39,6 +39,7 @@ class CalendarDigestICSHandler:
     requires_operator: ClassVar[bool] = True
     credential_mode: ClassVar[CredentialMode] = CredentialMode.operator_env
     required_provider: ClassVar[str | None] = None
+    idempotent: ClassVar[bool] = True  # read-only GET, no external effect
 
     async def execute(self, run: Any, params: CalendarDigestICSParams) -> ActionResult:
         # Resolve ${VAR} tokens in the URL before making any network calls
