@@ -145,6 +145,7 @@ async def test_queued_echo_run_completes_to_succeeded(session_factory, sqs):
     assert updated_run.status == "SUCCEEDED"
     assert updated_run.start_at is not None
     assert updated_run.finish_at is not None
+    assert updated_run.heartbeat_at is not None, "claim must set the heartbeat_at lease"
 
     event_types = {e.event_type for e in events}
     assert "STARTED" in event_types
@@ -557,7 +558,11 @@ async def test_action_exception_marks_retrying_and_does_not_delete(session_facto
 
 @pytest.mark.integration
 async def test_heartbeat_extends_visibility_and_cancels_cleanly(session_factory, sqs):
-    """Heartbeat fires periodically during action; cancelled cleanly on return; no task leak."""
+    """Heartbeat fires periodically during action; cancelled cleanly on return; no task leak.
+
+    Also asserts the DB-side heartbeat_at lease (issue #267) advances past its
+    claim-time value — the observable a later RUNNING-orphan sweep keys on.
+    """
 
     class NoParams(BaseModel):
         pass
@@ -609,7 +614,13 @@ async def test_heartbeat_extends_visibility_and_cancels_cleanly(session_factory,
             ).scalar_one()
     assert updated_run.status == "SUCCEEDED"
 
-    # 4) 沒洩漏 — issue #8 HITL 明文要求
+    # 4) heartbeat_at advanced past the claim-time value (>= 1 heartbeat tick after
+    #    start_at) — proves the loop bumps the DB lease, not just SQS visibility.
+    assert updated_run.heartbeat_at is not None
+    assert updated_run.start_at is not None
+    assert (updated_run.heartbeat_at - updated_run.start_at).total_seconds() >= 0.1
+
+    # 5) 沒洩漏 — issue #8 HITL 明文要求
     leaked = [t for t in (asyncio.all_tasks() - tasks_before) if not t.done()]
     assert leaked == [], f"heartbeat task leaked: {leaked}"
 

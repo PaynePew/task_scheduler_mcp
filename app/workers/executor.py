@@ -65,7 +65,7 @@ async def _claim(
             JobRun.run_id == run_id,
             JobRun.status.in_(["PENDING", "QUEUED", "RETRYING"]),
         )
-        .values(status="RUNNING", start_at=now, updated_at=now)
+        .values(status="RUNNING", start_at=now, updated_at=now, heartbeat_at=now)
         .returning(JobRun.run_id, JobRun.job_id)
     )
     if result.first() is None:
@@ -184,19 +184,40 @@ async def _write_retrying(
     )
 
 
+async def _bump_heartbeat_at(
+    session_factory: async_sessionmaker[AsyncSession],
+    run_id: int,
+) -> None:
+    """Advance the DB-side heartbeat lease (`job_runs.heartbeat_at`) for a still-running run.
+
+    The other heartbeat leg (SQS visibility) and this one are independent — a
+    failure here must not stop the visibility extension, and a missed tick just
+    leaves the lease stale until the next successful one.
+    """
+    now = datetime.now(tz=UTC)
+    async with session_factory() as session:
+        async with session.begin():
+            await session.execute(
+                update(JobRun).where(JobRun.run_id == run_id).values(heartbeat_at=now)
+            )
+
+
 async def _heartbeat_loop(
     sqs: SQSClient,
     receipt_handle: str,
+    session_factory: async_sessionmaker[AsyncSession],
+    run_id: int,
     *,
     interval: float = HEARTBEAT_INTERVAL_SECONDS,
     extension: int = HEARTBEAT_EXTENSION_SECONDS,
 ) -> None:
-    """Extend SQS visibility while a long action runs.
+    """Extend SQS visibility AND the DB-side heartbeat_at lease while a long action runs.
 
     Designed to be run as a background Task and cancelled by the caller
-    when the action returns. Failures are logged but not raised - if SQS
-    becomes unreachable the visibility expires naturally and the message
-    redelivers, which is the correct fallback.
+    when the action returns. Each leg fails independently and is logged but
+    not raised - if SQS becomes unreachable the visibility expires naturally
+    and the message redelivers; if the DB write fails the lease simply goes
+    stale until the next successful tick.
     """
     while True:
         await asyncio.sleep(interval)
@@ -210,12 +231,21 @@ async def _heartbeat_loop(
                 "heartbeat failed for receipt=%s; visibility may expire",
                 receipt_handle,
             )
+        try:
+            await _bump_heartbeat_at(session_factory, run_id)
+        except Exception:
+            logger.exception(
+                "heartbeat_at update failed for run_id=%s; DB lease may go stale",
+                run_id,
+            )
 
 
 @asynccontextmanager
 async def _heartbeat(
     sqs: SQSClient,
     receipt_handle: str,
+    session_factory: async_sessionmaker[AsyncSession],
+    run_id: int,
     *,
     interval: float = HEARTBEAT_INTERVAL_SECONDS,
 ):
@@ -223,7 +253,9 @@ async def _heartbeat(
     Cancels cleanly on exit (success, exception, or outer cancellation),
     so no asyncio task leaks.
     """
-    task = asyncio.create_task(_heartbeat_loop(sqs, receipt_handle, interval=interval))
+    task = asyncio.create_task(
+        _heartbeat_loop(sqs, receipt_handle, session_factory, run_id, interval=interval)
+    )
     try:
         yield
     finally:
@@ -371,7 +403,7 @@ async def _dispatch(
 
     # Phase 3: dispatch with per-action timeout
     try:
-        async with _heartbeat(sqs, receipt, interval=heartbeat_interval):
+        async with _heartbeat(sqs, receipt, session_factory, run_id, interval=heartbeat_interval):
             action_result = await asyncio.wait_for(
                 handler.execute(run, params),
                 timeout=handler.timeout_seconds,
