@@ -102,8 +102,8 @@ The downstream consumer (the single **continuation consumer**) reads **`run_even
 ### Watcher / Worker safety (ADR-007, ADR-008)
 
 - The Watcher's claim query uses `FOR UPDATE SKIP LOCKED`. Multiple watcher instances must remain safe — never introduce a non-locking path.
-- The Worker's claim is `UPDATE job_runs SET status='RUNNING' WHERE run_id=:rid AND status IN ('PENDING','QUEUED') RETURNING ...`. Atomic single-statement, no SELECT-then-UPDATE.
-- Long-running actions extend SQS visibility via `heartbeat` (every 30s). A crashed worker's message must be allowed to fail over to another worker — never delete a message before the handler returns success.
+- The Worker's claim is `UPDATE job_runs SET status='RUNNING' WHERE run_id=:rid AND status IN ('PENDING','QUEUED','RETRYING') RETURNING ...`. Atomic single-statement, no SELECT-then-UPDATE as the guard. `RETRYING` is in the accepted set on purpose: a redelivery after a retryable failure must be re-claimable, else the message would be deleted as if already-processed. (`app/workers/executor.py:_claim`.)
+- Long-running actions extend SQS visibility via `heartbeat` (every 30s). A crashed worker's message must be allowed to fail over to another worker — never delete a message before the handler returns success. ⚠ Known gap (not yet a rule): the heartbeat renews only the SQS visibility, not any DB-side lease, so a hard crash *after* the claim (row=`RUNNING`) *before* terminal leaves an orphaned `RUNNING` row that the redelivered message cannot re-claim (claim rejects `RUNNING`) and that the reconciler does not yet sweep. Recovery of `RUNNING` orphans is tracked as pending work — do not assume it exists today.
 
 ### Process roles & entrypoints
 
