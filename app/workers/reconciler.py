@@ -39,7 +39,6 @@ from app.queue.sqs import SQSClient
 logger = logging.getLogger(__name__)
 
 DEFAULT_BATCH_SIZE = 100
-DEFAULT_INTERVAL_SECONDS = 60.0
 _ZERO_TICK_LOG_INTERVAL = 60.0  # rate-limit "0 rows" INFO logs to once/minute
 
 
@@ -218,9 +217,15 @@ async def run_reconciler(
     session_factory: async_sessionmaker[AsyncSession],
     sqs: SQSClient,
     *,
-    interval: float = DEFAULT_INTERVAL_SECONDS,
+    interval: float | None = None,
 ) -> None:
-    """Reconciler loop: sweep → sleep. Runs until cancelled."""
+    """Reconciler loop: sweep → sleep. Runs until cancelled.
+
+    ``interval`` defaults to ``settings.reconciler_interval_seconds`` (ADR-010:
+    settings is the single source of truth) rather than a hardcoded constant.
+    """
+    if interval is None:
+        interval = settings.reconciler_interval_seconds
     logger.info(
         "reconciler: starting (interval=%.0fs, dlq_grace=%ds, queued_grace=%ds)",
         interval,
