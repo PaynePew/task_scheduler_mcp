@@ -24,6 +24,14 @@ _REVERSE_MAPPING: dict[str, frozenset[str]] = {
     "cancelled": frozenset({"CANCELLED"}),
 }
 
+# Job.state (ADR-068) -> external status, used only when a job has no run yet
+# to map from (see to_external_job_status).
+_JOB_STATE_MAPPING: dict[str, str] = {
+    "active": "scheduled",
+    "completed": "completed",
+    "cancelled": "cancelled",
+}
+
 
 def to_external(internal_status: str) -> str:
     """Map one of the 7 internal statuses to one of the 5 external statuses."""
@@ -39,3 +47,23 @@ def to_internal_set(external_status: str) -> frozenset[str]:
         return _REVERSE_MAPPING[external_status]
     except KeyError:
         raise ValueError(f"Unknown external status: {external_status!r}") from None
+
+
+def to_external_job_status(*, job_state: str, latest_run_status: str | None) -> str:
+    """Derive the external status from ``(Job.state, latest run)`` — ADR-067 §9.
+
+    A job with no run yet — a not-yet-triggered chained downstream, a
+    trigger-driven job whose create predicate never matched, or one cancelled
+    before it ever fired — has no run status to map from, so ``Job.state``
+    alone determines the external status (``active``->``scheduled``,
+    ``completed``->``completed``, ``cancelled``->``cancelled``). Once a run
+    exists, the run's own status is authoritative: e.g. a ``RUNNING`` run left
+    to finish after a job-level cancel (ADR-022 best-effort semantics) is
+    reported as ``running``, not ``cancelled``, until it actually terminates.
+    """
+    if latest_run_status is not None:
+        return to_external(latest_run_status)
+    try:
+        return _JOB_STATE_MAPPING[job_state]
+    except KeyError:
+        raise ValueError(f"Unknown job state: {job_state!r}") from None

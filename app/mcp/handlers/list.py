@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.db.engine import async_session_factory as default_session_factory
 from app.domain.jobs import list_jobs
 from app.mcp.envelope import error, success
-from app.mcp.status_mapping import to_external, to_internal_set
+from app.mcp.status_mapping import to_external_job_status, to_internal_set
 
 logger = logging.getLogger(__name__)
 
@@ -165,7 +165,9 @@ async def handle_task_list(
                 {
                     "job_id": item.job_id,
                     "action": item.action,
-                    "status": to_external(item.internal_status),
+                    "status": to_external_job_status(
+                        job_state=item.job_state, latest_run_status=item.latest_run_status
+                    ),
                     "created_at": item.created_at.isoformat(),
                 }
                 for item in paged.items

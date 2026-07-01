@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db.engine import async_session_factory as default_session_factory
 from app.domain.jobs import list_jobs_resource
-from app.mcp.status_mapping import to_external
+from app.mcp.status_mapping import to_external_job_status
 
 _MIME = "application/json"
 
@@ -35,7 +35,9 @@ async def read_tasks_list(
             {
                 "job_id": item.job_id,
                 "description": item.description,
-                "status": to_external(item.internal_status),
+                "status": to_external_job_status(
+                    job_state=item.job_state, latest_run_status=item.latest_run_status
+                ),
                 "schedule_type": item.job_type,
                 "created_at": item.created_at.isoformat(),
                 "cancelled_at": item.cancelled_at.isoformat() if item.cancelled_at else None,

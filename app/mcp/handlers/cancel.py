@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.db.engine import async_session_factory as default_session_factory
 from app.domain.jobs import InvalidStateError, JobNotFoundError, cancel_job
 from app.mcp.envelope import error, success
-from app.mcp.status_mapping import to_external
+from app.mcp.status_mapping import to_external, to_external_job_status
 
 logger = logging.getLogger(__name__)
 
@@ -73,4 +73,7 @@ async def handle_task_cancel(
         logger.exception("task.cancel.v1 failed for user %s job %s", user_id, job_id)
         return error("INTERNAL", "An unexpected error occurred.")
 
-    return success({"job_id": view.job_id, "status": to_external(view.internal_status)})
+    status = to_external_job_status(
+        job_state=view.job_state, latest_run_status=view.latest_run_status
+    )
+    return success({"job_id": view.job_id, "status": status})

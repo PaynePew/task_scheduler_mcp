@@ -11,7 +11,7 @@ from app.config.settings import settings
 from app.db.engine import async_session_factory as default_session_factory
 from app.domain.jobs import JobNotFoundError, get_job_with_runs
 from app.mcp.envelope import error, success
-from app.mcp.status_mapping import to_external
+from app.mcp.status_mapping import to_external, to_external_job_status
 
 logger = logging.getLogger(__name__)
 
@@ -83,8 +83,15 @@ async def handle_task_status(
     data: dict[str, Any] = {
         "job_id": view.job_id,
         "action": view.action,
-        "status": to_external(view.internal_status),
+        "status": to_external_job_status(
+            job_state=view.job_state, latest_run_status=view.latest_run_status
+        ),
     }
+
+    # Trigger-driven jobs surface which job they depend on (ADR-067 §9) — the
+    # durable replacement for the removed WAITING run's transient wait_for_run_id.
+    if view.triggered_by is not None:
+        data["triggered_by"] = view.triggered_by
 
     # Surface structured error info when the latest run failed. Always include
     # error_message when present — even with no error_code — so failures that

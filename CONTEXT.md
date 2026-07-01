@@ -66,6 +66,8 @@ Mapping happens at the MCP handler boundary. DB keeps the precise truth; LLM get
 
 > **`WAITING` was removed (ADR-067).** The pre-arm control plane — a downstream run pre-created `WAITING` and flipped by `ChainWatcher` — is gone. Under continuation run-creation (§7) a chained downstream has zero runs until its upstream terminates, then a `PENDING` run is created directly. A not-yet-triggered downstream shows externally as `scheduled` with an empty `runs` list (§7), not as a `WAITING` run.
 
+**External status is derived from `(Job.state, latest run)`, not from the latest run alone (ADR-067 §9).** A job with no run yet — a not-yet-triggered chained downstream, a trigger-driven job whose create predicate never matched, or one cancelled before it ever fired — has no run status to map from, so `Job.state` alone determines it (`active`→`scheduled`, `completed`→`completed`, `cancelled`→`cancelled`, `app.mcp.status_mapping.to_external_job_status`). Once a run exists, the run's own status is authoritative — e.g. a `RUNNING` run left to finish after a job-level cancel (ADR-022) still reports `running` until it actually terminates. `task.status.v1` also surfaces **`triggered_by: <job_id>`** for a trigger-driven job (`Job.trigger_on_job_id`) — the durable replacement for the removed `WAITING` run's transient `wait_for_run_id`, so "what is this waiting on" stays visible even before the downstream has a run.
+
 ## §3 Schedule types
 
 `Job.schedule_type` is one of:
