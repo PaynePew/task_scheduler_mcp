@@ -20,6 +20,7 @@ Gmail API error classification:
 from __future__ import annotations
 
 import base64
+import logging
 import os
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -32,10 +33,18 @@ from pydantic import BaseModel, EmailStr
 
 from app.actions._oauth import check_oauth_for_execute, missing_connection_result
 from app.actions.base import ActionResult, CredentialMode
+from app.actions.send_dedup import (
+    DedupStore,
+    PostgresDedupStore,
+    SendDecision,
+    derive_idempotency_key,
+)
 from app.chain.upstream_reader import resolve_for_display
 from app.config.settings import settings
 from app.connections.store import ConnectionMiss, get_token
 from app.secrets.resolver import SecretResolutionError, build_effective_whitelist, resolve
+
+logger = logging.getLogger(__name__)
 
 _GMAIL_SEND_URL = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send"
 _GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
@@ -94,8 +103,17 @@ class EmailSendHandler:
     connection store (connect at /connections); otherwise the send returns
     MISSING_CONNECTION. There is no SMTP fallback (ADR-050, amended).
 
+    email_send is non-idempotent (idempotent=False), so it is made
+    effectively-once (ADR-070): a run-derived idempotency key + a write-ahead
+    intent record (``dedup_store``) mean a redelivered or reconciler-retried
+    send is a no-op at our boundary instead of a duplicate. Inject an in-memory
+    ``dedup_store`` in unit tests; production uses the Postgres-backed default.
+
     Patch app.actions.email_send.get_token in tests to override OAuth lookup.
     """
+
+    def __init__(self, dedup_store: DedupStore | None = None) -> None:
+        self._dedup = dedup_store or PostgresDedupStore()
 
     name: ClassVar[str] = "email_send"
     description: ClassVar[str] = (
@@ -133,15 +151,16 @@ class EmailSendHandler:
 
         # Send via the caller's connected Gmail. Returns MISSING_CONNECTION when
         # the user has no Google connection — there is no SMTP fallback.
-        return await self._send_via_gmail(run.user_id, params, resolved_subject, body_text)
+        return await self._send_via_gmail(run, params, resolved_subject, body_text)
 
     async def _send_via_gmail(
         self,
-        user_id: str | None,
+        run: Any,
         params: EmailSendParams,
         subject: str,
         body_text: str,
     ) -> ActionResult:
+        user_id = run.user_id
         if not user_id:
             return ActionResult(
                 ok=False,
@@ -167,6 +186,24 @@ class EmailSendHandler:
         msg["Subject"] = subject
         msg.set_content(body_text)
         raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+
+        # Effectively-once gate (ADR-070): write-ahead the intent immediately
+        # before the provider call. A key already marked 'sent' short-circuits to
+        # a dedup no-op — the redelivered/retried run does not send a second copy.
+        key = derive_idempotency_key(self.name, run.run_id)
+        gate = await self._dedup.begin(key, run.run_id)
+        if gate.decision is SendDecision.skip:
+            logger.info(
+                "email_send: dedup hit for run_id=%s (already sent); skipping Gmail send",
+                run.run_id,
+            )
+            return self._ok_result(params, subject, gate.provider_message_id, deduped=True)
+        if gate.decision is SendDecision.resend:
+            logger.warning(
+                "email_send: re-sending run_id=%s after an unconfirmed prior attempt"
+                " (at-least-once bias; rare duplicate possible)",
+                run.run_id,
+            )
 
         try:
             async with httpx.AsyncClient(timeout=float(self.timeout_seconds)) as client:
@@ -217,16 +254,40 @@ class EmailSendHandler:
                 retryable=False,
             )
 
-        return ActionResult(
-            ok=True,
-            result={
-                "recipients": [str(addr) for addr in params.to],
-                "subject": subject,
-                "provider": "gmail",
-            },
-            error=None,
-            retryable=False,
-        )
+        # Confirmed send: capture the provider message id and mark the intent
+        # 'sent' in its own transaction, before returning — so even if the
+        # executor's terminal write then fails and the message redelivers, the
+        # replay reads 'sent' and no-ops (that write is the dedup arbiter).
+        provider_message_id = self._provider_message_id(resp)
+        await self._dedup.mark_sent(key, provider_message_id)
+        return self._ok_result(params, subject, provider_message_id)
+
+    def _ok_result(
+        self,
+        params: EmailSendParams,
+        subject: str,
+        provider_message_id: str | None,
+        *,
+        deduped: bool = False,
+    ) -> ActionResult:
+        """Success envelope for a send. ``deduped=True`` marks a dedup no-op (ADR-070)."""
+        result: dict[str, Any] = {
+            "recipients": [str(addr) for addr in params.to],
+            "subject": subject,
+            "provider": "gmail",
+            "provider_message_id": provider_message_id,
+        }
+        if deduped:
+            result["deduped"] = True
+        return ActionResult(ok=True, result=result, error=None, retryable=False)
+
+    @staticmethod
+    def _provider_message_id(resp: httpx.Response) -> str | None:
+        """Extract the Gmail message id from a 2xx send response (best-effort)."""
+        try:
+            return resp.json().get("id")
+        except (ValueError, AttributeError):
+            return None
 
     async def _build_body(
         self,

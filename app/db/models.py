@@ -7,8 +7,9 @@ Three primary tables; mixing them up is the #1 source of bugs:
   JobRun     one row per attempt      — claim state, retries, audit
   RunEvent   append-only outbox       — every transition, immutable
 
-Plus one accounting table:
+Plus two side tables:
   LlmTokenBudget  per-user daily token spend tracker (ADR-052)
+  SendIntent      effectively-once dedup record for non-idempotent sends (ADR-070)
 """
 
 from datetime import date, datetime
@@ -281,4 +282,35 @@ class LlmTokenBudget(Base):
     # UTC calendar date — the budget window. Rolls over at midnight UTC.
     budget_date: Mapped[date] = mapped_column(Date, primary_key=True)
     tokens_used: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    updated_at: Mapped[datetime] = mapped_column(TZ, nullable=False, server_default=func.now())
+
+
+class SendIntent(Base):
+    """Effectively-once dedup record for a non-idempotent external send (ADR-070, PRD #266).
+
+    One row per logical send, keyed on a stable, run-derived idempotency key
+    (``f"{action}:{run_id}"``, see ``app.actions.send_dedup``). The handler writes
+    the row ``attempting`` *before* the provider call (write-ahead intent) and
+    flips it to ``sent`` + the provider message id after a confirmed send. A
+    replayed dispatch (SQS redelivery / reconciler retry) with the same key reads
+    this row and no-ops instead of double-sending — turning at-least-once delivery
+    into effectively-once at our boundary.
+
+    The residual window is "sent, then crashed before the ``sent`` write": the
+    replay still sees ``attempting`` and re-sends. ``email_send`` biases to
+    at-least-once and tolerates that extremely rare duplicate (ADR-070).
+
+    ``idempotency_key`` is the primary key, so the uniqueness that makes the
+    write-ahead insert atomic is the PK itself. Currently wired only for
+    ``email_send``; the key format leaves room for other non-idempotent actions.
+    """
+
+    __tablename__ = "send_intents"
+
+    idempotency_key: Mapped[str] = mapped_column(Text, primary_key=True)
+    run_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    # 'attempting' (write-ahead, before the provider call) | 'sent' (confirmed).
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="attempting")
+    provider_message_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(TZ, nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(TZ, nullable=False, server_default=func.now())
