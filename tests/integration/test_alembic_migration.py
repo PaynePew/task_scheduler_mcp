@@ -689,6 +689,167 @@ def test_0011_cutover_stamps_existing_terminal_events():
     )
 
 
+def _insert_job_v0010(url: str, user_id: str = "dedup-test") -> int:
+    """Insert a one_shot job at revision 0010+ (post active->state) and return job_id.
+
+    ``_insert_job`` above writes the ``active`` boolean, which 0010 dropped — it
+    fails once the DB is at 0010, so the 0011 dedup test needs this variant.
+    ``state`` relies on its server_default ('active').
+    """
+    engine = sa.create_engine(url, poolclass=sa.pool.NullPool)
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    "INSERT INTO jobs"
+                    " (user_id, description, action, action_params, job_type,"
+                    "  scheduled_at, created_at, updated_at)"
+                    " VALUES (:uid, 'dedup-test', 'echo', '{}'::jsonb, 'one_shot',"
+                    "  NOW(), NOW(), NOW()) RETURNING job_id"
+                ),
+                {"uid": user_id},
+            ).fetchone()
+            conn.commit()
+            return row[0]
+    finally:
+        engine.dispose()
+
+
+def _insert_run_row(
+    url: str,
+    *,
+    job_id: int,
+    scheduled_at: str,
+    status: str,
+    wait_for_run_id: int | None = None,
+    user_id: str = "dedup-test",
+) -> int:
+    """Insert one job_runs row (time_bucket derived from scheduled_at) and return run_id."""
+    engine = sa.create_engine(url, poolclass=sa.pool.NullPool)
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    "INSERT INTO job_runs"
+                    " (time_bucket, job_id, user_id, scheduled_at, status,"
+                    "  wait_for_run_id, retry_count, max_retries, created_at, updated_at)"
+                    " VALUES (TO_CHAR(CAST(:sa AS timestamptz), 'YYYY-MM-DD HH24:00:00'),"
+                    "  :jid, :uid, CAST(:sa AS timestamptz), :st, :wf, 0, 3, NOW(), NOW())"
+                    " RETURNING run_id"
+                ),
+                {
+                    "sa": scheduled_at,
+                    "jid": job_id,
+                    "uid": user_id,
+                    "st": status,
+                    "wf": wait_for_run_id,
+                },
+            ).fetchone()
+            conn.commit()
+            return row[0]
+    finally:
+        engine.dispose()
+
+
+def _insert_run_event_for(url: str, *, run_id: int, job_id: int, event_type: str) -> int:
+    """Insert a run_events row bound to a specific run_id/job_id and return event_id."""
+    engine = sa.create_engine(url, poolclass=sa.pool.NullPool)
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    "INSERT INTO run_events (run_id, job_id, event_type, occurred_at, processed_by)"
+                    " VALUES (:rid, :jid, :etype, NOW(), '{}'::jsonb) RETURNING event_id"
+                ),
+                {"rid": run_id, "jid": job_id, "etype": event_type},
+            ).fetchone()
+            conn.commit()
+            return row[0]
+    finally:
+        engine.dispose()
+
+
+def _row_exists(url: str, table: str, id_col: str, id_val: int) -> bool:
+    engine = sa.create_engine(url, poolclass=sa.pool.NullPool)
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(f"SELECT 1 FROM {table} WHERE {id_col} = :v"),  # noqa: S608
+                {"v": id_val},
+            ).fetchone()
+            return row is not None
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.integration
+def test_0011_dedups_duplicate_runs_before_indexing():
+    """0011 collapses each cause group to one run before the unique indexes.
+
+    Guards the deploy blocker: production held a pre-existing duplicate recurring
+    tick — two job_runs sharing (job_id, scheduled_at) with wait_for_run_id NULL —
+    so CREATE UNIQUE INDEX uq_job_runs_recurring_tick aborted (CI stayed green
+    only because the test DB had no such row). 0011 must de-dup first: keep exactly
+    one run per cause group (a live run over a terminal one; else the earliest),
+    delete the redundant duplicate(s) AND their orphan run_events, then create both
+    indexes.
+    """
+    url = os.environ["ALEMBIC_DATABASE_URL"]
+
+    # Pre-state: revision 0010 — the cause-unique indexes do not exist yet, so we
+    # can seed rows that would otherwise violate them.
+    _run_alembic("downgrade", "0010")
+
+    sched = "2026-05-18 14:01:00+00"
+
+    # Group A — recurring double-fire, both terminal: keep the earliest run_id.
+    job_a = _insert_job_v0010(url)
+    run_a_keep = _insert_run_row(url, job_id=job_a, scheduled_at=sched, status="SUCCEEDED")
+    run_a_drop = _insert_run_row(url, job_id=job_a, scheduled_at=sched, status="SUCCEEDED")
+    ev_a_keep = _insert_run_event_for(url, run_id=run_a_keep, job_id=job_a, event_type="SUCCEEDED")
+    ev_a_drop = _insert_run_event_for(url, run_id=run_a_drop, job_id=job_a, event_type="SUCCEEDED")
+
+    # Group B — terminal (earlier run_id) + live PENDING (later): the LIVE run must
+    # win despite its larger run_id, so a dedup never strands in-flight work.
+    job_b = _insert_job_v0010(url)
+    run_b_terminal = _insert_run_row(url, job_id=job_b, scheduled_at=sched, status="FAILED")
+    run_b_live = _insert_run_row(url, job_id=job_b, scheduled_at=sched, status="PENDING")
+
+    # Group C — chained double-create: two runs share (job_id, wait_for_run_id).
+    job_c = _insert_job_v0010(url)
+    run_c_keep = _insert_run_row(
+        url, job_id=job_c, scheduled_at=sched, status="SUCCEEDED", wait_for_run_id=999
+    )
+    run_c_drop = _insert_run_row(
+        url, job_id=job_c, scheduled_at=sched, status="SUCCEEDED", wait_for_run_id=999
+    )
+
+    # Apply 0011 (+ any later migrations).
+    _run_alembic("upgrade", "head")
+
+    # Group A: earliest kept; later duplicate AND its orphan event gone.
+    assert _row_exists(url, "job_runs", "run_id", run_a_keep)
+    assert not _row_exists(url, "job_runs", "run_id", run_a_drop)
+    assert _row_exists(url, "run_events", "event_id", ev_a_keep), "kept run's event must survive"
+    assert not _row_exists(url, "run_events", "event_id", ev_a_drop), (
+        "dropped run's orphan event must be deleted"
+    )
+    assert _count_rows(url, "job_runs", "job_id = :j", {"j": job_a}) == 1
+
+    # Group B: the live run wins over the terminal one regardless of run_id order.
+    assert _row_exists(url, "job_runs", "run_id", run_b_live)
+    assert not _row_exists(url, "job_runs", "run_id", run_b_terminal)
+
+    # Group C: chained cause group collapsed to the earliest run_id.
+    assert _row_exists(url, "job_runs", "run_id", run_c_keep)
+    assert not _row_exists(url, "job_runs", "run_id", run_c_drop)
+    assert _count_rows(url, "job_runs", "job_id = :j", {"j": job_c}) == 1
+
+    # Both cause-unique indexes now exist (creation would have aborted pre-dedup).
+    assert _index_exists(url, "uq_job_runs_recurring_tick")
+    assert _index_exists(url, "uq_job_runs_trigger_cause")
+
+
 @pytest.mark.integration
 def test_0006_creates_and_drops_oauth_connections():
     """Migration 0006 creates oauth_connections; downgrade drops it."""
