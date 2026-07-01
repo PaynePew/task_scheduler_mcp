@@ -47,11 +47,18 @@ class Settings(BaseSettings):
     db_pool_size: int = 5
     db_max_overflow: int = 10
 
-    # Reconciler grace windows (issue #30).
-    # DLQ grace: VisibilityTimeout(30s) * (MaxReceiveCount(3) + 1) + slack(60s) = 180s.
-    # QUEUED grace: VisibilityTimeout(30s) * 2 + slack(30s) = 90s.
-    reconciler_dlq_grace_seconds: int = 180
-    reconciler_queued_grace_seconds: int = 90
+    # Reconciler grace windows (issue #30, recalibrated in #270).
+    # The worker overrides VisibilityTimeout to 60s per receive (see
+    # app/workers/executor.py's receive_messages call) and the DLQ queue's own
+    # default visibility is also 60s — both graces must be derived from that
+    # 60s figure, not the 30s main-queue default, or the reconciler can fire
+    # before SQS finishes its own redelivery/DLQ routing.
+    # DLQ grace: VisibilityTimeout(60s) * (MaxReceiveCount(3) + 1) + slack(60s) = 300s.
+    # QUEUED grace: VisibilityTimeout(60s) * 2 + slack(30s) = 150s.
+    reconciler_dlq_grace_seconds: int = 300
+    reconciler_queued_grace_seconds: int = 150
+    # Reconciler tick interval: how long the loop sleeps between sweeps (#270).
+    reconciler_interval_seconds: float = 60.0
 
     # Per-user rate limits for task.create.v1 (ADR-042, revised by ADR-055).
     # Two windows: a 24h daily cap and a 1-minute burst cap.
