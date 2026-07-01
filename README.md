@@ -21,7 +21,7 @@ A live multi-tenant instance runs at [scheduler.paynepew.dev](https://scheduler.
 - Persistence is the whole point. Jobs survive the chat session because the scheduler is a long-lived HTTP service with its own database, not a subprocess that dies with the client ([ADR-006](docs/adr/ADR-006-mcp-transport-dual-stdio-http.md)).
 - Real auth, not a header. The public endpoint is an OAuth 2.1 resource server, with WorkOS AuthKit as the authorization server. A user's identity is a verified JWT subject, so one user can never read or cancel another's jobs ([ADR-053](docs/adr/ADR-053-layer1-authorization-server-workos-authkit.md), [ADR-049](docs/adr/ADR-049-public-product-multi-tenant-oauth-delegation.md)).
 - Your raw secret is never stored. GitHub, Slack, and Gmail actions run on per-user OAuth tokens that are scoped, revocable, and encrypted at rest with AWS KMS envelope encryption, then refreshed automatically when they expire ([ADR-054](docs/adr/ADR-054-layer2-token-storage-aws-kms-envelope-encryption.md)).
-- The data model is built to avoid races. Every status change is written to an append-only outbox in the same transaction, and the watchers read that event log instead of polling mutable state ([ADR-009](docs/adr/ADR-009-database-schema-outbox.md)). Run creation has a single owner, so chained and recurring jobs can't double-spawn ([ADR-065](docs/adr/ADR-065-run-source-dichotomy-and-run-materializer.md)).
+- The data model is built to avoid races. Every status change is written to an append-only outbox in the same transaction, and the follow-up consumers read that event log instead of polling mutable state ([ADR-009](docs/adr/ADR-009-database-schema-outbox.md)). A recurring or chained run is created only when its upstream run reaches a terminal event — *continuation* — and exactly-once is enforced by a Postgres unique index rather than a distributed lock, so nothing can double-spawn ([ADR-067](docs/adr/ADR-067-continuation-chaining-replaces-pre-armed-waiting-runs.md)).
 - It runs on $5/month and stays up under load. Watchers claim work with `FOR UPDATE SKIP LOCKED` so several can run with no leader election. The server sheds load at the edge, caps concurrency, and applies backpressure when the queue is deep ([ADR-007](docs/adr/ADR-007-watcher-ha-skip-locked.md), [ADR-057](docs/adr/ADR-057-overload-protection-load-shedding-concurrency.md)).
 - Every decision is written down. 60+ ADRs cover scope, language, data store, transport, auth, and the security model, so the reasoning is auditable rather than tribal.
 
@@ -40,7 +40,8 @@ flowchart LR
     Q[("Queue<br/>SQS · ElasticMQ")]
     WO["Worker<br/>action handlers"]
     EXT["External APIs<br/>GitHub · Slack · Gmail<br/>LLM · HTTP · ICS"]
-    CTL["RecurringJobWatcher<br/>ChainWatcher<br/>Reconciler"]
+    CONT["Continuation consumer<br/>recurring successor +<br/>chained downstream"]
+    REC["Reconciler<br/>orphaned-run sweep"]
 
     CL -->|MCP call| SRV
     SRV -->|persist job| PG
@@ -48,14 +49,16 @@ flowchart LR
     WAT -->|enqueue| Q
     Q --> WO
     WO -->|dispatch| EXT
-    WO -->|results + events| PG
-    PG -.-> CTL
-    CTL -.materialize next run.-> PG
+    WO -->|results + terminal events| PG
+    PG -. terminal events .-> CONT
+    CONT -. create next run .-> PG
+    PG -. orphaned runs .-> REC
+    REC -. requeue .-> PG
 ```
 
-A tool call reaches `mcp-server` through Caddy. The server verifies the bearer token, checks the caller's rate limit and quota, and writes a `Job` plus its first `JobRun`. The **Watcher** scans for runs due within the next five minutes and claims them with `FOR UPDATE SKIP LOCKED`, so several watchers can run at once without stepping on each other. Claimed runs go onto the queue, and the **Worker** pulls one, dispatches it to the matching typed action handler, then writes the result and a status event back to Postgres.
+A tool call reaches `mcp-server` through Caddy. The server verifies the bearer token, checks the caller's rate limit and quota, and writes a `Job` (and, for a scheduled job, its first `JobRun` — a chained job gets no run until its trigger fires). The **Watcher** scans for runs due within the next five minutes and claims them with `FOR UPDATE SKIP LOCKED`, so several watchers can run at once without stepping on each other. Claimed runs go onto the queue, and the **Worker** pulls one, dispatches it to the matching typed action handler, then writes the result and a status event back to Postgres.
 
-The follow-up watchers never poll the mutable status column. They read the append-only `run_events` outbox: **RecurringJobWatcher** materializes the next cron occurrence, and **ChainWatcher** flips a downstream job from `WAITING` to `PENDING` once its trigger reaches a terminal status. The **Reconciler** sweeps up runs orphaned by a worker crash.
+The follow-up consumers never poll the mutable status column — they read the append-only `run_events` outbox. The **Continuation consumer** reacts to each terminal event: in the same transaction it materializes the next recurring occurrence *and* creates a `PENDING` run for every chained downstream whose trigger just fired (continuation), then settles the finished job's `Job.state`. It replaced the old `RecurringJobWatcher` + `ChainWatcher` pair (ADR-067). The **Reconciler** sweeps up runs orphaned by a worker crash.
 
 ### Auth and secrets
 
@@ -80,6 +83,24 @@ sequenceDiagram
 ```
 
 An unauthenticated call gets a `401` and a `WWW-Authenticate` challenge that points at the Protected Resource Metadata endpoint (RFC 9728), which is how the client discovers the login flow. After the browser login, the client sends a WorkOS bearer JWT that the server verifies against the JWKS. Connecting an app is a separate per-provider OAuth consent on `/connections`; the resulting token is encrypted and stored, and the worker reads it at run time.
+
+## Tech stack
+
+| Layer | Choice |
+|---|---|
+| Language & tooling | Python 3.12, [uv](https://docs.astral.sh/uv/) for deps/venvs, [ruff](https://docs.astral.sh/ruff/) lint + format |
+| MCP | Official [`mcp`](https://github.com/modelcontextprotocol/python-sdk) Python SDK — dual transport: stdio + streamable HTTP |
+| Web / API | Starlette + uvicorn (ASGI) for the HTTP transport, the `/connections` OAuth dashboard, and the static landing page |
+| Data | PostgreSQL 16, SQLAlchemy 2.0 async (asyncpg), Alembic migrations, an append-only `run_events` outbox |
+| Queue | Amazon SQS in production, [ElasticMQ](https://github.com/softwaremill/elasticmq) locally — same boto3 client |
+| Identity | [WorkOS AuthKit](https://workos.com/) as the OAuth 2.1 authorization server; this app is a resource server (PyJWT + JWKS, RFC 8707/9728) |
+| Secrets | AWS KMS envelope encryption for per-user OAuth tokens (boto3 + cryptography) |
+| Scheduling & config | `croniter` for cron expansion; pydantic v2 + pydantic-settings |
+| Action I/O | `httpx` (GitHub/Slack/Gmail/LLM), `icalendar` (ICS), operator-funded LLM pinned to `gpt-4o-mini` |
+| Observability | Structured JSON logs (`python-json-logger`) → Better Stack; `/healthz` reports the running commit SHA |
+| Infra | Docker Compose (8 services), Caddy (automatic TLS), AWS Lightsail (Tokyo, ~$5/mo), Cloudflare R2 (nightly backups) |
+| CI/CD | GitHub Actions — lint + unit + integration, then auto-deploy to the VPS over SSH on a green `main` |
+| Tests | pytest (+asyncio, +cov), moto (AWS mocks), aiosmtpd (SMTP capture) |
 
 ## Quick start
 
@@ -130,7 +151,7 @@ cp .env.example .env                 # only for host-side uv (tests, alembic)
 docker compose --profile full up -d
 ```
 
-That brings up nine services: Postgres, ElasticMQ, a one-shot migrator, `mcp-server`, the watcher, the worker, and the recurring, chain, and reconciler watchers.
+That brings up eight services: Postgres, ElasticMQ, a one-shot migrator, `mcp-server`, the watcher, the worker, the continuation consumer (the `recurring-watcher` service), and the reconciler.
 
 Point your client at the local endpoint. The `X-User-Id` header is your identity in trust-only mode.
 
@@ -219,39 +240,61 @@ The OAuth-backed actions run on each user's own scoped token. The two LLM action
 
 **Prompts (2):** `daily_review`, `setup_summary`.
 
-**Scheduling features:** immediate, one-shot (`scheduled_at`), and recurring (`cron_expr`, including `@daily`/`@hourly` shortcuts) jobs; job chaining (`trigger_on_job_id` with `trigger_on_status`); cancel semantics; per-user rate limits and quotas.
+**Scheduling features:** immediate, one-shot (`scheduled_at`), and recurring (`cron_expr`, including `@daily`/`@hourly` shortcuts) jobs; job chaining (`trigger_on_job_id` with a `trigger_on_status` predicate — `SUCCEEDED` / `FAILED` / `ANY`) that can fan out and threads upstream output downstream; `task.status` surfaces a chained job's `triggered_by` parent; cancel semantics (cancelling an upstream stops its whole downstream pipeline); per-user rate limits and quotas.
 
 ## Example prompts
 
-Talk to it in natural language. Connect GitHub, Slack, and Google at `/connections` first; replace `<owner>/<repo>` and the channel / email with your own. If your client reaches for its built-in scheduler instead, start with **"use owl-scheduler to …"**.
+Talk to it in natural language. Connect GitHub, Slack, and Google at `/connections` first, then replace `<owner>/<repo>` and the channel / email with your own. If your client reaches for its built-in scheduler instead, start with **"use owl-scheduler to …"**.
 
-1. **Immediate** — *"Right now, pull the open issues and stale PRs for `<owner>/<repo>` and summarize them for me."*
-   Exercises `immediate` + `github_digest`. Verify: result in ~10s via `task.status`.
+The ladder below climbs from a one-line smoke test to a self-firing multi-service pipeline. The same order works as a **live demo** (each rung builds on the last) and as a first-run tour after you clone.
 
-2. **One-shot, three-service chain (flagship)** — *"In 3 minutes, pull the open issues for `<owner>/<repo>`, post the summary to Slack `#eng-updates`, and once that succeeds, email the same summary to me."*
-   Exercises `one-shot` + the chain `github_digest → slack_post → email_send` (data flows downstream via `from_run_id` + the `digest_v1` template). Verify: after 3 minutes a Slack message appears, then the email; `task.list` shows the three linked jobs.
+### Warm up — no accounts needed
 
-3. **Recurring (daily standup)** — *"Every weekday at 9:00 AM Taipei time, post a digest of `<owner>/<repo>`'s open issues and stale PRs to Slack `#standup`."*
-   Exercises `recurring` (cron) + `github_digest → slack_post`. Demo tip: for a live demo say *"every 2 minutes"* to watch it fire repeatedly, then *"cancel that task"*.
+1. **Discover** — *"Using owl-scheduler, what can you do?"*
+   `task.list_actions` — lists every action and which ones need a connection.
 
-4. **Recurring (weekly report)** — *"Every Friday at 5:00 PM, summarize this week's GitHub activity for `<owner>/<repo>` and email me the report."*
-   Exercises weekly `recurring` + `github_digest → email_send` (`digest_v1`).
+2. **Echo (smoke test)** — *"Echo 'hello from owl-scheduler' right now."*
+   `immediate` + `echo`. Proves create → dispatch → result end to end. Verify: `task.status` shows `completed` within a few seconds.
 
-5. **Manage the schedule** — *"List my scheduled tasks" · "What's the status of job `<id>`, with its runs?" · "Cancel job `<id>`" · "What can you do?"*
-   Exercises `task.list` / `task.status` / `task.cancel` (best-effort) / `task.list_actions`.
+### Single actions
 
-6. **Prose polish → Slack (LLM chain)** — *"Right now, rewrite this rough release note — 'fixed the login bug, added dark mode, the api is faster now' — into a professional announcement and post it to Slack `#announcements`."*
-   Exercises `immediate` + `llm_polish → slack_post`. `llm_polish` is an operator-funded, fixed-prompt, cost-capped rewrite (no API key needed); its output flows to `slack_post` via the chain — the result is not returned through any MCP surface. Verify: after ~15 s a polished message appears in `#announcements`; `task.list` shows the two linked jobs.
+3. **Immediate digest** — *"Right now, pull the open issues and stale PRs for `<owner>/<repo>` and summarize them."* (needs GitHub)
+   `immediate` + `github_digest`. Read-only — nothing leaves the box. Verify: result in ~10 s via `task.status`.
 
-Prompt 2 is the showcase: one sentence becomes a scheduled **GitHub → Slack → Gmail** workflow that keeps firing on its own and keeps an audit trail. Chains can also fan out — one upstream feeding Slack **and** email in parallel.
+4. **LLM polish → Slack** — *"Right now, rewrite this rough release note — 'fixed the login bug, added dark mode, the api is faster now' — into a professional announcement and post it to Slack `#announcements`."* (needs Slack)
+   `immediate` + `llm_polish → slack_post`. `llm_polish` is an operator-funded, fixed-prompt, cost-capped rewrite — **no API key needed**. Its output is never returned over MCP; it flows to `slack_post` through the chain. Verify: a polished message lands in `#announcements` in ~15 s; `task.status` on the Slack job shows `triggered_by` the polish job.
+
+### Chains — the showcase
+
+5. **One-shot, three-service chain (flagship)** — *"In 3 minutes, pull the open issues for `<owner>/<repo>`, post the summary to Slack `#eng-updates`, and once that succeeds email the same summary to me."*
+   `one-shot` + `github_digest → slack_post → email_send`, with data threaded downstream via `from_run_id` + the `digest_v1` template. Verify: after 3 minutes a Slack message appears, then the email; `task.status` on the email job shows `triggered_by` pointing at the Slack job.
+
+6. **Fan-out** — *"In 2 minutes, digest `<owner>/<repo>` and both post it to Slack `#eng-updates` and email it to me."*
+   One upstream, two downstreams created in parallel off the same terminal event. Verify: Slack and email both arrive; `task.list` shows three jobs, two of them `triggered_by` the digest.
+
+7. **Failure-only alert (predicate)** — *"Run a digest of `<owner>/<repo>` now, and if it fails, email me a heads-up."*
+   `trigger_on_status=FAILED` — the downstream is created only when the upstream's terminal status matches. On success nothing is sent (the miss is audited, not run); flip to `SUCCEEDED` or `ANY` for other policies.
+
+### Recurring & management
+
+8. **Daily standup** — *"Every weekday at 9:00 AM Taipei time, post a digest of `<owner>/<repo>`'s open issues and stale PRs to Slack `#standup`."*
+   `recurring` (cron) + `github_digest → slack_post`. **Live-demo tip:** say *"every 2 minutes"* to watch it fire repeatedly, then *"cancel that task"* to show cancel semantics.
+
+9. **Weekly report** — *"Every Friday at 5:00 PM, summarize this week's GitHub activity for `<owner>/<repo>` and email me the report."*
+   Weekly `recurring` + `github_digest → email_send` (`digest_v1`).
+
+10. **Manage the schedule** — *"List my scheduled tasks" · "What's the status of job `<id>`, with its runs?" · "Cancel job `<id>`."*
+    `task.list` / `task.status` (with runs + `triggered_by`) / `task.cancel` — best-effort; cancelling an upstream stops its whole downstream pipeline.
+
+**Live-demo path (≈5 min):** `1 → 2 → 4` (LLM to Slack, instant wow) `→ 5` (the flagship chain, the centerpiece) `→ 8` with *"every 2 minutes"* then cancel. Prompts 1–2 need no accounts, so they still work even if a connection hiccups mid-interview. The flagship is the money shot: one sentence becomes a scheduled **GitHub → Slack → Gmail** workflow that keeps firing on its own and keeps a full audit trail.
 
 ## How scheduling works
 
 The system stores three things, and confusing them is the usual source of bugs. A **`Job`** is the task definition (what to run, when, who owns it). A **`JobRun`** is one execution attempt of that job. A **`RunEvent`** is one immutable record of a status transition. A recurring `Job` has many `JobRun`s over time; a one-shot has exactly one.
 
-Clients see five simple statuses (`scheduled`, `running`, `completed`, `failed`, `cancelled`). Internally the database keeps a finer eight-state machine and maps it down at the MCP boundary, so the precise truth stays in the data layer while the LLM gets a model it can reason about.
+Clients see five simple statuses (`scheduled`, `running`, `completed`, `failed`, `cancelled`). Internally the database keeps a finer seven-state run machine (`PENDING → QUEUED → RUNNING → SUCCEEDED | FAILED | RETRYING`, plus `CANCELLED`) and maps it down at the MCP boundary ([ADR-014](docs/adr/ADR-014-mcp-tool-surface-v1.md)), so the precise truth stays in the data layer while the LLM gets a model it can reason about. Each `Job` also carries its own lifecycle — `active`, `completed`, or `cancelled` — and that is what the per-user quota counts, so a finished job stops consuming your active-job budget ([ADR-068](docs/adr/ADR-068-job-state-machine-replaces-active-boolean.md)).
 
-Chaining and recurrence share one rule: run creation has a single owner, the **RunMaterializer**. Arming a downstream job happens inside the same transaction that creates a run, so a chained or recurring job cannot be created without its downstream being armed atomically. If an upstream produces runs faster than a downstream can finish, the overlapping tick is dropped on purpose (load shedding) and audited, which keeps at most one executing run per job. This closed a real double-spawn race; the reasoning is in [ADR-065](docs/adr/ADR-065-run-source-dichotomy-and-run-materializer.md) and [CONTEXT.md](CONTEXT.md).
+Chaining and recurrence share one rule: a follow-up run is created only when its upstream run reaches a terminal event — **continuation**, driven by a single consumer that reads the outbox in event order. Exactly-once is a data-layer guarantee: a redelivered event that retries a creation hits a Postgres unique index and is a no-op, so no distributed lock is needed. If an upstream terminates faster than a downstream can finish, the overlapping tick is skipped on purpose (load shedding) and audited, keeping at most one executing run per job. This replaced the earlier pre-armed `WAITING` / `ChainWatcher` design and the double-spawn race it carried; the reasoning is in [ADR-067](docs/adr/ADR-067-continuation-chaining-replaces-pre-armed-waiting-runs.md) and [CONTEXT.md](CONTEXT.md).
 
 ## Security model
 
@@ -293,10 +336,10 @@ Decisions are recorded as ADRs under [docs/adr/](docs/adr/), with the domain lan
 | Theme | ADRs |
 |---|---|
 | Transport and data model | [006](docs/adr/ADR-006-mcp-transport-dual-stdio-http.md) dual stdio/HTTP, [009](docs/adr/ADR-009-database-schema-outbox.md) outbox schema, [007](docs/adr/ADR-007-watcher-ha-skip-locked.md) SKIP LOCKED watchers |
-| Actions and chaining | [013](docs/adr/ADR-013-action-catalog-typed-registry.md) typed registry, [033](docs/adr/ADR-033-inter-handler-data-flow-via-job-run-result.md) inter-handler data plane, [065](docs/adr/ADR-065-run-source-dichotomy-and-run-materializer.md) RunMaterializer |
+| Actions and chaining | [013](docs/adr/ADR-013-action-catalog-typed-registry.md) typed registry, [033](docs/adr/ADR-033-inter-handler-data-flow-via-job-run-result.md) inter-handler data plane, [067](docs/adr/ADR-067-continuation-chaining-replaces-pre-armed-waiting-runs.md) continuation chaining, [068](docs/adr/ADR-068-job-state-machine-replaces-active-boolean.md) Job.state lifecycle |
 | Public auth and secrets | [049](docs/adr/ADR-049-public-product-multi-tenant-oauth-delegation.md) multi-tenant deployment, [053](docs/adr/ADR-053-layer1-authorization-server-workos-authkit.md) WorkOS, [054](docs/adr/ADR-054-layer2-token-storage-aws-kms-envelope-encryption.md) KMS tokens, [050](docs/adr/ADR-050-dual-credential-model-oauth-vs-operator-env.md) / [051](docs/adr/ADR-051-action-surface-tiering-public-oauth-vs-operator-only.md) credential tiering |
 | Cost and resilience | [055](docs/adr/ADR-055-public-abuse-cost-containment-posture.md) quotas, [057](docs/adr/ADR-057-overload-protection-load-shedding-concurrency.md) overload protection, [056](docs/adr/ADR-056-observability-structured-json-logging-better-stack.md) structured logging, [031](docs/adr/ADR-031-monitoring-better-stack-over-uptimerobot.md) external monitoring |
 
 ## Status
 
-The hosted instance is live and multi-tenant: OAuth login, per-user connections, the eight actions above, recurring schedules, and chaining all work in production. Deferred to a later version: fan-in (one job reading several upstreams), a higher-level plan abstraction, and running the worker as its own MCP client ([ADR-038](docs/adr/ADR-038-mcp-call-as-future-direction.md) through [ADR-040](docs/adr/ADR-040-predicate-based-chain-as-future-direction.md)). Issues and discussion: [github.com/PaynePew/task_scheduler_mcp/issues](https://github.com/PaynePew/task_scheduler_mcp/issues).
+The hosted instance is live and multi-tenant: OAuth login, per-user connections, the six actions above, recurring schedules, and continuation chaining all work in production. Deferred to a later version: fan-in (one job reading several upstreams), a higher-level plan abstraction, and running the worker as its own MCP client ([ADR-038](docs/adr/ADR-038-mcp-call-as-future-direction.md) through [ADR-040](docs/adr/ADR-040-predicate-based-chain-as-future-direction.md)). Issues and discussion: [github.com/PaynePew/task_scheduler_mcp/issues](https://github.com/PaynePew/task_scheduler_mcp/issues).

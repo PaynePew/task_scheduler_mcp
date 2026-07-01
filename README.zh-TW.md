@@ -21,7 +21,7 @@
 - 持久性 (persistence) 是整件事的重點。因為排程器是個長壽命的 HTTP 服務、有自己的資料庫，不是隨客戶端死掉的子行程 (subprocess)，所以任務能撐過對話結束（[ADR-006](docs/adr/ADR-006-mcp-transport-dual-stdio-http.md)）。
 - 真的有做身分驗證，不是靠一個 header。公開端點是一個 OAuth 2.1 資源伺服器 (resource server)，由 WorkOS AuthKit 擔任授權伺服器 (authorization server)。使用者身分是一個經過驗證的 JWT 主體 (subject)，所以一個使用者永遠讀不到、也取消不了另一個人的任務（[ADR-053](docs/adr/ADR-053-layer1-authorization-server-workos-authkit.md)、[ADR-049](docs/adr/ADR-049-public-product-multi-tenant-oauth-delegation.md)）。
 - 從不儲存你的原始密鑰 (raw secret)。GitHub、Slack、Gmail 這些動作跑在每位使用者自己的 OAuth 權杖上，這些權杖是受限、可撤銷的，用 AWS KMS 信封加密 (envelope encryption) 加密後才落地，過期時自動換新（[ADR-054](docs/adr/ADR-054-layer2-token-storage-aws-kms-envelope-encryption.md)）。
-- 資料模型是為了避免競態 (race condition) 而設計的。每一次狀態變更都在同一個交易 (transaction) 裡寫進一個僅能附加 (append-only) 的 outbox，而各個 watcher 讀的是這份事件日誌，不去輪詢 (poll) 可變狀態（[ADR-009](docs/adr/ADR-009-database-schema-outbox.md)）。執行 (run) 的建立只有單一擁有者，所以串接 (chained) 與週期性 (recurring) 任務不會重複生成（[ADR-065](docs/adr/ADR-065-run-source-dichotomy-and-run-materializer.md)）。
+- 資料模型是為了避免競態 (race condition) 而設計的。每一次狀態變更都在同一個交易 (transaction) 裡寫進一個僅能附加 (append-only) 的 outbox，而後續消費者讀的是這份事件日誌，不去輪詢 (poll) 可變狀態（[ADR-009](docs/adr/ADR-009-database-schema-outbox.md)）。週期或串接的執行，只在其上游執行到達終態事件時才建立——延續 (continuation)——而 exactly-once 由 Postgres 唯一索引保證，而非分散式鎖，所以任何東西都不會重複生成（[ADR-067](docs/adr/ADR-067-continuation-chaining-replaces-pre-armed-waiting-runs.md)）。
 - 它跑在每月 5 美元上，而且在負載下站得住。各個 watcher 用 `FOR UPDATE SKIP LOCKED` 認領工作，所以可以跑好幾個而不需要 leader 選舉。伺服器會在邊緣 (edge) 卸載流量、限制併發 (concurrency)，並在佇列堆積時施加背壓 (backpressure)（[ADR-007](docs/adr/ADR-007-watcher-ha-skip-locked.md)、[ADR-057](docs/adr/ADR-057-overload-protection-load-shedding-concurrency.md)）。
 - 每個決策都寫下來了。60 多份 ADR 涵蓋範疇、語言、資料存儲、傳輸、認證與安全模型，所以推理過程是可稽核的，而不是只存在某個人腦裡。
 
@@ -40,7 +40,8 @@ flowchart LR
     Q[("Queue<br/>SQS · ElasticMQ")]
     WO["Worker<br/>action handlers"]
     EXT["External APIs<br/>GitHub · Slack · Gmail<br/>LLM · HTTP · ICS"]
-    CTL["RecurringJobWatcher<br/>ChainWatcher<br/>Reconciler"]
+    CONT["Continuation consumer<br/>recurring successor +<br/>chained downstream"]
+    REC["Reconciler<br/>orphaned-run sweep"]
 
     CL -->|MCP call| SRV
     SRV -->|persist job| PG
@@ -48,14 +49,16 @@ flowchart LR
     WAT -->|enqueue| Q
     Q --> WO
     WO -->|dispatch| EXT
-    WO -->|results + events| PG
-    PG -.-> CTL
-    CTL -.materialize next run.-> PG
+    WO -->|results + terminal events| PG
+    PG -. terminal events .-> CONT
+    CONT -. create next run .-> PG
+    PG -. orphaned runs .-> REC
+    REC -. requeue .-> PG
 ```
 
-一次工具呼叫透過 Caddy 到達 `mcp-server`。伺服器驗證 bearer 權杖、檢查呼叫者的速率限制與配額，然後寫入一個 `Job` 以及它的第一個 `JobRun`。**Watcher** 掃描未來五分鐘內到期的執行，用 `FOR UPDATE SKIP LOCKED` 認領它們，所以可以同時跑好幾個 watcher 而互不踩線。被認領的執行進入佇列，**Worker** 取出一個，分派 (dispatch) 給對應的型別化動作處理器 (typed action handler)，再把結果與一筆狀態事件寫回 Postgres。
+一次工具呼叫透過 Caddy 到達 `mcp-server`。伺服器驗證 bearer 權杖、檢查呼叫者的速率限制與配額，然後寫入一個 `Job`（若是排程型任務，還會建立它的第一個 `JobRun`——串接型任務要等到觸發才會有執行）。**Watcher** 掃描未來五分鐘內到期的執行，用 `FOR UPDATE SKIP LOCKED` 認領它們，所以可以同時跑好幾個 watcher 而互不踩線。被認領的執行進入佇列，**Worker** 取出一個，分派 (dispatch) 給對應的型別化動作處理器 (typed action handler)，再把結果與一筆狀態事件寫回 Postgres。
 
-後續的 watcher 從不輪詢那個可變的狀態欄位，它們讀的是僅能附加的 `run_events` outbox：**RecurringJobWatcher** 物化 (materialize) 下一個 cron 週期的執行，**ChainWatcher** 在某個觸發任務到達終態 (terminal status) 時，把下游任務從 `WAITING` 翻成 `PENDING`。**Reconciler** 則負責清理那些因 worker 當機而被孤立的執行。
+後續的消費者從不輪詢那個可變的狀態欄位，它們讀的是僅能附加的 `run_events` outbox。**Continuation consumer（延續消費者）** 對每一筆終態事件反應：在同一個交易裡，它物化 (materialize) 下一個週期執行，並為每個觸發條件剛滿足的串接下游建立一個 `PENDING` 執行（延續 continuation），接著結算 (settle) 完成任務的 `Job.state`。它取代了舊的 `RecurringJobWatcher` + `ChainWatcher` 這一對（ADR-067）。**Reconciler** 則負責清理那些因 worker 當機而被孤立的執行。
 
 ### 認證與密鑰
 
@@ -80,6 +83,24 @@ sequenceDiagram
 ```
 
 一個未認證的呼叫會拿到 `401` 與一個 `WWW-Authenticate` 挑戰，這個挑戰指向受保護資源中繼資料 (Protected Resource Metadata，RFC 9728) 端點，客戶端就是靠它發現登入流程。瀏覽器登入後，客戶端送上一個 WorkOS bearer JWT，伺服器對 JWKS 驗證它。連接一個 app 是 `/connections` 上另一道逐 provider 的 OAuth 同意；得到的權杖加密後儲存，worker 在執行時讀取它。
+
+## 技術棧
+
+| 層 | 選型 |
+|---|---|
+| 語言與工具 | Python 3.12、[uv](https://docs.astral.sh/uv/) 管相依/venv、[ruff](https://docs.astral.sh/ruff/) lint + format |
+| MCP | 官方 [`mcp`](https://github.com/modelcontextprotocol/python-sdk) Python SDK——雙傳輸：stdio + streamable HTTP |
+| Web / API | Starlette + uvicorn (ASGI)，承載 HTTP 傳輸、`/connections` OAuth 儀表板與靜態 landing page |
+| 資料 | PostgreSQL 16、SQLAlchemy 2.0 async (asyncpg)、Alembic migration、僅能附加的 `run_events` outbox |
+| 佇列 | 生產用 Amazon SQS，本機用 [ElasticMQ](https://github.com/softwaremill/elasticmq)——同一個 boto3 client |
+| 身分 | [WorkOS AuthKit](https://workos.com/) 當 OAuth 2.1 授權伺服器；本服務為資源伺服器（PyJWT + JWKS，RFC 8707/9728）|
+| 密鑰 | AWS KMS 信封加密保護每位使用者的 OAuth 權杖（boto3 + cryptography）|
+| 排程與設定 | `croniter` 展開 cron；pydantic v2 + pydantic-settings |
+| 動作 I/O | `httpx`（GitHub/Slack/Gmail/LLM）、`icalendar`（ICS）、operator 出資的 LLM 釘死 `gpt-4o-mini` |
+| 可觀測性 | 結構化 JSON 日誌（`python-json-logger`）→ Better Stack；`/healthz` 回報正在跑的 commit SHA |
+| 基礎設施 | Docker Compose（8 個服務）、Caddy（自動 TLS）、AWS Lightsail（東京，約 $5/月）、Cloudflare R2（每夜備份）|
+| CI/CD | GitHub Actions——lint + unit + integration，`main` 綠燈後透過 SSH 自動部署到 VPS |
+| 測試 | pytest（+asyncio、+cov）、moto（AWS mock）、aiosmtpd（SMTP 擷取）|
 
 ## 快速上手
 
@@ -130,7 +151,7 @@ cp .env.example .env                 # 僅供 host-side uv（測試、alembic）
 docker compose --profile full up -d
 ```
 
-這會起九個服務：Postgres、ElasticMQ、一次性的 migrator、`mcp-server`、watcher、worker，以及 recurring、chain、reconciler 三個 watcher。
+這會起八個服務：Postgres、ElasticMQ、一次性的 migrator、`mcp-server`、watcher、worker、continuation consumer（即 `recurring-watcher` 服務），以及 reconciler。
 
 把客戶端指向本機端點。在 trust-only 模式下，`X-User-Id` header 就是你的身分。
 
@@ -219,39 +240,61 @@ stdio 的 MCP 伺服器是對話客戶端的子行程，對話一關就停。排
 
 **提示詞 Prompts（2）：** `daily_review`、`setup_summary`。
 
-**排程功能：** 立即 (immediate)、一次性 (one-shot，`scheduled_at`) 與週期性 (recurring，`cron_expr`，含 `@daily`／`@hourly` 等簡寫) 任務；任務串接（`trigger_on_job_id` 搭配 `trigger_on_status`）；取消語意；每位使用者的速率限制與配額。
+**排程功能：** 立即 (immediate)、一次性 (one-shot，`scheduled_at`) 與週期性 (recurring，`cron_expr`，含 `@daily`／`@hourly` 等簡寫) 任務；任務串接（`trigger_on_job_id` 搭配 `trigger_on_status` 述詞——`SUCCEEDED`／`FAILED`／`ANY`），可扇出 (fan-out) 並把上游輸出往下游傳；`task.status` 會顯示串接任務的 `triggered_by` 父任務；取消語意（取消上游會停掉整條下游管線）；每位使用者的速率限制與配額。
 
 ## 範例 prompt
 
-用自然語言跟它說話。先到 `/connections` 連接 GitHub、Slack、Google；把 `<owner>/<repo>` 與頻道／email 換成你自己的。若你的客戶端改用它內建的排程器，開頭加上 **「use owl-scheduler to …」**。
+用自然語言跟它說話。先到 `/connections` 連接 GitHub、Slack、Google，再把 `<owner>/<repo>` 與頻道／email 換成你自己的。若你的客戶端改用它內建的排程器，開頭加上 **「use owl-scheduler to …」**。
 
-1. **立即（immediate）** — *「現在立刻把 `<owner>/<repo>` 的未處理 issues 和卡住的 PR 抓出來，整理成摘要給我。」*
-   練到 `immediate` + `github_digest`。驗證：約 10 秒後用 `task.status` 看到摘要。
+下面這道階梯從一行冒煙測試爬到會自己觸發的多服務管線。同樣的順序既能當**現場 demo**（每一階都接續前一階），也能當 clone 之後的第一輪導覽。
 
-2. **一次性、三服務串接（旗艦）** — *「請排定在三分鐘後，把 `<owner>/<repo>` 的現有 issues 抓取並整理，通知 Slack `#eng-updates` 頻道，成功後再寄一封 email 把整理好的內容寄給我自己。」*
-   練到 `one-shot` + 串接 `github_digest → slack_post → email_send`（資料藉 `from_run_id` + `digest_v1` 範本往下游流）。驗證：三分鐘後 Slack 出現訊息、接著收到 email；`task.list` 看到三個串接的 job。
+### 熱身——不用任何帳號
 
-3. **週期（每日 standup）** — *「每個工作日早上 9:00（台北時間），把 `<owner>/<repo>` 的未處理 issues 與卡住的 PR 整理後貼到 Slack `#standup`。」*
-   練到 `recurring`（cron） + `github_digest → slack_post`。Demo 技巧：現場可改說「每兩分鐘」看它連續觸發，再說「取消那個任務」。
+1. **探索** — *「Using owl-scheduler, 你能做哪些事？」*
+   `task.list_actions`——列出所有動作與哪些需要連線。
 
-4. **週期（每週報告）** — *「每週五下午 5:00，把 `<owner>/<repo>` 這週的 GitHub 動態整理成報告，email 給我。」*
-   練到每週 `recurring` + `github_digest → email_send`（`digest_v1`）。
+2. **Echo（冒煙測試）** — *「現在 echo 一句 'hello from owl-scheduler'。」*
+   `immediate` + `echo`。從建立 → 分派 → 結果一路打通。驗證：幾秒後 `task.status` 顯示 `completed`。
 
-5. **管理排程** — *「列出我所有排程任務」·「job `<id>` 的狀態與執行紀錄？」·「取消 job `<id>`」·「你能做哪些事？」*
-   練到 `task.list` / `task.status` / `task.cancel`（best-effort） / `task.list_actions`。
+### 單一動作
 
-6. **文字潤飾 → Slack（LLM 串接）** — *「現在立刻把這段粗略的 release note——『修好登入 bug、加了暗色模式、api 也變快了』——改寫成正式公告，再貼到 Slack `#announcements`。」*
-   練到 `immediate` + `llm_polish → slack_post`。`llm_polish` 是 operator 出錢、固定提示詞、有成本上限的改寫（你不用提供 API key）；輸出透過串接流到下游的 `slack_post`——沒有任何 MCP 介面會把 result 回傳給呼叫者。驗證：約 15 秒後 `#announcements` 出現潤飾過的訊息；`task.list` 顯示兩個串接的 job。
+3. **立即摘要** — *「現在立刻把 `<owner>/<repo>` 的未處理 issues 和卡住的 PR 抓出來，整理成摘要給我。」*（需 GitHub）
+   `immediate` + `github_digest`。唯讀，不會有東西送出去。驗證：約 10 秒後用 `task.status` 看到摘要。
 
-第 2 個是招牌：一句話變成一條會自己持續觸發、又留有稽核紀錄的 **GitHub → Slack → Gmail** 工作流程。串接也能 fan-out —— 一個上游同時餵 Slack **與** email。
+4. **LLM 潤飾 → Slack** — *「現在立刻把這段粗略的 release note——『修好登入 bug、加了暗色模式、api 也變快了』——改寫成正式公告，再貼到 Slack `#announcements`。」*（需 Slack）
+   `immediate` + `llm_polish → slack_post`。`llm_polish` 是 operator 出錢、固定提示詞、有成本上限的改寫——**不用提供 API key**。它的輸出不會經 MCP 回傳，而是透過串接流到 `slack_post`。驗證：約 15 秒後 `#announcements` 出現潤飾過的訊息；`task.status` 顯示 Slack job 的 `triggered_by` 指向潤飾 job。
+
+### 串接——招牌
+
+5. **一次性、三服務串接（旗艦）** — *「請排定在三分鐘後，把 `<owner>/<repo>` 的現有 issues 抓取並整理，通知 Slack `#eng-updates` 頻道，成功後再寄一封 email 把整理好的內容寄給我自己。」*
+   `one-shot` + 串接 `github_digest → slack_post → email_send`，資料藉 `from_run_id` + `digest_v1` 範本往下游傳。驗證：三分鐘後 Slack 出現訊息、接著收到 email；email job 的 `task.status` 顯示 `triggered_by` 指向 Slack job。
+
+6. **扇出（fan-out）** — *「請在兩分鐘後把 `<owner>/<repo>` 整理成摘要，同時貼到 Slack `#eng-updates` 並寄 email 給我。」*
+   一個上游、兩個下游，從同一筆終態事件並行建立。驗證：Slack 與 email 都會到；`task.list` 看到三個 job，其中兩個 `triggered_by` 那個摘要 job。
+
+7. **只在失敗時告警（述詞）** — *「現在跑一個 `<owner>/<repo>` 的摘要，如果失敗就 email 提醒我。」*
+   `trigger_on_status=FAILED`——只有在上游終態狀態相符時才建立下游。成功時什麼都不送（那次 miss 只留稽核、不執行）；改成 `SUCCEEDED` 或 `ANY` 可換其他策略。
+
+### 週期與管理
+
+8. **每日 standup** — *「每個工作日早上 9:00（台北時間），把 `<owner>/<repo>` 的未處理 issues 與卡住的 PR 整理後貼到 Slack `#standup`。」*
+   `recurring`（cron） + `github_digest → slack_post`。**現場 demo 技巧：** 改說「每兩分鐘」看它連續觸發，再說「取消那個任務」展示取消語意。
+
+9. **每週報告** — *「每週五下午 5:00，把 `<owner>/<repo>` 這週的 GitHub 動態整理成報告，email 給我。」*
+   每週 `recurring` + `github_digest → email_send`（`digest_v1`）。
+
+10. **管理排程** — *「列出我所有排程任務」·「job `<id>` 的狀態與執行紀錄？」·「取消 job `<id>`」*
+    `task.list` / `task.status`（含執行紀錄與 `triggered_by`） / `task.cancel`——best-effort；取消上游會停掉整條下游管線。
+
+**現場 demo 路線（約 5 分鐘）：** `1 → 2 → 4`（LLM 到 Slack，立刻有 wow）`→ 5`（旗艦串接，主秀）`→ 8` 改說「每兩分鐘」再取消。步驟 1–2 不需任何帳號，就算面試中連線出狀況也還能跑。旗艦是關鍵一擊：一句話變成一條會自己持續觸發、又留有完整稽核紀錄的 **GitHub → Slack → Gmail** 工作流程。
 
 ## 排程是怎麼運作的
 
 系統存三樣東西，把它們搞混就是大多數 bug 的來源。**`Job`** 是任務定義（跑什麼、何時跑、誰擁有）。**`JobRun`** 是這個任務的一次執行嘗試。**`RunEvent`** 是一次狀態轉換的不可變記錄。一個週期性 `Job` 隨時間會有很多 `JobRun`；一次性的則剛好一個。
 
-客戶端看到的是五個簡單狀態（`scheduled`、`running`、`completed`、`failed`、`cancelled`）。內部資料庫保留更細的八態狀態機，並在 MCP 邊界往下對應，所以精確的真相留在資料層，LLM 拿到的是它能推理的模型。
+客戶端看到的是五個簡單狀態（`scheduled`、`running`、`completed`、`failed`、`cancelled`）。內部資料庫保留更細的七態執行狀態機（`PENDING → QUEUED → RUNNING → SUCCEEDED | FAILED | RETRYING`，外加 `CANCELLED`），並在 MCP 邊界往下對應（[ADR-014](docs/adr/ADR-014-mcp-tool-surface-v1.md)），所以精確的真相留在資料層，LLM 拿到的是它能推理的模型。每個 `Job` 另外帶自己的生命週期——`active`、`completed` 或 `cancelled`——這才是每位使用者配額所計數的對象，所以已完成的任務不再佔用你的活躍任務額度（[ADR-068](docs/adr/ADR-068-job-state-machine-replaces-active-boolean.md)）。
 
-串接與週期性共用同一條規則：執行的建立只有單一擁有者，也就是 **RunMaterializer**。把下游任務「上膛 (arm)」這件事，發生在建立執行的同一個交易裡，所以一個串接或週期任務在建立的同時，下游一定被原子地上膛。如果上游產生執行的速度快過下游能完成的速度，重疊的那一拍會被刻意丟棄（載荷卸除）並留下稽核記錄，這保證每個任務最多只有一個執行中的執行。這修掉了一個真實的重複生成競態；推理過程在 [ADR-065](docs/adr/ADR-065-run-source-dichotomy-and-run-materializer.md) 與 [CONTEXT.md](CONTEXT.md)。
+串接與週期性共用同一條規則：後續執行只在其上游執行到達終態事件時才建立——**延續 (continuation)**，由單一消費者依事件順序讀 outbox 驅動。exactly-once 是資料層保證：一筆被重新投遞的事件若重試建立，會撞上 Postgres 唯一索引而成為 no-op，所以不需要分散式鎖。如果上游終結的速度快過下游能完成的速度，重疊的那一拍會被刻意略過（載荷卸除）並留下稽核記錄，這保證每個任務最多只有一個執行中的執行。這取代了先前預先上膛的 `WAITING` / `ChainWatcher` 設計以及它帶的重複生成競態；推理過程在 [ADR-067](docs/adr/ADR-067-continuation-chaining-replaces-pre-armed-waiting-runs.md) 與 [CONTEXT.md](CONTEXT.md)。
 
 ## 安全模型
 
@@ -293,10 +336,10 @@ uv run ruff check . && uv run ruff format --check .
 | 主題 | ADR |
 |---|---|
 | 傳輸與資料模型 | [006](docs/adr/ADR-006-mcp-transport-dual-stdio-http.md) 雙模 stdio／HTTP、[009](docs/adr/ADR-009-database-schema-outbox.md) outbox schema、[007](docs/adr/ADR-007-watcher-ha-skip-locked.md) SKIP LOCKED watcher |
-| 動作與串接 | [013](docs/adr/ADR-013-action-catalog-typed-registry.md) 型別化登錄表、[033](docs/adr/ADR-033-inter-handler-data-flow-via-job-run-result.md) 跨處理器資料面、[065](docs/adr/ADR-065-run-source-dichotomy-and-run-materializer.md) RunMaterializer |
+| 動作與串接 | [013](docs/adr/ADR-013-action-catalog-typed-registry.md) 型別化登錄表、[033](docs/adr/ADR-033-inter-handler-data-flow-via-job-run-result.md) 跨處理器資料面、[067](docs/adr/ADR-067-continuation-chaining-replaces-pre-armed-waiting-runs.md) 延續串接、[068](docs/adr/ADR-068-job-state-machine-replaces-active-boolean.md) Job.state 生命週期 |
 | 公開認證與密鑰 | [049](docs/adr/ADR-049-public-product-multi-tenant-oauth-delegation.md) 多租戶部署、[053](docs/adr/ADR-053-layer1-authorization-server-workos-authkit.md) WorkOS、[054](docs/adr/ADR-054-layer2-token-storage-aws-kms-envelope-encryption.md) KMS 權杖、[050](docs/adr/ADR-050-dual-credential-model-oauth-vs-operator-env.md)／[051](docs/adr/ADR-051-action-surface-tiering-public-oauth-vs-operator-only.md) 憑證分層 |
 | 成本與韌性 | [055](docs/adr/ADR-055-public-abuse-cost-containment-posture.md) 配額、[057](docs/adr/ADR-057-overload-protection-load-shedding-concurrency.md) 過載保護、[056](docs/adr/ADR-056-observability-structured-json-logging-better-stack.md) 結構化日誌、[031](docs/adr/ADR-031-monitoring-better-stack-over-uptimerobot.md) 外部監控 |
 
 ## 現況
 
-線上實例已上線且為多租戶：OAuth 登入、每位使用者的連線、上面那八個動作、週期排程與串接，都在生產環境運作中。延後到後續版本的有：fan-in（一個任務讀多個上游）、更高層的 plan 抽象，以及讓 worker 自己當 MCP 客戶端（[ADR-038](docs/adr/ADR-038-mcp-call-as-future-direction.md) 到 [ADR-040](docs/adr/ADR-040-predicate-based-chain-as-future-direction.md)）。issue 與討論：[github.com/PaynePew/task_scheduler_mcp/issues](https://github.com/PaynePew/task_scheduler_mcp/issues)。
+線上實例已上線且為多租戶：OAuth 登入、每位使用者的連線、上面那六個動作、週期排程與延續串接，都在生產環境運作中。延後到後續版本的有：fan-in（一個任務讀多個上游）、更高層的 plan 抽象，以及讓 worker 自己當 MCP 客戶端（[ADR-038](docs/adr/ADR-038-mcp-call-as-future-direction.md) 到 [ADR-040](docs/adr/ADR-040-predicate-based-chain-as-future-direction.md)）。issue 與討論：[github.com/PaynePew/task_scheduler_mcp/issues](https://github.com/PaynePew/task_scheduler_mcp/issues)。

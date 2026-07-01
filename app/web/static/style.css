@@ -463,6 +463,22 @@ a:hover { text-decoration: underline; text-underline-offset: 3px; }
   gap: 10px;
 }
 
+/* ---------- architecture pipeline ---------- */
+.pipeline {
+  margin-top: 30px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 10px;
+}
+.pipeline .chip { font-family: var(--font-mono); font-size: 0.82rem; }
+.pipe-arrow {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  color: var(--accent);
+  opacity: .75;
+}
+
 /* ---------- footer ---------- */
 .site-footer {
   border-top: 1px solid var(--line);
