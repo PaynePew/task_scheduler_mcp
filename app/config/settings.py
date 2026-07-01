@@ -57,6 +57,17 @@ class Settings(BaseSettings):
     # QUEUED grace: VisibilityTimeout(60s) * 2 + slack(30s) = 150s.
     reconciler_dlq_grace_seconds: int = 300
     reconciler_queued_grace_seconds: int = 150
+    # RUNNING-orphan grace for reconciler Sweep C (issue #271 / PRD #266): a
+    # RUNNING row whose DB-side heartbeat lease (job_runs.heartbeat_at) is older
+    # than this is treated as a dead-worker orphan and recovered. It MUST exceed
+    # a live worker's worst-case lease staleness so a slow-but-alive long-running
+    # action is never swept. That floor is
+    #   heartbeat_interval(30s, executor.HEARTBEAT_INTERVAL_SECONDS)
+    #     + visibility(60s, the worker's per-receive VisibilityTimeout) = 90s.
+    # We use 180s (2x the floor): tolerates a couple of missed heartbeat bumps
+    # (a transient DB write failure leaves the lease stale until the next tick)
+    # plus SQS redelivery jitter, keeping the reconciler the last responder.
+    reconciler_running_grace_seconds: int = 180
     # Reconciler tick interval: how long the loop sleeps between sweeps (#270).
     reconciler_interval_seconds: float = 60.0
 
