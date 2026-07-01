@@ -71,18 +71,12 @@ def _make_session_begin():
     return _begin
 
 
-def _mock_job(job_id=1, user_id="u1"):
+def _mock_job(job_id=1, user_id="u1", state="active"):
     job = MagicMock()
     job.job_id = job_id
     job.user_id = user_id
+    job.state = state
     return job
-
-
-def _mock_run(run_id=10, status="RUNNING"):
-    run = MagicMock()
-    run.run_id = run_id
-    run.status = status
-    return run
 
 
 def _mock_cte_row(max_depth=1, has_cycle=False):
@@ -129,69 +123,49 @@ async def test_v2_cross_user_returns_not_found_not_403():
 
 
 # ---------------------------------------------------------------------------
-# V3: trigger job is fully terminated → ChainJobTerminatedError
+# V3: trigger job's Job.state is terminal → ChainJobTerminatedError (ADR-068).
+#     Keys on Job.state, NOT on the presence of a non-terminal run — continuation
+#     (ADR-067) leaves a not-yet-fired chained trigger with zero runs.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_v3_trigger_job_fully_terminated_raises():
-    trigger_job = _mock_job(user_id="u1")
-    terminal_run = _mock_run(status="SUCCEEDED")
-
-    job_result = MagicMock()
-    job_result.scalar_one_or_none.return_value = trigger_job
-
-    runs_result = MagicMock()
-    runs_result.scalars.return_value.all.return_value = [terminal_run]
-
-    session = AsyncMock()
-    session.execute = AsyncMock(side_effect=[job_result, runs_result])
-
-    with pytest.raises(ChainJobTerminatedError):
-        await validate_chain(session, user_id="u1", trigger_on_job_id=1)
-
-
-@pytest.mark.asyncio
-async def test_v3_all_terminal_statuses_raise():
-    """Each terminal status individually makes the job fully terminated."""
-    for terminal in ("SUCCEEDED", "FAILED", "CANCELLED"):
-        trigger_job = _mock_job(user_id="u1")
-        terminal_run = _mock_run(status=terminal)
+async def test_v3_terminal_state_raises():
+    """A trigger whose Job.state is completed/cancelled is rejected — it can never
+    emit another terminal event, so chaining on it would wait forever."""
+    for terminal_state in ("completed", "cancelled"):
+        trigger_job = _mock_job(user_id="u1", state=terminal_state)
 
         job_result = MagicMock()
         job_result.scalar_one_or_none.return_value = trigger_job
 
-        runs_result = MagicMock()
-        runs_result.scalars.return_value.all.return_value = [terminal_run]
-
         session = AsyncMock()
-        session.execute = AsyncMock(side_effect=[job_result, runs_result])
+        session.execute = AsyncMock(side_effect=[job_result])
 
         with pytest.raises(ChainJobTerminatedError):
             await validate_chain(session, user_id="u1", trigger_on_job_id=1)
 
 
 @pytest.mark.asyncio
-async def test_v3_non_terminal_run_passes():
-    """A RUNNING upstream run passes V3 and returns that run."""
-    trigger_job = _mock_job(user_id="u1")
-    active_run = _mock_run(status="RUNNING")
+async def test_v3_active_trigger_with_no_runs_passes():
+    """Regression: an ACTIVE chained trigger with ZERO runs (continuation, no
+    pre-armed WAITING run) must pass V3 — this is exactly what makes 3+-hop chains
+    (github_digest → slack_post → email_send) creatable. The old run-scan rejected
+    it as 'fully terminated'. validate_chain now returns None (nothing to pre-arm)."""
+    trigger_job = _mock_job(user_id="u1", state="active")
 
     job_result = MagicMock()
     job_result.scalar_one_or_none.return_value = trigger_job
 
-    runs_result = MagicMock()
-    runs_result.scalars.return_value.all.return_value = [active_run]
-
-    # CTE result: depth=1, no cycle — passes V4/V5
+    # CTE result: depth=1, no cycle — passes V4/V5. No run scan happens anymore.
     cte_result = MagicMock()
     cte_result.one.return_value = _mock_cte_row(max_depth=1, has_cycle=False)
 
     session = AsyncMock()
-    session.execute = AsyncMock(side_effect=[job_result, runs_result, cte_result])
+    session.execute = AsyncMock(side_effect=[job_result, cte_result])
 
     result = await validate_chain(session, user_id="u1", trigger_on_job_id=1)
-    assert result is active_run
+    assert result is None
 
 
 # ---------------------------------------------------------------------------
@@ -202,20 +176,16 @@ async def test_v3_non_terminal_run_passes():
 @pytest.mark.asyncio
 async def test_v4_cycle_detected_raises():
     trigger_job = _mock_job(user_id="u1")
-    active_run = _mock_run(status="RUNNING")
 
     job_result = MagicMock()
     job_result.scalar_one_or_none.return_value = trigger_job
-
-    runs_result = MagicMock()
-    runs_result.scalars.return_value.all.return_value = [active_run]
 
     # CTE signals a cycle
     cte_result = MagicMock()
     cte_result.one.return_value = _mock_cte_row(max_depth=3, has_cycle=True)
 
     session = AsyncMock()
-    session.execute = AsyncMock(side_effect=[job_result, runs_result, cte_result])
+    session.execute = AsyncMock(side_effect=[job_result, cte_result])
 
     with pytest.raises(ChainCycleError):
         await validate_chain(session, user_id="u1", trigger_on_job_id=1)
@@ -230,20 +200,16 @@ async def test_v4_cycle_detected_raises():
 async def test_v5_depth_exactly_10_raises():
     """If the trigger job's ancestor chain is already 10 deep, adding 1 more exceeds the limit."""
     trigger_job = _mock_job(user_id="u1")
-    active_run = _mock_run(status="RUNNING")
 
     job_result = MagicMock()
     job_result.scalar_one_or_none.return_value = trigger_job
-
-    runs_result = MagicMock()
-    runs_result.scalars.return_value.all.return_value = [active_run]
 
     # CTE returns max_depth=10, no cycle → adding new job makes 11
     cte_result = MagicMock()
     cte_result.one.return_value = _mock_cte_row(max_depth=10, has_cycle=False)
 
     session = AsyncMock()
-    session.execute = AsyncMock(side_effect=[job_result, runs_result, cte_result])
+    session.execute = AsyncMock(side_effect=[job_result, cte_result])
 
     with pytest.raises(ChainDepthError):
         await validate_chain(session, user_id="u1", trigger_on_job_id=1)
@@ -253,42 +219,34 @@ async def test_v5_depth_exactly_10_raises():
 async def test_v5_depth_9_passes():
     """Ancestor chain of depth 9 allows one more job (total = 10 ≤ limit)."""
     trigger_job = _mock_job(user_id="u1")
-    active_run = _mock_run(status="RUNNING")
 
     job_result = MagicMock()
     job_result.scalar_one_or_none.return_value = trigger_job
-
-    runs_result = MagicMock()
-    runs_result.scalars.return_value.all.return_value = [active_run]
 
     # CTE returns max_depth=9 — total with new job = 10, which is ≤ 10
     cte_result = MagicMock()
     cte_result.one.return_value = _mock_cte_row(max_depth=9, has_cycle=False)
 
     session = AsyncMock()
-    session.execute = AsyncMock(side_effect=[job_result, runs_result, cte_result])
+    session.execute = AsyncMock(side_effect=[job_result, cte_result])
 
     result = await validate_chain(session, user_id="u1", trigger_on_job_id=1)
-    assert result is active_run
+    assert result is None
 
 
 @pytest.mark.asyncio
 async def test_v5_depth_11_raises():
     """Ancestor chain exceeding 10 is rejected."""
     trigger_job = _mock_job(user_id="u1")
-    active_run = _mock_run(status="RUNNING")
 
     job_result = MagicMock()
     job_result.scalar_one_or_none.return_value = trigger_job
-
-    runs_result = MagicMock()
-    runs_result.scalars.return_value.all.return_value = [active_run]
 
     cte_result = MagicMock()
     cte_result.one.return_value = _mock_cte_row(max_depth=11, has_cycle=False)
 
     session = AsyncMock()
-    session.execute = AsyncMock(side_effect=[job_result, runs_result, cte_result])
+    session.execute = AsyncMock(side_effect=[job_result, cte_result])
 
     with pytest.raises(ChainDepthError):
         await validate_chain(session, user_id="u1", trigger_on_job_id=1)

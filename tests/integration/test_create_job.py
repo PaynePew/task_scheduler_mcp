@@ -324,7 +324,12 @@ async def test_chain_v2_cross_user_is_not_found(session_factory):
 
 @pytest.mark.integration
 async def test_chain_v3_terminated_trigger_job_is_rejected(session_factory):
-    """V3: chaining on a fully-terminated trigger job raises ChainJobTerminatedError."""
+    """V3: chaining on a fully-terminated trigger job raises ChainJobTerminatedError.
+
+    "Fully terminated" is a terminal Job.state (completed/cancelled, ADR-068) — a
+    job that will never emit another terminal event. It is NOT merely "the run
+    finished": an active job with a terminal run is still chainable.
+    """
     # Create trigger job for user-A and manually mark its run SUCCEEDED
     async with session_factory() as session:
         trigger_job = await create_job(
@@ -335,11 +340,15 @@ async def test_chain_v3_terminated_trigger_job_is_rejected(session_factory):
             schedule_type="immediate",
         )
 
-    # Force the run to SUCCEEDED status
+    # Force the run to SUCCEEDED and settle the job's lifecycle to completed
+    # (ADR-068): V3 keys on Job.state, not on run status.
     async with session_factory() as session:
         async with session.begin():
             await session.execute(
                 update(JobRun).where(JobRun.job_id == trigger_job.job_id).values(status="SUCCEEDED")
+            )
+            await session.execute(
+                update(Job).where(Job.job_id == trigger_job.job_id).values(state="completed")
             )
 
     # Attempt to chain on the now-terminated job
@@ -401,6 +410,74 @@ async def test_chain_creates_no_run_until_upstream_terminates(session_factory):
         "a chained job must have no pre-armed run — continuation creates it on the "
         f"upstream terminal event, got {[(r.run_id, r.status) for r in downstream_runs]}"
     )
+
+
+@pytest.mark.integration
+async def test_three_hop_chain_creates_via_create_job(session_factory):
+    """Regression: a 3-hop chain A → B → C must be creatable through create_job.
+
+    C chains on B, which is itself a chained job with ZERO runs under continuation
+    (ADR-067, no pre-armed WAITING run). The old V3 scanned for a non-terminal run
+    on B, found none, and rejected C as 'trigger already fully terminated' — which
+    broke the flagship demo (github_digest → slack_post → email_send). V3 now keys
+    on Job.state ('active' ⇒ chainable), so all three hops create cleanly.
+    """
+    future = (datetime.now(tz=UTC) + timedelta(hours=1)).isoformat()
+    user = "three-hop-user"
+
+    async with session_factory() as session:
+        a = await create_job(
+            session,
+            user_id=user,
+            action="echo",
+            action_params={"message": "A"},
+            schedule_type="immediate",
+        )
+    async with session_factory() as session:
+        b = await create_job(
+            session,
+            user_id=user,
+            action="echo",
+            action_params={"message": "B"},
+            schedule_type="one-shot",
+            scheduled_at=future,
+            trigger_on_job_id=a.job_id,
+            trigger_on_status="SUCCEEDED",
+        )
+    # The load-bearing hop: chaining C onto B while B is active with no runs.
+    async with session_factory() as session:
+        c = await create_job(
+            session,
+            user_id=user,
+            action="echo",
+            action_params={"message": "C"},
+            schedule_type="one-shot",
+            scheduled_at=future,
+            trigger_on_job_id=b.job_id,
+            trigger_on_status="SUCCEEDED",
+        )
+
+    # All three jobs exist and are wired A → B → C; only A has a run (the chained
+    # B and C are runless until continuation materialises them).
+    async with session_factory() as session:
+        jobs = {
+            j.job_id: j
+            for j in (
+                await session.execute(
+                    select(Job).where(Job.job_id.in_([a.job_id, b.job_id, c.job_id]))
+                )
+            ).scalars()
+        }
+        b_runs = (
+            (await session.execute(select(JobRun).where(JobRun.job_id == b.job_id))).scalars().all()
+        )
+        c_runs = (
+            (await session.execute(select(JobRun).where(JobRun.job_id == c.job_id))).scalars().all()
+        )
+
+    assert jobs[b.job_id].trigger_on_job_id == a.job_id
+    assert jobs[c.job_id].trigger_on_job_id == b.job_id
+    assert b_runs == [] and c_runs == [], "chained hops stay runless until continuation fires"
 
 
 # ---------------------------------------------------------------------------
