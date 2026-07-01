@@ -219,6 +219,103 @@ async def test_reconcile_b_queued_past_grace_reenqueued(session_factory, sqs):
 
 
 # ---------------------------------------------------------------------------
+# Test D — Sweep B scheduled_at guard: future-scheduled QUEUED rows are left alone
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+async def test_reconcile_b_future_scheduled_queued_not_reenqueued(session_factory, sqs):
+    """QUEUED row with stale updated_at but a FUTURE scheduled_at is left alone.
+
+    The Watcher legitimately queues a run up to `lookahead window` (5 min) ahead
+    of scheduled_at with an SQS DelaySeconds, so it can sit QUEUED for minutes
+    with no worker activity. Sweep B must not treat that healthy wait as stuck.
+    """
+    job = await _insert_job(session_factory)
+    old_updated_at = datetime.now(tz=UTC) - timedelta(seconds=600)
+    future_scheduled_at = datetime.now(tz=UTC) + timedelta(minutes=3)
+    run = await _insert_run(
+        session_factory,
+        job,
+        status="QUEUED",
+        updated_at=old_updated_at,
+        scheduled_at=future_scheduled_at,
+    )
+
+    a, b = await reconcile_once(session_factory, sqs, dlq_grace=TINY_GRACE, queued_grace=TINY_GRACE)
+
+    assert a == 0
+    assert b == 0, "a future-scheduled QUEUED row must not be re-enqueued early"
+
+    # No SQS message should have been sent
+    msgs = sqs.receive_messages(max_messages=10, wait_seconds=0)
+    assert msgs == [], "no SQS messages should have been sent for a future-scheduled row"
+
+    async with session_factory() as session:
+        async with session.begin():
+            updated = (
+                await session.execute(select(JobRun).where(JobRun.run_id == run.run_id))
+            ).scalar_one()
+            events = (
+                (
+                    await session.execute(
+                        select(RunEvent).where(
+                            RunEvent.run_id == run.run_id, RunEvent.event_type == "REENQUEUED"
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+
+    assert updated.status == "QUEUED"
+    # updated_at must remain untouched — the row was never even considered.
+    assert updated.updated_at == old_updated_at
+    assert events == []
+
+
+@pytest.mark.integration
+async def test_reconcile_b_past_due_queued_still_reenqueued(session_factory, sqs):
+    """A genuinely stuck (past-due, watcher-send-failed) QUEUED row is still re-enqueued.
+
+    Regression guard for the scheduled_at guard: it must not swallow the
+    original Sweep B behavior for past-due rows.
+    """
+    job = await _insert_job(session_factory)
+    old_ts = datetime.now(tz=UTC) - timedelta(seconds=600)
+    past_scheduled_at = datetime.now(tz=UTC) - timedelta(seconds=60)
+    run = await _insert_run(
+        session_factory,
+        job,
+        status="QUEUED",
+        updated_at=old_ts,
+        scheduled_at=past_scheduled_at,
+    )
+
+    a, b = await reconcile_once(session_factory, sqs, dlq_grace=TINY_GRACE, queued_grace=TINY_GRACE)
+
+    assert a == 0
+    assert b == 1, "a past-due stuck QUEUED row must still be re-enqueued"
+
+    msgs = sqs.receive_messages(max_messages=10, wait_seconds=0)
+    assert len(msgs) == 1
+    body = json.loads(msgs[0]["Body"])
+    assert body["run_id"] == run.run_id
+    # Delete so the message doesn't linger invisible and reappear in a later
+    # test once its visibility timeout expires (cross-test contamination).
+    sqs.delete_message(msgs[0]["ReceiptHandle"])
+
+    async with session_factory() as session:
+        async with session.begin():
+            updated = (
+                await session.execute(select(JobRun).where(JobRun.run_id == run.run_id))
+            ).scalar_one()
+
+    assert updated.status == "QUEUED"
+    assert updated.updated_at > old_ts
+
+
+# ---------------------------------------------------------------------------
 # Test C — no false positives: fresh rows inside the grace window are not touched
 # ---------------------------------------------------------------------------
 
