@@ -21,8 +21,12 @@ Exactly-once is a data-layer guarantee (ADR-067 §4): a redelivered terminal eve
 that retries a creation hits a unique index and is a no-op. The ``processed_by``
 cursor stays only as an efficiency layer (skip already-handled events).
 
-The legacy ``ChainWatcher`` remains deployed but idle — no ``WAITING`` run is
-produced any more for it to flip; its removal is the next slice.
+Per terminal event this consumer also drives the trigger-driven ``Job.state``
+settle (ADR-068 §2): after materialising, it runs ``settle_check`` on the event's
+own job (a chained job whose last run just terminated) and on each downstream job
+(a not-yet-run downstream whose parent is now terminal), which cascades along the
+chain. ``ChainWatcher`` — the old ``WAITING → PENDING/CANCELLED`` flipper — is
+gone; continuation replaced it.
 """
 
 from __future__ import annotations
@@ -36,6 +40,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db.models import Job, JobRun, RunEvent
+from app.domain.jobs import settle_check
 from app.domain.run_materializer import (
     ConcurrencyError,
     materialize_downstream,
@@ -123,21 +128,25 @@ async def _materialize_downstreams(
     session: AsyncSession,
     *,
     event: RunEvent,
-) -> None:
+) -> list[Job]:
     """Create one trigger-driven downstream run per matching downstream job.
 
-    For each active downstream (``trigger_on_job_id == event.job_id``,
-    ``cancelled_at IS NULL``):
+    For each **active** downstream (``trigger_on_job_id == event.job_id`` and
+    ``state = 'active'`` — a ``completed``/``cancelled`` downstream is exhausted and
+    never gets a new run, which is how a cancelled upstream stops its downstreams,
+    ADR-068 §2):
     - predicate miss → no run + ``CHAIN_SKIPPED_PREDICATE_MISS`` audit event;
     - slow consumer (downstream already executing) → skip + ``CHAIN_SKIPPED_SLOW_CONSUMER``;
     - redelivered duplicate (unique index) → no-op.
+
+    Returns the matched active downstream jobs so the caller can settle-check them.
     """
     downstream_jobs = (
         (
             await session.execute(
                 select(Job).where(
                     Job.trigger_on_job_id == event.job_id,
-                    Job.cancelled_at.is_(None),
+                    Job.state == "active",
                 )
             )
         )
@@ -203,6 +212,8 @@ async def _materialize_downstreams(
                 event.run_id,
             )
 
+    return list(downstream_jobs)
+
 
 async def poll_once(
     session_factory: async_sessionmaker[AsyncSession],
@@ -252,8 +263,24 @@ async def poll_once(
                         session, event=event, upstream_job=upstream_job
                     )
 
-                # (b) Trigger-driven downstreams — for any upstream job type.
-                await _materialize_downstreams(session, event=event)
+                # (b) Trigger-driven downstreams — for any upstream job type,
+                # EXCEPT a cancelled upstream: cancelling a job stops its downstreams
+                # (ADR-068 §2), which the cancel cascade already settled. Never fire a
+                # downstream off a cancellation, even with trigger_on_status=ANY — a
+                # CANCELLED run only ever comes from a job cancel, which means "stop".
+                downstream_jobs: list[Job] = []
+                if upstream_job is None or upstream_job.state != "cancelled":
+                    downstream_jobs = await _materialize_downstreams(session, event=event)
+
+                # (c) Job.state settle (ADR-068 §2), AFTER materialisation so a
+                # downstream that just got a run is seen as resident load (not
+                # settled). settle_check on the event's own job settles a chained
+                # job whose last run terminated; settle_check on each downstream
+                # settles a not-yet-run downstream whose parent is now terminal
+                # (a predicate miss). Each cascades onward.
+                await settle_check(session, job_id=event.job_id)
+                for downstream in downstream_jobs:
+                    await settle_check(session, job_id=downstream.job_id)
 
                 # Stamp the cursor so this event is never reprocessed on restart.
                 new_pb = dict(event.processed_by)

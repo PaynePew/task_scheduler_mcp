@@ -1,4 +1,4 @@
-"""Unit tests for app/mcp/status_mapping — all 8 internal inputs."""
+"""Unit tests for app/mcp/status_mapping — all 7 internal inputs."""
 
 from __future__ import annotations
 
@@ -12,7 +12,6 @@ from app.mcp.status_mapping import to_external
     [
         ("PENDING", "scheduled"),
         ("QUEUED", "scheduled"),
-        ("WAITING", "scheduled"),
         ("RUNNING", "running"),
         ("RETRYING", "running"),
         ("SUCCEEDED", "completed"),
@@ -20,10 +19,16 @@ from app.mcp.status_mapping import to_external
         ("CANCELLED", "cancelled"),
     ],
 )
-def test_to_external_all_8_inputs(internal: str, expected: str) -> None:
+def test_to_external_all_7_inputs(internal: str, expected: str) -> None:
     assert to_external(internal) == expected
 
 
 def test_to_external_unknown_raises_value_error() -> None:
     with pytest.raises(ValueError, match="Unknown internal status"):
         to_external("BOGUS")
+
+
+def test_to_external_waiting_is_removed() -> None:
+    """WAITING was dropped from the 7-state machine (ADR-067) — it is now unknown."""
+    with pytest.raises(ValueError, match="Unknown internal status"):
+        to_external("WAITING")

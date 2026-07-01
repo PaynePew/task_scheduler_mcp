@@ -420,8 +420,7 @@ services = [
     ("mcp-server", "(HTTP + stdio MCP)"),
     ("watcher", "(SKIP LOCKED poll)"),
     ("worker", "(SQS consumer)"),
-    ("recurring_watcher", ""),
-    ("chain_watcher", ""),
+    ("recurring_watcher", "(continuation consumer)"),
 ]
 for i, (name, hint) in enumerate(services):
     sy = service_y_start + i * service_gap

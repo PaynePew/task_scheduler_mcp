@@ -60,8 +60,9 @@ from app.db.models import Job, JobRun, RunEvent
 logger = logging.getLogger(__name__)
 
 # Executing statuses: a job may have at most one run in any of these at a time
-# (ADR-065 §4). WAITING is deliberately excluded — it is a legacy status no longer
-# produced under the continuation model (ADR-067) and never counts as executing.
+# (ADR-065 §4). These are exactly the non-terminal run statuses under the
+# continuation model (ADR-067) — the "resident load" set shared by the
+# forbid-concurrency check, the slow-consumer skip, and the Job.state settle.
 _EXECUTING = frozenset({"PENDING", "QUEUED", "RUNNING", "RETRYING"})
 
 

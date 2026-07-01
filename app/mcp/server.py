@@ -213,9 +213,9 @@ _TASK_CREATE_SCHEMA: dict[str, Any] = {
             "type": ["integer", "null"],
             "default": None,
             "description": (
-                "Job ID to chain on. When set, this job's first run starts in WAITING "
-                "status and flips to PENDING (or CANCELLED) when the referenced job "
-                "produces a terminal event matching trigger_on_status."
+                "Job ID to chain on. When set, this job has no run until the "
+                "referenced job produces a terminal event matching trigger_on_status; "
+                "that event creates this job's first run (continuation)."
             ),
         },
         "trigger_on_status": {

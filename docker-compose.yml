@@ -76,15 +76,6 @@ services:
       migrate:
         condition: service_completed_successfully
 
-  chain-watcher:
-    build: .
-    profiles: ["full"]
-    command: ["python", "-m", "app.entrypoints.chain_watcher"]
-    env_file: .env.docker
-    depends_on:
-      migrate:
-        condition: service_completed_successfully
-
   reconciler:
     build: .
     profiles: ["full"]

@@ -165,7 +165,7 @@ async def test_total_reflects_filtered_count(session_factory) -> None:
 
 @pytest.mark.integration
 async def test_status_filter_scheduled(session_factory) -> None:
-    """status=scheduled returns only jobs whose latest run is PENDING/QUEUED/WAITING."""
+    """status=scheduled returns only jobs whose latest run is PENDING/QUEUED."""
     pending_job = await _make_job(session_factory, user_id="filter-user")
     succeeded_job = await _make_job(session_factory, user_id="filter-user")
     await _force_run_status(session_factory, succeeded_job.job_id, "SUCCEEDED")

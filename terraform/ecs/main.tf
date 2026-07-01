@@ -21,10 +21,6 @@ locals {
       command       = ["python", "-m", "app.entrypoints.recurring_watcher"]
       desired_count = 1
     }
-    chain-watcher = {
-      command       = ["python", "-m", "app.entrypoints.chain_watcher"]
-      desired_count = 1
-    }
   }
 
   # Common environment variables (non-sensitive) passed to every container.

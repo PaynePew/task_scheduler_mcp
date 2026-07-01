@@ -230,7 +230,7 @@ def run_l4b(client: httpx.Client, rpc_offset: int) -> tuple[bool, str]:
         _cancel_quietly(client, rpc_offset + 6, job_b, step="B5", label="B")
         hint = ""
         if status_b_val != "completed" and status_a_val == "completed":
-            hint = " B did not complete after A — check 'docker compose logs chain_watcher'."
+            hint = " B did not complete after A — check 'docker compose logs recurring-watcher'."
         elif status_a_val != "completed":
             hint = " A did not complete — check 'docker compose logs watcher worker'."
         return False, (

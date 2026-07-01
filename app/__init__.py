@@ -5,13 +5,13 @@ New here? Read these first, in order:
   2. ``docs/PRD/prototype-w1.md`` — the W1 scope.
   3. ``docs/adr/`` — one ADR per architectural decision, numbered.
 
-Process map (six entrypoints, one image — see ADR-010 / CONTEXT.md §4):
+Process map (five entrypoints, one image — see ADR-010 / CONTEXT.md §4):
 
     mcp-server   handles MCP tool calls (stdio or HTTP)
     watcher      claims due ``PENDING`` runs → SQS    (multi-instance, FOR UPDATE SKIP LOCKED)
     worker       pulls SQS → dispatches Action handler
-    recurring    spawns next ``JobRun`` from terminal events  (W2 logic; skeleton only)
-    chain        flips ``WAITING`` → ``PENDING`` from terminal events  (W2 logic; skeleton only)
+    recurring    the continuation consumer: materialises the recurring successor
+                 AND each chained downstream from terminal ``run_events`` (ADR-067)
     migrate      one-shot: ``alembic upgrade head`` before services start
 
 Package map:

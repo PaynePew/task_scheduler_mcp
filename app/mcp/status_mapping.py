@@ -9,7 +9,6 @@ from __future__ import annotations
 _MAPPING: dict[str, str] = {
     "PENDING": "scheduled",
     "QUEUED": "scheduled",
-    "WAITING": "scheduled",
     "RUNNING": "running",
     "RETRYING": "running",
     "SUCCEEDED": "completed",
@@ -18,7 +17,7 @@ _MAPPING: dict[str, str] = {
 }
 
 _REVERSE_MAPPING: dict[str, frozenset[str]] = {
-    "scheduled": frozenset({"PENDING", "QUEUED", "WAITING"}),
+    "scheduled": frozenset({"PENDING", "QUEUED"}),
     "running": frozenset({"RUNNING", "RETRYING"}),
     "completed": frozenset({"SUCCEEDED"}),
     "failed": frozenset({"FAILED"}),
@@ -27,7 +26,7 @@ _REVERSE_MAPPING: dict[str, frozenset[str]] = {
 
 
 def to_external(internal_status: str) -> str:
-    """Map one of the 8 internal statuses to one of the 5 external statuses."""
+    """Map one of the 7 internal statuses to one of the 5 external statuses."""
     try:
         return _MAPPING[internal_status]
     except KeyError:
