@@ -55,7 +55,8 @@ class Job(Base):
     # fields must be set for each type.
     job_type: Mapped[str] = mapped_column(Text, nullable=False, server_default="one_shot")
     scheduled_at: Mapped[datetime | None] = mapped_column(TZ, nullable=True)
-    # cron expansion (RecurringJobWatcher) and chain logic (ChainWatcher) land in W2.
+    # cron expansion + chaining are both driven by the continuation consumer
+    # (ADR-067) reacting to terminal run_events — see app/workers/recurring_watcher.
     cron_expr: Mapped[str | None] = mapped_column(Text, nullable=True)
     timezone: Mapped[str] = mapped_column(Text, nullable=False, server_default="UTC")
     # Set by cancel_job() the first time a cancel is requested (ADR-022).
@@ -127,7 +128,12 @@ class JobRun(Base):
     error_code: Mapped[str | None] = mapped_column(Text, nullable=True)
     retry_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     max_retries: Mapped[int] = mapped_column(Integer, nullable=False, server_default="3")
-    # W2 bonus column landed in W1 schema
+    # Trigger cause of a trigger-driven (chained) run: the upstream terminal
+    # run_id that materialised it (continuation, ADR-067). NULL for schedule-driven
+    # runs. Carries the data plane (executor injects from_run_id = wait_for_run_id,
+    # ADR-064) and keys the exactly-once index uq_job_runs_trigger_cause. Despite
+    # the historical name, nothing "waits" on it any more — the pre-arm WAITING
+    # state was removed in the continuation refactor (ADR-067).
     wait_for_run_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     start_at: Mapped[datetime | None] = mapped_column(TZ, nullable=True)
     finish_at: Mapped[datetime | None] = mapped_column(TZ, nullable=True)
@@ -146,24 +152,19 @@ class JobRun(Base):
             "idx_job_runs_due",
             "time_bucket",
             "scheduled_at",
-            postgresql_where="status IN ('PENDING', 'WAITING')",
-        ),
-        # ChainWatcher (W2) uses this to wake WAITING runs when their blocker terminates.
-        Index(
-            "idx_job_runs_wait_for",
-            "wait_for_run_id",
-            postgresql_where="wait_for_run_id IS NOT NULL AND status = 'WAITING'",
+            postgresql_where="status = 'PENDING'",
         ),
         Index("idx_job_runs_by_job", "job_id"),
         # Forbid-concurrency invariant (ADR-016 addendum): at most one non-terminal
         # run per (job_id, scheduled_at). Partial — only covers live rows so the
-        # index stays small as completed runs accumulate.
+        # index stays small as completed runs accumulate. WAITING was dropped with
+        # the pre-arm control plane (ADR-067; migration 0012).
         Index(
             "uq_job_runs_job_scheduled_nonterminal",
             "job_id",
             "scheduled_at",
             unique=True,
-            postgresql_where="status IN ('PENDING','QUEUED','WAITING','RUNNING','RETRYING')",
+            postgresql_where="status IN ('PENDING','QUEUED','RUNNING','RETRYING')",
         ),
         # Exactly-once run creation keyed on the run's *cause* (ADR-067 §4). A
         # redelivered terminal event cannot double-create the run it materialises;
@@ -214,7 +215,7 @@ class RunEvent(Base):
     processed_by: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
 
     __table_args__ = (
-        # Hot index for RecurringJobWatcher / ChainWatcher: "what terminal events
+        # Hot index for the continuation consumer: "what terminal events
         # happened recently that I haven't reacted to?"
         Index(
             "idx_run_events_recent_terminal",

@@ -25,7 +25,11 @@ from app.config.cron import next_after, validate_cron_expr
 from app.config.timezone_resolver import resolve_timezone
 from app.db.models import Job, JobRun, RunEvent
 from app.domain.chain_validation import validate_chain, validate_run_source
-from app.domain.run_materializer import materialize_initial
+from app.domain.run_materializer import (
+    _acquire_job_lock,
+    has_executing_run,
+    materialize_initial,
+)
 
 
 class UnknownActionError(Exception):
@@ -143,9 +147,10 @@ async def create_job(
 ) -> Job:
     """Insert Job + JobRun + RunEvent(CREATED) in one transaction.
 
-    When trigger_on_job_id is set, runs chain validation (V1-V5) and creates
-    the first JobRun in WAITING status with wait_for_run_id pointing at the
-    upstream's most-recent non-terminal run.
+    When trigger_on_job_id is set, runs chain validation (V1-V5) but creates NO
+    run: under continuation (ADR-067) a chained job has zero runs until its
+    upstream terminates, when the continuation consumer materializes its first
+    PENDING run.
 
     Returns the existing Job on (user_id, idempotency_key) collision.
     Raises UnknownActionError if action is not in ACTION_REGISTRY.
@@ -342,7 +347,11 @@ async def get_job_with_runs(
 
 
 # Statuses that are safe to flip to CANCELLED; RUNNING runs are left to complete.
-_CANCELLABLE_STATUSES: frozenset[str] = frozenset({"PENDING", "QUEUED", "WAITING", "RETRYING"})
+_CANCELLABLE_STATUSES: frozenset[str] = frozenset({"PENDING", "QUEUED", "RETRYING"})
+
+# Parent lifecycle states that mean the trigger will produce no further upstream
+# runs, so a chained downstream with no non-terminal run can settle (ADR-068 §2).
+_PARENT_TERMINAL_STATES: frozenset[str] = frozenset({"completed", "cancelled"})
 
 
 async def settle_job(session: AsyncSession, *, job_id: int) -> bool:
@@ -359,9 +368,11 @@ async def settle_job(session: AsyncSession, *, job_id: int) -> bool:
     the first commit wins and the loser matches zero rows; either way the job
     leaves the active count. Recurring roots (``job_type='recurring'``) stay
     ``active`` until cancelled, and trigger-driven downstreams
-    (``trigger_on_job_id`` set) are deferred to the WAITING-removal slice (#250);
-    both are excluded here, which also makes the call a safe no-op when the
-    executor settles their runs.
+    (``trigger_on_job_id`` set) are excluded here — their settle needs the
+    trigger-parent check and downstream cascade, which the continuation consumer
+    drives via ``settle_check`` (ADR-068 §2). This non-cascading self-settle is
+    the executor's prompt one-shot/immediate path; the exclusions also make it a
+    safe no-op when the executor settles a recurring/chained run.
 
     Returns True if this call performed the transition, False on a no-op (already
     terminal, recurring, or chained). Caller must be inside an open transaction.
@@ -382,6 +393,84 @@ async def settle_job(session: AsyncSession, *, job_id: int) -> bool:
         .execution_options(synchronize_session=False)
     )
     return result.first() is not None
+
+
+async def _settle_downstreams(session: AsyncSession, *, parent_job_id: int) -> None:
+    """``settle_check`` every job triggered by *parent_job_id* — the one-hop cascade.
+
+    A just-settled or just-cancelled upstream may release its not-yet-run
+    downstreams (ADR-068 §2). Shared by ``settle_check`` (post-settle) and
+    ``cancel_job`` (post-cancel). Caller must be inside an open transaction.
+    """
+    downstream_ids = (
+        (await session.execute(select(Job.job_id).where(Job.trigger_on_job_id == parent_job_id)))
+        .scalars()
+        .all()
+    )
+    for downstream_id in downstream_ids:
+        await settle_check(session, job_id=downstream_id)
+
+
+async def settle_check(session: AsyncSession, *, job_id: int) -> bool:
+    """CAS ``Job.state`` active → completed if the schedule is exhausted; cascade.
+
+    Generalises ``settle_job`` to **trigger-driven (chained)** jobs and drives the
+    one-hop parent propagation of ADR-068 §2. A job is exhausted — settled to
+    ``completed`` — when ALL of:
+
+    - it is currently ``active`` (else no-op — already terminal/cancelled);
+    - it is not a recurring root (``cron_expr`` set) — those stay ``active`` until
+      cancelled and keep producing runs;
+    - it has **no non-terminal run** (``has_executing_run`` — an in-flight run is
+      resident load and must finish first);
+    - if it is trigger-driven (``trigger_on_job_id`` set), its trigger parent is
+      terminal (``completed``/``cancelled``): an ``active`` parent may still fire
+      another upstream run, so the downstream may still get a run.
+
+    On settle, cascade ``settle_check`` to each downstream job (``trigger_on_job_id
+    == job_id``): a settled/cancelled upstream lets its not-yet-run downstreams
+    settle in turn. Chains are acyclic (validate_chain V4/V5), so the recursion
+    terminates.
+
+    Idempotent: a no-op (returns False) when the job is already terminal,
+    recurring, still has a live run, or is waiting on an ``active`` parent — so it
+    is safe to call redundantly (e.g. the executor already settled a one-shot).
+    Caller must be inside an open transaction.
+    """
+    job = (await session.execute(select(Job).where(Job.job_id == job_id))).scalar_one_or_none()
+    if job is None or job.state != "active":
+        return False
+    if job.cron_expr is not None:
+        return False  # recurring root — only cancel ends it (ADR-068 §2)
+
+    # Serialize per job before the non-terminal-run check so a concurrent
+    # materialize_downstream cannot insert a run between the check and the CAS
+    # (the has_executing_run contract, issue #237).
+    await _acquire_job_lock(session, job_id)
+    if await has_executing_run(session, job_id):
+        return False  # in-flight run is resident load — leave it to finish
+
+    if job.trigger_on_job_id is not None:
+        parent_state = (
+            await session.execute(select(Job.state).where(Job.job_id == job.trigger_on_job_id))
+        ).scalar_one_or_none()
+        # A missing parent (FK SET NULL on delete) can never fire again → settle.
+        if parent_state == "active":
+            return False  # parent still produces upstream runs
+
+    settled = await session.execute(
+        update(Job)
+        .where(Job.job_id == job_id, Job.state == "active")
+        .values(state="completed", updated_at=datetime.now(tz=UTC))
+        .returning(Job.job_id)
+        .execution_options(synchronize_session=False)
+    )
+    if settled.first() is None:
+        return False  # lost the CAS to a concurrent cancel/settle
+
+    # One-hop parent propagation: a just-settled upstream releases its downstreams.
+    await _settle_downstreams(session, parent_job_id=job_id)
+    return True
 
 
 async def _terminal_status_hint(session: AsyncSession, job_id: int) -> str:
@@ -415,8 +504,11 @@ async def cancel_job(
     - The job's lifecycle is the source of truth: cancel is a compare-and-set
       from ``state='active'``, which races safely with a one-shot's settle (first
       commit wins). ``cancelled_at`` is retained as an audit timestamp only.
-    - Pending/queued/waiting/retrying runs flip to CANCELLED so they never
-      dispatch; a RUNNING run is left to finish naturally.
+    - Pending/queued/retrying runs flip to CANCELLED so they never dispatch; a
+      RUNNING run is left to finish naturally.
+    - Cascade: a cancelled upstream stops its not-yet-run downstreams — each
+      downstream settles to ``completed`` via ``settle_check`` (ADR-068 §2), so a
+      cancelled pipeline stops end to end and frees quota.
     - Re-cancel on an already-cancelled job is idempotent (returns success).
     - INVALID_STATE when the schedule is already exhausted (``state='completed'``).
 
@@ -466,7 +558,7 @@ async def cancel_job(
                 )
             raise InvalidStateError(await _terminal_status_hint(session, job_id))
 
-        # Flip only the pending/queued/waiting/retrying runs; leave RUNNING alone.
+        # Flip only the pending/queued/retrying runs; leave RUNNING alone.
         runs = (
             (await session.execute(select(JobRun).where(JobRun.job_id == job_id))).scalars().all()
         )
@@ -489,6 +581,14 @@ async def cancel_job(
                     status_to="CANCELLED",
                 )
             )
+
+        # Cascade: a cancelled upstream will produce no more upstream runs, so its
+        # not-yet-run downstreams settle to completed (ADR-068 §2). A downstream
+        # with an in-flight run is left active by settle_check and settles when
+        # that run terminates. Same transaction as the cancel, so the continuation
+        # consumer (which skips a cancelled upstream) never re-creates a downstream
+        # run for this cancelled pipeline.
+        await _settle_downstreams(session, parent_job_id=job_id)
 
     return JobView(job_id=job.job_id, action=job.action, internal_status="CANCELLED", runs=None)
 

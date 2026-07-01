@@ -24,7 +24,6 @@ variable "services" {
     "watcher",
     "worker",
     "recurring-watcher",
-    "chain-watcher",
     "migrate",
   ]
 }

@@ -63,7 +63,7 @@ jobs:
       # recreate the app stack. Rollback (persist the tag too, so a later reboot
       # doesn't revert): echo "IMAGE_TAG=<prev_sha>" > /opt/task_scheduler_mcp/.env
       # && docker compose up -d --force-recreate --no-deps mcp-server watcher
-      # worker recurring-watcher chain-watcher on the VPS in /opt/task_scheduler_mcp.
+      # worker recurring-watcher on the VPS in /opt/task_scheduler_mcp.
       # --force-recreate is scoped to the app services: it prevents silent
       # stale-container bugs (issue #204) where docker compose up -d skips a
       # service whose image-id comparison is stale, leaving the old container
@@ -130,13 +130,13 @@ jobs:
             # re-running migrate (already done above) and keeps the issue #204
             # stale-container protection for the app containers.
             docker compose up -d --force-recreate --no-deps \
-              mcp-server watcher worker recurring-watcher chain-watcher
+              mcp-server watcher worker recurring-watcher
 
             # Log the GIT_SHA each app container actually sees so any
             # env-var override (e.g. stale GIT_SHA in .env.docker) is
             # visible in the GitHub Actions deploy log (issue #204).
             echo "=== post-deploy GIT_SHA per service ==="
-            for svc in mcp-server watcher worker recurring-watcher chain-watcher; do
+            for svc in mcp-server watcher worker recurring-watcher; do
               sha=$(docker compose exec -T "$svc" sh -c 'echo $GIT_SHA' 2>/dev/null || echo "exec-failed")
               echo "  $svc: $sha"
             done

@@ -36,11 +36,11 @@ A recurring `Job` has many `JobRun`s over time. A one-shot `Job` has exactly one
 - **`completed`** — the schedule is **exhausted**; no more runs. This is **not** "succeeded": an `immediate`/`one-shot` job settles to `completed` the moment its single `JobRun` reaches *any* terminal status (success/failure lives on `JobRun.status`). A `recurring` root is **never** auto-completed — it stays `active` until cancelled.
 - **`cancelled`** — a user explicitly stopped it (`task.cancel`); no more future runs, and any in-flight `JobRun` is left to finish (ADR-022). `cancelled_at` is retained as an audit timestamp only.
 
-The containment quota counts `state = 'active'`; `completed`/`cancelled` jobs leave the active set. The one-shot `→ completed` settle and a concurrent `→ cancelled` are both compare-and-set from `active` (first writer wins), so a one-shot whose run finishes while a cancel lands stays `cancelled` (user intent) with `JobRun.status = succeeded` (what happened). A `trigger-driven` (chained) job's activeness follows its trigger parent and `inherited recurrence` (§7); its event-driven settle arrives with the continuation refactor.
+The containment quota counts `state = 'active'`; `completed`/`cancelled` jobs leave the active set. The one-shot `→ completed` settle and a concurrent `→ cancelled` are both compare-and-set from `active` (first writer wins), so a one-shot whose run finishes while a cancel lands stays `cancelled` (user intent) with `JobRun.status = succeeded` (what happened). A `trigger-driven` (chained) job settles to `completed` when its trigger parent is terminal (`completed`/`cancelled`) **and** it has no non-terminal run — one-hop parent propagation driven by the continuation consumer (§7, ADR-068 §2); cancelling a job cascades this settle to its downstreams, so a cancelled upstream stops its not-yet-run downstreams and frees their quota.
 
 ## §2 Status lifecycle
 
-The system uses 8 internal statuses but only exposes 5 to MCP clients.
+The system uses 7 internal statuses but only exposes 5 to MCP clients.
 
 ### Internal (DB column `job_runs.status`)
 
@@ -50,15 +50,13 @@ PENDING ──▶ QUEUED ──▶ RUNNING ─┬─▶ SUCCEEDED
                                 └─▶ RETRYING ──▶ (back to QUEUED)
 
 (any non-terminal) ──▶ CANCELLED
-WAITING ──▶ PENDING    (when blocking-job terminates favourably)
-WAITING ──▶ CANCELLED  (when blocking-job terminates unfavourably)
 ```
 
 ### External (returned by `task.status.v1` / `task.list.v1`)
 
 | Internal | External |
 |---|---|
-| PENDING, QUEUED, WAITING | `scheduled` |
+| PENDING, QUEUED | `scheduled` |
 | RUNNING, RETRYING | `running` |
 | SUCCEEDED | `completed` |
 | FAILED | `failed` |
@@ -66,7 +64,7 @@ WAITING ──▶ CANCELLED  (when blocking-job terminates unfavourably)
 
 Mapping happens at the MCP handler boundary. DB keeps the precise truth; LLM gets the simple model.
 
-> **`WAITING` is legacy (ADR-067).** Under continuation run-creation (§7) no new `WAITING` run is produced — a chained downstream has zero runs until its upstream terminates, then a `PENDING` run is created directly. The status and its `WAITING → PENDING/CANCELLED` transitions remain in the machine only because `ChainWatcher` and the column still exist; both are removed in a follow-up slice.
+> **`WAITING` was removed (ADR-067).** The pre-arm control plane — a downstream run pre-created `WAITING` and flipped by `ChainWatcher` — is gone. Under continuation run-creation (§7) a chained downstream has zero runs until its upstream terminates, then a `PENDING` run is created directly. A not-yet-triggered downstream shows externally as `scheduled` with an empty `runs` list (§7), not as a `WAITING` run.
 
 ## §3 Schedule types
 
@@ -93,8 +91,7 @@ Mapping happens at the MCP handler boundary. DB keeps the precise truth; LLM get
 | **`mcp-server`** | Handles MCP tool calls (stdio or HTTP) | Stateless; scale horizontally |
 | **`Watcher`** | Scans for due `JobRun`s within the `lookahead window` (5 min), publishes to queue | Multiple instances safe via `FOR UPDATE SKIP LOCKED` (no leader election) |
 | **`Worker`** | Pulls from queue, claims via DB UPDATE, dispatches to `ActionHandler` | Multiple instances safe via `claim-and-mark` |
-| **`continuation consumer`** (the generalised `RecurringJobWatcher`) | Reads `run_events` for terminal events in `event_id` order; per event materializes the recurring successor **and** each matching trigger-driven downstream run via `RunMaterializer` (ADR-067) | Single instance for W1 |
-| **`ChainWatcher`** | Legacy `WAITING → PENDING/CANCELLED` flipper. **Idle** since ADR-067 — no new `WAITING` run is produced; still deployed, removed in a follow-up slice | Single instance for W1 |
+| **`continuation consumer`** (the generalised `RecurringJobWatcher`) | Reads `run_events` for terminal events in `event_id` order; per event materializes the recurring successor **and** each matching trigger-driven downstream run via `RunMaterializer`, then drives the trigger-driven `Job.state` settle + cascade (ADR-067 / ADR-068 §2) | Single instance for W1 |
 | **`migrate`** | One-shot; runs Alembic migrations before app services start | Compose `service_completed_successfully` |
 
 ### Key primitives
@@ -106,7 +103,7 @@ Mapping happens at the MCP handler boundary. DB keeps the precise truth; LLM get
 ### Chain-fed handlers and the inter-handler data plane
 
 - **`chain-fed handler`** — an `ActionHandler` whose `params_model` includes the optional field `from_run_id: int | None`. When `from_run_id` is non-null at execution time, the handler reads the upstream `JobRun.result` as its primary input instead of (or in addition to) its own params. See ADR-033.
-- **`inter-handler data plane`** — the column `JobRun.result` (a JSON string) is the data carrier between chained handlers. The upstream handler serializes its output into `ActionResult.result`; the downstream handler reads it via `app.chain.upstream_reader.read_upstream`. `ChainWatcher` handles status coordination (WAITING → PENDING) but never touches `result` — those are separate concerns.
+- **`inter-handler data plane`** — the column `JobRun.result` (a JSON string) is the data carrier between chained handlers. The upstream handler serializes its output into `ActionResult.result`; the downstream handler reads it via `app.chain.upstream_reader.read_upstream`. The continuation consumer creates the downstream run and stamps `wait_for_run_id` = the upstream terminal run_id; the executor injects `from_run_id = wait_for_run_id` so the handler knows which upstream result to read (ADR-064). Run *creation* and *result* are separate concerns — creation never touches `result`.
   - **`result` is internal-only.** No MCP surface exposes it to the client: `task.status.v1`, `tasks://job/{id}`, and `tasks://recent-results` (ADR-037) are all *metadata* (status, timestamps, error excerpt). `result` exists solely to feed a downstream handler. Corollary: the operator-funded LLM actions (`llm_polish` / `llm_summarize`, ADR-052) deliver value **only as chain upstreams** — a standalone run executes and stores its output, but the user cannot read it back. Documentation and demo prompts must present them as chain steps (e.g. `llm_polish → slack_post`), never as a standalone "rewrite this and show me."
 
 ## §5 Data patterns
@@ -246,7 +243,7 @@ All run creation routes through one stateless domain module (not a process), the
 
 **`continuation`** — a trigger-driven downstream run is **created when its upstream run reaches a terminal status** (ADR-067), by the single continuation consumer, in the same transaction that materializes the recurring successor. There is no pre-armed `WAITING` run and no recursive `arm`: one rule — *terminal event → materialise the next run* — governs recurrence **and** chaining. The new downstream run is `PENDING` with `wait_for_run_id` set to the upstream terminal `run_id` (the **data plane**: the executor injects `from_run_id = wait_for_run_id`, ADR-064). Creation is idempotent at the data layer — partial unique indexes on the run's cause, `(job_id, wait_for_run_id)` for trigger-driven and `(job_id, scheduled_at)` for schedule-driven successors — so a redelivered terminal event is a no-op; the `processed_by` cursor is only an efficiency layer. Terminal events are processed in `event_id` order.
 
-> The legacy `WAITING` status, `ChainWatcher` (status flip), and pre-armed `arm`/`re-arm` model (ADR-065) are **superseded by ADR-067**. After the continuation refactor no new `WAITING` run is produced and `ChainWatcher` is idle; its removal (and dropping `WAITING` from §2) is a follow-up slice.
+> The legacy `WAITING` status, `ChainWatcher` (status flip), and pre-armed `arm`/`re-arm` model (ADR-065) are **superseded by ADR-067 and removed**: `ChainWatcher` (process, worker, entrypoint, tests) is deleted, `WAITING` is dropped from the status machine (§2, migration 0012), and a chained downstream's `Job.state` settle is driven by the continuation consumer (ADR-068 §2).
 
 ### `trigger_on_status` — the create predicate
 
@@ -254,7 +251,9 @@ Applied at **create** time (ADR-067), not flip time:
 
 - `SUCCEEDED` — create the downstream run only if the upstream **succeeded**
 - `FAILED` — create only if the upstream **failed**
-- `ANY` — create on any terminal status (including `CANCELLED`)
+- `ANY` — create on `SUCCEEDED` **or** `FAILED`
+
+A **user-cancelled** upstream is the exception to `ANY`: it does **not** fire downstreams. Cancelling a job stops its whole pipeline — the cancel cascade settles the not-yet-run downstreams to `completed` (`Job.state`, ADR-068 §2) and the continuation consumer never materializes a downstream off a `CANCELLED` run. (Under continuation a `CANCELLED` run only ever comes from a job cancel, so there is nothing left for "ANY includes CANCELLED" to create.)
 
 A **predicate miss** creates no run and records a lightweight audit `RunEvent` (`CHAIN_SKIPPED_PREDICATE_MISS`) — there is no `CANCELLED_BY_CHAIN_MISS` run. Recommended **Design B**: `trigger_on_status=ANY` + downstream internal ok/error branching, so the sink always notifies (success or fallback). Do **not** create source-coupled handler classes like `slack_post_from_github_digest` — specialisation is via params, not class names (ADR-033).
 

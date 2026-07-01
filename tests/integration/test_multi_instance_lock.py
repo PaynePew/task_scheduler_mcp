@@ -29,7 +29,6 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from app.db.engine import create_async_engine
 from app.db.models import Job, JobRun, RunEvent
 from app.domain.run_materializer import ConcurrencyError, materialize_successor
-from app.workers.chain_watcher import poll_once as chain_poll_once
 from app.workers.recurring_watcher import poll_once as recurring_poll_once
 
 # ---------------------------------------------------------------------------
@@ -180,26 +179,28 @@ async def test_concurrent_spawn_attempts_produce_at_most_one_executing_run(
 
 
 # ---------------------------------------------------------------------------
-# R4-AC2: Concurrent spawn + flip cannot produce two executing runs.
+# R4-AC2: Two concurrent continuation consumers on one terminal event cannot
+# double-create the downstream (issue #237 → continuation, ADR-067).
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.integration
-async def test_concurrent_spawn_and_flip_produce_at_most_one_executing_run(
+async def test_concurrent_continuation_consumers_create_one_downstream(
     session_factory,
 ):
-    """A concurrent spawn + flip for the same downstream job cannot produce two
-    executing runs (issue #237, AC2).
+    """Two continuation consumers reacting to the same upstream terminal event
+    must create at most one executing downstream run.
+
+    Under continuation (ADR-067) there is no WAITING/flip; the race is instead two
+    consumer instances both materialising the downstream for the same upstream
+    terminal event. The advisory lock + the (job_id, wait_for_run_id) unique index
+    make it exactly-once: one insert wins, the other is a no-op.
 
     Scenario:
-      - A root job has terminated (tick 0 SUCCEEDED).
-      - The downstream job has a WAITING run from tick 0.
-      - Concurrently: RecurringJobWatcher spawns tick 1 (arming tick 1's WAITING run),
-        AND ChainWatcher flips tick 0's WAITING run → PENDING.
-      - The flip path locks the downstream job before the slow-consumer check, so
-        it cannot race with the spawn path that is simultaneously checking/inserting.
-
-    After both complete, the downstream job must have at most one executing run.
+      - Root A has terminated (SUCCEEDED) with its terminal RunEvent unprocessed.
+      - Downstream B (trigger_on_job_id=A, ANY) has NO run yet (continuation).
+      - Concurrently run two continuation polls.
+      - B must end with exactly one executing (PENDING) run.
     """
     now = datetime.now(tz=UTC)
     bucket = now.replace(minute=0, second=0, microsecond=0).isoformat()
@@ -207,13 +208,12 @@ async def test_concurrent_spawn_and_flip_produce_at_most_one_executing_run(
     async with session_factory() as session:
         async with session.begin():
             root = Job(
-                user_id="spawn-flip-lock-test",
-                description="root recurring",
+                user_id="continuation-lock-test",
+                description="root upstream",
                 action="echo",
                 action_params={},
-                job_type="recurring",
-                cron_expr="@hourly",
-                timezone="UTC",
+                job_type="one_shot",
+                scheduled_at=now,
             )
             session.add(root)
             await session.flush()
@@ -240,7 +240,7 @@ async def test_concurrent_spawn_and_flip_produce_at_most_one_executing_run(
             )
 
             downstream = Job(
-                user_id="spawn-flip-lock-test",
+                user_id="continuation-lock-test",
                 description="downstream trigger-driven",
                 action="echo",
                 action_params={},
@@ -251,39 +251,17 @@ async def test_concurrent_spawn_and_flip_produce_at_most_one_executing_run(
             )
             session.add(downstream)
             await session.flush()
+        downstream_id = downstream.job_id
 
-            run_down0 = JobRun(
-                time_bucket=bucket,
-                job_id=downstream.job_id,
-                user_id=downstream.user_id,
-                scheduled_at=now,
-                status="WAITING",
-                wait_for_run_id=run_root0.run_id,
-            )
-            session.add(run_down0)
-            await session.flush()
-            session.add(
-                RunEvent(
-                    run_id=run_down0.run_id,
-                    job_id=downstream.job_id,
-                    event_type="CREATED",
-                    status_from=None,
-                    status_to="WAITING",
-                )
-            )
-
-    # Concurrently: spawn (arms tick 1 WAITING + root PENDING) and flip (WAITING→PENDING
-    # for tick 0's downstream WAITING run, using the ChainWatcher poll).
+    # Concurrently run two continuation consumers on the same terminal event.
     await asyncio.gather(
         recurring_poll_once(session_factory),
-        chain_poll_once(session_factory),
+        recurring_poll_once(session_factory),
     )
 
-    # At most one executing run per downstream job.
-    executing = await _count_executing_runs(session_factory, downstream.job_id)
-    assert executing <= 1, (
-        f"at-most-one-executing-run invariant violated for downstream: {executing} executing runs"
-    )
+    # Exactly-once: at most one executing run for the downstream.
+    executing = await _count_executing_runs(session_factory, downstream_id)
+    assert executing <= 1, f"exactly-once violated for downstream: {executing} executing runs"
 
 
 # ---------------------------------------------------------------------------

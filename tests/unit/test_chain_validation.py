@@ -1,6 +1,8 @@
 """Unit tests for app/domain/chain_validation.py.
 
-Tests V1-V6 validation rules and the _is_match helper in chain_watcher.
+Tests V1-V6 validation rules and the continuation consumer's `_triggers_on`
+create-predicate (the ADR-067 successor to the deleted `ChainWatcher._is_match`
+flip-predicate — identical trigger semantics, now applied at create time).
 CTE-based V4/V5 tests use mock sessions that return pre-canned CTE results.
 V6 (validate_run_source) is a pure synchronous guard — no session needed.
 """
@@ -21,10 +23,10 @@ from app.domain.chain_validation import (
     validate_chain,
     validate_run_source,
 )
-from app.workers.chain_watcher import _is_match
+from app.workers.recurring_watcher import _triggers_on
 
 # ---------------------------------------------------------------------------
-# _is_match helper — no DB required
+# _triggers_on create-predicate — no DB required
 # ---------------------------------------------------------------------------
 
 
@@ -52,8 +54,8 @@ from app.workers.chain_watcher import _is_match
         (None, "CANCELLED", False),
     ],
 )
-def test_is_match(trigger_on_status, event_type, expected):
-    assert _is_match(trigger_on_status, event_type) == expected
+def test_triggers_on(trigger_on_status, event_type, expected):
+    assert _triggers_on(trigger_on_status, event_type) == expected
 
 
 # ---------------------------------------------------------------------------

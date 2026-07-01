@@ -84,18 +84,6 @@ services:
       migrate:
         condition: service_completed_successfully
 
-  chain-watcher:
-    image: ghcr.io/paynepew/task_scheduler_mcp:${IMAGE_TAG:-latest}
-    command: ["python", "-m", "app.entrypoints.chain_watcher"]
-    env_file: .env.docker
-    restart: unless-stopped
-    # Cheap from_run_id chain enqueuer (profiled ≤0.33% CPU).
-    mem_limit: 96m
-    cpus: 0.25  # PROVISIONAL (ADR-0015 joint sizing)
-    depends_on:
-      migrate:
-        condition: service_completed_successfully
-
   migrate:
     image: ghcr.io/paynepew/task_scheduler_mcp:${IMAGE_TAG:-latest}
     command: ["python", "-m", "app.entrypoints.migrate"]
