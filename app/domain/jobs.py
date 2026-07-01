@@ -280,11 +280,18 @@ class RunView:
 class JobView:
     job_id: int
     action: str
-    internal_status: str
+    job_state: str
+    # None when the job has no run yet (a not-yet-triggered chained downstream,
+    # or one whose create predicate never matched) — distinct from any concrete
+    # internal run status. The MCP boundary derives external status from
+    # (job_state, latest_run_status) via to_external_job_status (ADR-067 §9).
+    latest_run_status: str | None
     runs: list[RunView] | None
     description: str | None = None
     job_type: str | None = None
     created_at: datetime | None = None
+    # trigger_on_job_id, surfaced as task.status's `triggered_by` for trigger-driven jobs.
+    triggered_by: int | None = None
     # Set from the latest run regardless of include_runs, for surfacing in status responses.
     error_code: str | None = None
     error_message: str | None = None
@@ -319,7 +326,6 @@ async def get_job_with_runs(
     db_runs = runs_result.scalars().all()
 
     latest = db_runs[0] if db_runs else None
-    internal_status = latest.status if latest else "PENDING"
     run_views = [
         RunView(
             run_id=r.run_id,
@@ -336,11 +342,13 @@ async def get_job_with_runs(
     return JobView(
         job_id=job.job_id,
         action=job.action,
-        internal_status=internal_status,
+        job_state=job.state,
+        latest_run_status=latest.status if latest else None,
         runs=run_views if include_runs else None,
         description=job.description,
         job_type=job.job_type,
         created_at=job.created_at,
+        triggered_by=job.trigger_on_job_id,
         error_code=latest.error_code if latest else None,
         error_message=latest.error_message if latest else None,
     )
@@ -492,6 +500,18 @@ async def _terminal_status_hint(session: AsyncSession, job_id: int) -> str:
     return status or "SUCCEEDED"
 
 
+def _cancelled_view(job: Job) -> JobView:
+    """A JobView reporting 'cancelled' regardless of a still-finishing run (ADR-022) —
+    task.cancel.v1 always confirms the cancel intent, never a run's own outcome."""
+    return JobView(
+        job_id=job.job_id,
+        action=job.action,
+        job_state="cancelled",
+        latest_run_status=None,
+        runs=None,
+    )
+
+
 async def cancel_job(
     session: AsyncSession,
     *,
@@ -514,7 +534,8 @@ async def cancel_job(
 
     Raises JobNotFoundError if job_id does not exist or belongs to another user.
     Raises InvalidStateError(hint) if the job is already completed.
-    Returns a JobView reflecting post-cancel state (internal_status='CANCELLED').
+    Returns a JobView reflecting post-cancel state (job_state='cancelled'); the
+    caller is told 'cancelled' regardless of a still-finishing run (ADR-022).
     """
     async with session.begin():
         job = (
@@ -525,9 +546,7 @@ async def cancel_job(
 
         # Already cancelled → idempotent success.
         if job.state == "cancelled":
-            return JobView(
-                job_id=job.job_id, action=job.action, internal_status="CANCELLED", runs=None
-            )
+            return _cancelled_view(job)
 
         # Schedule already exhausted → nothing to cancel (ADR-068 §5).
         if job.state == "completed":
@@ -553,9 +572,7 @@ async def cancel_job(
                 await session.execute(select(Job.state).where(Job.job_id == job_id))
             ).scalar_one()
             if fresh_state == "cancelled":
-                return JobView(
-                    job_id=job.job_id, action=job.action, internal_status="CANCELLED", runs=None
-                )
+                return _cancelled_view(job)
             raise InvalidStateError(await _terminal_status_hint(session, job_id))
 
         # Flip only the pending/queued/retrying runs; leave RUNNING alone.
@@ -590,7 +607,7 @@ async def cancel_job(
         # run for this cancelled pipeline.
         await _settle_downstreams(session, parent_job_id=job_id)
 
-    return JobView(job_id=job.job_id, action=job.action, internal_status="CANCELLED", runs=None)
+    return _cancelled_view(job)
 
 
 @dataclass
@@ -598,7 +615,9 @@ class JobListItem:
     job_id: int
     action: str
     created_at: datetime
-    internal_status: str
+    job_state: str
+    # None when the job has no run yet — see JobView.latest_run_status.
+    latest_run_status: str | None
 
 
 @dataclass
@@ -671,7 +690,8 @@ async def list_jobs(
             job_id=row.Job.job_id,
             action=row.Job.action,
             created_at=row.Job.created_at,
-            internal_status=row.run_status if row.run_status is not None else "PENDING",
+            job_state=row.Job.state,
+            latest_run_status=row.run_status,
         )
         for row in rows
     ]
@@ -685,7 +705,9 @@ class JobResourceItem:
     description: str
     job_type: str
     created_at: datetime
-    internal_status: str
+    job_state: str
+    # None when the job has no run yet — see JobView.latest_run_status.
+    latest_run_status: str | None
     cancelled_at: datetime | None
 
 
@@ -743,7 +765,8 @@ async def list_jobs_resource(
             description=row.Job.description,
             job_type=row.Job.job_type,
             created_at=row.Job.created_at,
-            internal_status=row.run_status if row.run_status is not None else "PENDING",
+            job_state=row.Job.state,
+            latest_run_status=row.run_status,
             cancelled_at=row.cancelled_at,
         )
         for row in rows

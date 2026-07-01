@@ -30,7 +30,9 @@ def _view(**overrides):
     base = dict(
         job_id=42,
         action="email_send",
-        internal_status="FAILED",
+        job_state="completed",
+        latest_run_status="FAILED",
+        triggered_by=None,
         error_code=None,
         error_message=None,
         runs=None,
@@ -78,7 +80,7 @@ async def test_missing_connection_still_includes_code_and_connect_url(monkeypatc
 @pytest.mark.asyncio
 async def test_no_error_block_when_run_succeeded(monkeypatch):
     """A run with neither code nor message → no 'error' key in the payload."""
-    view = _view(internal_status="SUCCEEDED")
+    view = _view(latest_run_status="SUCCEEDED")
     monkeypatch.setattr(status_handler, "get_job_with_runs", AsyncMock(return_value=view))
 
     result = await handle_task_status(

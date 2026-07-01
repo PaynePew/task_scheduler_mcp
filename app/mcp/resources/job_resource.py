@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db.engine import async_session_factory as default_session_factory
 from app.domain.jobs import JobNotFoundError, get_job_with_runs
-from app.mcp.status_mapping import to_external
+from app.mcp.status_mapping import to_external, to_external_job_status
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +66,9 @@ async def read_tasks_job(
         "action": view.action,
         "schedule_type": view.job_type,
         "created_at": view.created_at.isoformat() if view.created_at else None,
-        "status": to_external(view.internal_status),
+        "status": to_external_job_status(
+            job_state=view.job_state, latest_run_status=view.latest_run_status
+        ),
         "runs": [
             {
                 "run_id": r.run_id,

@@ -77,6 +77,7 @@ mcp/handlers/   →   domain/   →   db/repositories/ (W2: read+write split)
   Error `code` is drawn from the **7-word vocabulary** (ADR-014, amended ADR-060): `USER_INPUT | NOT_FOUND | INVALID_STATE | UNKNOWN_ACTION | DUPLICATE | INTERNAL | MISSING_CONNECTION`. `MISSING_CONNECTION` carries an optional `connect_url` field (required OAuth connection not set up). No new codes without an ADR.
 - Datetimes everywhere are **ISO 8601 with explicit timezone**. Default `timezone=UTC` when the LLM client is silent.
 - **Internal → external status mapping** happens at the handler boundary, never inside domain or DB code. See CONTEXT.md §2 for the 7→5 table.
+- **External status is derived from `(Job.state, latest run)`** via `app.mcp.status_mapping.to_external_job_status` (ADR-067 §9) — never guess a run status in the domain layer (e.g. defaulting a no-run job to `'PENDING'`) and never derive it a second way in a handler. `JobView` / `JobListItem` / `JobResourceItem` carry `job_state` + a nullable `latest_run_status`; the handler calls `to_external_job_status`, not the raw `to_external`, whenever a job may have zero runs. `task.status.v1` also surfaces `triggered_by: <job_id>` for a trigger-driven job (`Job.trigger_on_job_id`) — see CONTEXT.md §2.
 
 ### Outbox pattern (ADR-009 — strict)
 

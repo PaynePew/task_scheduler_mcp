@@ -7,17 +7,20 @@ Run with:
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db.engine import create_async_engine
-from app.db.models import Job
-from app.domain.jobs import create_job
+from app.db.models import Job, JobRun, RunEvent
+from app.domain.jobs import cancel_job, create_job
 from app.mcp.handlers.status import handle_task_status
 from app.queue.sqs import SQSClient
 from app.workers.executor import process_one
+from app.workers.recurring_watcher import poll_once as continuation_poll_once
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -65,6 +68,74 @@ async def _create_immediate_echo(
             action_params={"message": "hello"},
             schedule_type="immediate",
         )
+
+
+async def _seed_job(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    user_id: str,
+    trigger_on_job_id: int | None = None,
+    trigger_on_status: str | None = None,
+    state: str = "active",
+) -> int:
+    """Insert one immediate/one-shot Job directly; return its job_id.
+
+    Bypasses create_job's V3 guard (a chain's trigger must have a live run) so a
+    chained downstream can be seeded before its trigger has ever fired — the same
+    pattern tests/integration/test_chain_settle.py uses.
+    """
+    now = datetime.now(tz=UTC)
+    async with factory() as session:
+        async with session.begin():
+            job = Job(
+                user_id=user_id,
+                description="status-chain-test",
+                action="echo",
+                action_params={},
+                job_type="one_shot",
+                scheduled_at=now,
+                timezone="UTC",
+                trigger_on_job_id=trigger_on_job_id,
+                trigger_on_status=trigger_on_status,
+                state=state,
+            )
+            session.add(job)
+            await session.flush()
+            return job.job_id
+
+
+async def _seed_terminal_run_with_event(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    job_id: int,
+    user_id: str,
+    status: str = "SUCCEEDED",
+) -> None:
+    """Insert one terminal JobRun + its RunEvent for the continuation consumer."""
+    now = datetime.now(tz=UTC)
+    bucket = now.replace(minute=0, second=0, microsecond=0).isoformat()
+    async with factory() as session:
+        async with session.begin():
+            run = JobRun(
+                time_bucket=bucket,
+                job_id=job_id,
+                user_id=user_id,
+                scheduled_at=now,
+                status=status,
+                finish_at=now,
+            )
+            session.add(run)
+            await session.flush()
+            session.add(
+                RunEvent(
+                    run_id=run.run_id,
+                    job_id=job_id,
+                    event_type=status,
+                    status_from="RUNNING",
+                    status_to=status,
+                    occurred_at=now,
+                )
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -168,3 +239,94 @@ async def test_status_not_found_for_cross_user_job(session_factory, sqs):
 
     assert result["ok"] is False
     assert result["error"]["code"] == "NOT_FOUND"
+
+
+# ---------------------------------------------------------------------------
+# External status derivation from (Job.state, latest run) — ADR-067 §9, #256.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+async def test_status_not_yet_triggered_downstream_is_scheduled_with_empty_runs(
+    session_factory, sqs
+):
+    """A chained downstream with no run yet (still waiting on its trigger) shows
+    as 'scheduled' with an empty runs list — Job.state, not a fake 'PENDING'."""
+    user = "chain-status-user"
+    a = await _seed_job(session_factory, user_id=user)
+    b = await _seed_job(session_factory, user_id=user, trigger_on_job_id=a, trigger_on_status="ANY")
+
+    result = await handle_task_status(
+        {"job_id": b, "include_runs": True}, user_id=user, session_factory=session_factory
+    )
+
+    assert result["ok"] is True
+    assert result["data"]["status"] == "scheduled"
+    assert result["data"]["runs"] == []
+
+
+@pytest.mark.integration
+async def test_status_surfaces_triggered_by_for_chained_job(session_factory, sqs):
+    """task.status surfaces triggered_by:<job_id> for a trigger-driven job."""
+    user = "chain-status-user2"
+    a = await _seed_job(session_factory, user_id=user)
+    b = await _seed_job(session_factory, user_id=user, trigger_on_job_id=a, trigger_on_status="ANY")
+
+    result = await handle_task_status({"job_id": b}, user_id=user, session_factory=session_factory)
+
+    assert result["ok"] is True
+    assert result["data"]["triggered_by"] == a
+
+
+@pytest.mark.integration
+async def test_status_omits_triggered_by_for_non_chained_job(session_factory, sqs):
+    """A schedule-driven job (no trigger) never carries a triggered_by field."""
+    job = await _create_immediate_echo(session_factory, user_id="no-chain-user")
+
+    result = await handle_task_status(
+        {"job_id": job.job_id}, user_id="no-chain-user", session_factory=session_factory
+    )
+
+    assert result["ok"] is True
+    assert "triggered_by" not in result["data"]
+
+
+@pytest.mark.integration
+async def test_status_predicate_miss_settled_downstream_is_completed(session_factory, sqs):
+    """A chained downstream that never fired (predicate miss) but has settled to
+    Job.state='completed' reports 'completed', not the no-run default 'scheduled'."""
+    user = "predicate-miss-user"
+    a = await _seed_job(session_factory, user_id=user, state="completed")
+    await _seed_terminal_run_with_event(session_factory, job_id=a, user_id=user)
+    b = await _seed_job(
+        session_factory, user_id=user, trigger_on_job_id=a, trigger_on_status="FAILED"
+    )
+
+    # A succeeded but B triggers on FAILED — predicate miss: B never gets a run,
+    # and the continuation consumer settles it since the parent is terminal.
+    await continuation_poll_once(session_factory)
+
+    result = await handle_task_status(
+        {"job_id": b, "include_runs": True}, user_id=user, session_factory=session_factory
+    )
+
+    assert result["ok"] is True
+    assert result["data"]["status"] == "completed"
+    assert result["data"]["runs"] == []
+
+
+@pytest.mark.integration
+async def test_status_cancelled_before_fired_downstream_is_cancelled(session_factory, sqs):
+    """Cancelling a not-yet-fired chained downstream directly reports 'cancelled',
+    not the no-run default 'scheduled'."""
+    user = "cancel-chain-user"
+    a = await _seed_job(session_factory, user_id=user)
+    b = await _seed_job(session_factory, user_id=user, trigger_on_job_id=a, trigger_on_status="ANY")
+
+    async with session_factory() as session:
+        await cancel_job(session, user_id=user, job_id=b)
+
+    result = await handle_task_status({"job_id": b}, user_id=user, session_factory=session_factory)
+
+    assert result["ok"] is True
+    assert result["data"]["status"] == "cancelled"
