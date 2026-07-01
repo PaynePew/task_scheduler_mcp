@@ -71,6 +71,16 @@ class ActionHandler(Protocol):
     the OAuth provider the action needs (``"slack"``, ``"github"``, ``"google"``);
     ``None`` for actions that don't need a per-user OAuth connection. Together they
     make the server self-describe at handshake time (ADR-061).
+
+    ``idempotent`` declares whether re-executing the action with the same params
+    is safe (no duplicate external effect). There is no default here on purpose
+    (Protocol carries no implementation) — every handler must set it explicitly;
+    `tests/unit/test_action_idempotency.py` fails closed if a registered handler
+    omits it. Pure / output-only actions (``echo``, ``llm_summarize``,
+    ``llm_polish``, ``calendar_digest_ics``) are ``True``; actions with an
+    external side effect (``email_send``, ``slack_post``, ``github_digest``,
+    ``http_call``) are ``False``. Consumed by the reconciler's `RUNNING`-orphan
+    recovery (issue #268; PRD #266) to decide retry-in-place vs fail-and-alert.
     """
 
     name: ClassVar[str]
@@ -81,5 +91,6 @@ class ActionHandler(Protocol):
     requires_operator: ClassVar[bool]
     credential_mode: ClassVar[CredentialMode]
     required_provider: ClassVar[str | None]
+    idempotent: ClassVar[bool]
 
     async def execute(self, run: Any, params: BaseModel) -> ActionResult: ...

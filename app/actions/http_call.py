@@ -36,6 +36,10 @@ class HttpCallHandler:
     requires_operator: ClassVar[bool] = True
     credential_mode: ClassVar[CredentialMode] = CredentialMode.operator_env
     required_provider: ClassVar[str | None] = None
+    # Generic call over any method (POST/PUT/DELETE/PATCH included) — the
+    # target's side effects are unknowable at registration time, so this
+    # defaults closed (non-idempotent) rather than silently assuming safety.
+    idempotent: ClassVar[bool] = False
 
     async def execute(self, run: Any, params: HttpCallParams) -> ActionResult:
         whitelist = build_effective_whitelist()

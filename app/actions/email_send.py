@@ -112,6 +112,7 @@ class EmailSendHandler:
     requires_operator: ClassVar[bool] = False
     credential_mode: ClassVar[CredentialMode] = CredentialMode.oauth_connection
     required_provider: ClassVar[str | None] = "google"
+    idempotent: ClassVar[bool] = False  # external side effect (sends real email)
 
     async def execute(self, run: Any, params: EmailSendParams) -> ActionResult:
         # Resolve any ${VAR} references (ADR-032) in subject/body.

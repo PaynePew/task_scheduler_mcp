@@ -3,7 +3,16 @@
 - **Status**: Accepted
 - **Date**: 2026-05-12
 - **Source**: internal grilling session Q13 (local-only, not in git)
-- **Related**: ADR-010 (module layout), ADR-014 (tool surface)
+- **Related**: ADR-010 (module layout), ADR-014 (tool surface), ADR-051 (action-surface tiering), PRD #266 (execution-plane durability)
+
+> **Amendment (issue #268, 2026-07-01).** `ActionHandler` gained a required
+> `idempotent: ClassVar[bool]` — see Decision below. No default is provided
+> (it's a `Protocol`, not a base class with implementation); every handler
+> must declare it explicitly, and `tests/unit/test_action_idempotency.py`
+> pins each registered handler's posture so a new action can't silently omit
+> it. This is a shared dependency for the reconciler's `RUNNING`-orphan
+> recovery (retry-in-place vs fail-and-alert) and `email_send`
+> effectively-once — both land as later slices under PRD #266, not here.
 
 ## Context
 
@@ -24,6 +33,7 @@ class ActionHandler(Protocol):
     name: ClassVar[str]
     params_model: ClassVar[type[BaseModel]]   # Pydantic model for action_params
     timeout_seconds: ClassVar[int]            # asyncio.wait_for budget
+    idempotent: ClassVar[bool]                # amendment, issue #268 — see below
 
     async def execute(self, run: JobRun, params: BaseModel) -> ActionResult: ...
 ```
@@ -47,3 +57,4 @@ W1 ships two handlers:
 - Action authors choose their own `retryable` policy per error — retry behaviour is data-driven, not hardcoded.
 - Per-action `timeout_seconds` is enforced via `asyncio.wait_for`; hung actions become retryable failures, not blocked workers.
 - The `task.create.v1` tool schema is generated from the registry; clients always see the current action list via `task.list_actions.v1`.
+- A new handler MUST declare `idempotent` (amendment, issue #268): pure/output-only actions (no external effect, e.g. `echo`, an LLM transform) are `True`; anything with an external side effect (sends a message, posts to a third-party API, arbitrary-method HTTP) is `False`. Add its name + posture to `tests/unit/test_action_idempotency.py`'s `EXPECTED_IDEMPOTENT_POSTURE` map — the test fails closed until you do.

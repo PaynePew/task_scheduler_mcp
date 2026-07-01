@@ -25,6 +25,7 @@ class EchoHandler:
     requires_operator: ClassVar[bool] = False
     credential_mode: ClassVar[CredentialMode] = CredentialMode.none
     required_provider: ClassVar[str | None] = None
+    idempotent: ClassVar[bool] = True
 
     async def execute(self, run: Any, params: EchoParams) -> ActionResult:
         return ActionResult(ok=True, result={"echoed": params.message}, error=None)

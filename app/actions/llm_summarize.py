@@ -114,6 +114,7 @@ class LlmSummarizeHandler:
     requires_operator: ClassVar[bool] = False
     credential_mode: ClassVar[CredentialMode] = CredentialMode.none
     required_provider: ClassVar[str | None] = None
+    idempotent: ClassVar[bool] = True
 
     def __init__(
         self,

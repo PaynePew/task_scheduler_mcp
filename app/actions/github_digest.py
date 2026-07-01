@@ -76,6 +76,7 @@ class GitHubDigestHandler:
     requires_operator: ClassVar[bool] = False
     credential_mode: ClassVar[CredentialMode] = CredentialMode.oauth_connection
     required_provider: ClassVar[str | None] = "github"
+    idempotent: ClassVar[bool] = False  # external side effect (GitHub API call)
 
     async def execute(self, run: Any, params: GitHubDigestParams) -> ActionResult:
         # Check connection validity (expiry + missing) before attempting the action.

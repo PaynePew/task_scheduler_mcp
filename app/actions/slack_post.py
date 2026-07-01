@@ -139,6 +139,7 @@ class SlackPostHandler:
     requires_operator: ClassVar[bool] = False
     credential_mode: ClassVar[CredentialMode] = CredentialMode.oauth_connection
     required_provider: ClassVar[str | None] = "slack"
+    idempotent: ClassVar[bool] = False  # external side effect (posts to Slack)
 
     async def execute(self, run: Any, params: SlackPostParams) -> ActionResult:
         # Check connection validity (expiry + missing) before attempting the action.
