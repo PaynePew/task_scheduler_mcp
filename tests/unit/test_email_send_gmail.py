@@ -18,6 +18,7 @@ import pytest
 from app.actions.email_send import EmailSendHandler, EmailSendParams
 from app.actions.registry import ACTION_REGISTRY
 from app.connections.store import ConnectionMiss
+from tests.fixtures.dedup import InMemoryDedupStore
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -27,6 +28,12 @@ from app.connections.store import ConnectionMiss
 @dataclass
 class FakeRun:
     user_id: str = "user-abc"
+    run_id: int = 1
+
+
+def _handler() -> EmailSendHandler:
+    """EmailSendHandler wired to an in-memory dedup store (no Postgres in unit tests)."""
+    return EmailSendHandler(dedup_store=InMemoryDedupStore())
 
 
 def _build_mock_http_client(response: httpx.Response) -> MagicMock:
@@ -64,7 +71,7 @@ def test_email_send_is_public_oauth():
 @pytest.mark.asyncio
 async def test_public_user_routes_to_gmail():
     """When user is not operator, Gmail API path is used."""
-    handler = EmailSendHandler()
+    handler = _handler()
     params = EmailSendParams(to=["dest@example.com"], subject="Test", body="Body text")
     run = FakeRun(user_id="user-abc")
 
@@ -95,7 +102,7 @@ async def test_public_user_routes_to_gmail():
 @pytest.mark.asyncio
 async def test_public_user_no_google_connection_returns_error():
     """Public user with no Google connection gets a non-retryable error."""
-    handler = EmailSendHandler()
+    handler = _handler()
     params = EmailSendParams(to=["dest@example.com"], subject="Test", body="Body")
     run = FakeRun(user_id="user-abc")
 
@@ -123,7 +130,7 @@ async def test_public_user_no_google_connection_returns_error():
 
 @pytest.mark.asyncio
 async def test_gmail_401_is_dlq():
-    handler = EmailSendHandler()
+    handler = _handler()
     params = EmailSendParams(to=["dest@example.com"], subject="Test", body="Body")
     run = FakeRun(user_id="user-abc")
 
@@ -152,7 +159,7 @@ async def test_gmail_401_is_dlq():
 
 @pytest.mark.asyncio
 async def test_gmail_403_is_dlq():
-    handler = EmailSendHandler()
+    handler = _handler()
     params = EmailSendParams(to=["dest@example.com"], subject="Test", body="Body")
     run = FakeRun(user_id="user-abc")
 
@@ -181,7 +188,7 @@ async def test_gmail_403_is_dlq():
 
 @pytest.mark.asyncio
 async def test_gmail_429_is_retryable():
-    handler = EmailSendHandler()
+    handler = _handler()
     params = EmailSendParams(to=["dest@example.com"], subject="Test", body="Body")
     run = FakeRun(user_id="user-abc")
 
@@ -209,7 +216,7 @@ async def test_gmail_429_is_retryable():
 
 @pytest.mark.asyncio
 async def test_gmail_500_is_retryable():
-    handler = EmailSendHandler()
+    handler = _handler()
     params = EmailSendParams(to=["dest@example.com"], subject="Test", body="Body")
     run = FakeRun(user_id="user-abc")
 
@@ -237,7 +244,7 @@ async def test_gmail_500_is_retryable():
 
 @pytest.mark.asyncio
 async def test_gmail_network_error_is_retryable():
-    handler = EmailSendHandler()
+    handler = _handler()
     params = EmailSendParams(to=["dest@example.com"], subject="Test", body="Body")
     run = FakeRun(user_id="user-abc")
 
@@ -272,7 +279,7 @@ async def test_gmail_network_error_is_retryable():
 @pytest.mark.asyncio
 async def test_routes_to_gmail_regardless_of_operator_status():
     """email_send is Gmail-only: even the operator routes to Gmail (ADR-050 amended)."""
-    handler = EmailSendHandler()
+    handler = _handler()
     params = EmailSendParams(to=["dest@example.com"], subject="Hi", body="Body")
     run = FakeRun(user_id="operator-uid")  # the operator themselves
 
