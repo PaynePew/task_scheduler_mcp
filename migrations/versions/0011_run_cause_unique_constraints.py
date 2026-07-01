@@ -19,6 +19,12 @@ hope on the ``processed_by`` cursor (which stays only as an efficiency layer):
 Both are partial so they stay small and never overlap (a row has exactly one
 run source: trigger-driven ⇒ wait_for_run_id set; schedule-driven ⇒ NULL).
 
+Pre-flight de-duplication: production already holds rows that violate these
+indexes — historical duplicate runs created before this exactly-once guarantee
+existed (e.g. a recurring tick that double-fired). CREATE UNIQUE INDEX aborts on
+such a row, so ``upgrade`` first collapses every cause group to a single run.
+See ``upgrade`` for the keep-rule and the destructive-but-safe rationale.
+
 Revision ID: 0011
 Revises: 0010
 Create Date: 2026-07-01
@@ -27,6 +33,7 @@ Create Date: 2026-07-01
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 
 import sqlalchemy as sa
@@ -37,8 +44,70 @@ down_revision: str | None = "0010"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
+_log = logging.getLogger("alembic.runtime.migration")
+
+# Run statuses that still consume the box — mirrors 0010 / run_materializer._EXECUTING
+# (+ WAITING). The dedup keep-rule sorts these FIRST so a still-live run is never
+# dropped in favour of a terminal duplicate (that would strand in-flight work).
+_NON_TERMINAL = "('PENDING','QUEUED','WAITING','RUNNING','RETRYING')"
+
+# Ranks every job_run within its *cause group*; rn = 1 is the row to KEEP, rn > 1
+# are redundant duplicates to delete. Two disjoint cause groups (a row belongs to
+# exactly one): schedule-driven (wait_for_run_id NULL, keyed on scheduled_at) and
+# trigger-driven (wait_for_run_id NOT NULL, keyed on wait_for_run_id) — mirroring
+# the two partial unique indexes. Keep-rule: live (non-terminal) rows first so a
+# dedup never strands in-flight work, then earliest run_id (the original fire) so
+# the later double is the one dropped. run_id is a BIGSERIAL sequence value → each
+# row's run_id is globally unique, so deletes may key on run_id alone.
+_RANKED_DUPLICATE_RUN_IDS = (
+    "SELECT run_id FROM ("
+    "  SELECT run_id, ROW_NUMBER() OVER ("
+    "    PARTITION BY job_id, scheduled_at"
+    f"    ORDER BY (status IN {_NON_TERMINAL}) DESC, run_id"
+    "  ) AS rn"
+    "  FROM job_runs WHERE wait_for_run_id IS NULL"
+    "  UNION ALL"
+    "  SELECT run_id, ROW_NUMBER() OVER ("
+    "    PARTITION BY job_id, wait_for_run_id"
+    f"    ORDER BY (status IN {_NON_TERMINAL}) DESC, run_id"
+    "  ) AS rn"
+    "  FROM job_runs WHERE wait_for_run_id IS NOT NULL"
+    ") ranked WHERE rn > 1"
+)
+
 
 def upgrade() -> None:
+    # ---------------------------------------------------------------- de-dup
+    # The two partial unique indexes below encode exactly-once run creation, but
+    # production already holds pre-existing violations: historical duplicate runs
+    # from before this guarantee existed (e.g. a recurring tick that double-fired
+    # → two job_runs sharing (job_id, scheduled_at) with wait_for_run_id NULL).
+    # CREATE UNIQUE INDEX aborts on such a row — this is exactly what blocked the
+    # S3 deploy (a real duplicate at (job_id, scheduled_at) = (1, 2026-05-18
+    # 14:01)); CI stayed green only because the test DB had no such row. So
+    # collapse every cause group to a single run FIRST, deleting the redundant
+    # duplicate(s) and their run_events. run_events has no FK to job_runs (ADR-009:
+    # the outbox only carries run_id, not job_runs' composite PK), so the child
+    # events must be deleted explicitly or they orphan.
+    #
+    # This is destructive and irreversible (downgrade cannot resurrect the deleted
+    # rows), but it only ever removes a redundant duplicate of a run that already
+    # has a surviving twin in the same cause group — never a unique run. The
+    # keep-rule (see _RANKED_DUPLICATE_RUN_IDS) preserves any still-live run.
+    bind = op.get_bind()
+    # Delete orphan events first: it reads job_runs' pre-delete state, so it must
+    # run before the runs themselves are removed. Both statements recompute the
+    # same rn>1 set from the (still-unchanged) job_runs snapshot.
+    bind.execute(sa.text(f"DELETE FROM run_events WHERE run_id IN ({_RANKED_DUPLICATE_RUN_IDS})"))
+    deleted = bind.execute(
+        sa.text(f"DELETE FROM job_runs WHERE run_id IN ({_RANKED_DUPLICATE_RUN_IDS})")
+    )
+    _log.warning(
+        "0011: removed %s duplicate job_runs (and their run_events) before "
+        "creating the cause-unique indexes",
+        deleted.rowcount,
+    )
+
     op.create_index(
         "uq_job_runs_trigger_cause",
         "job_runs",
@@ -95,7 +164,9 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # Reverse the cutover stamp (symmetry with upgrade's backfill).
+    # Reverse the cutover stamp (symmetry with upgrade's backfill). The pre-flight
+    # dedup is intentionally NOT reversed — the deleted duplicate runs are gone for
+    # good; downgrade only removes the indexes and un-stamps the cursor.
     op.execute("UPDATE run_events SET processed_by = processed_by - 'continuation'")
     op.drop_index("uq_job_runs_recurring_tick", table_name="job_runs")
     op.drop_index("uq_job_runs_trigger_cause", table_name="job_runs")
