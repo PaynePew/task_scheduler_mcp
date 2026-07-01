@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from sqlalchemy import func, select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.actions.registry import ACTION_REGISTRY
@@ -634,6 +634,7 @@ async def list_jobs(
     *,
     user_id: str,
     status_filter: frozenset[str] | None = None,
+    job_state_filter: frozenset[str] | None = None,
     created_at_from: datetime | None = None,
     created_at_to: datetime | None = None,
     page: int = 1,
@@ -641,7 +642,13 @@ async def list_jobs(
 ) -> PagedJobs:
     """Return paged jobs for user_id sorted newest-first via idx_jobs_user_created.
 
-    status_filter: frozenset of *internal* statuses to include (caller maps external→internal).
+    status_filter: frozenset of *internal* run statuses to include (caller maps external→internal).
+    job_state_filter: the ``Job.state`` values whose run-less jobs also match the requested
+        external status (ADR-067). A chained downstream has no run until it fires, so its status
+        is derived from ``Job.state`` alone (the same derivation the read path renders) — without
+        this such jobs are shown in the unfiltered list yet silently dropped from any ``status=``
+        filter. Only consulted alongside ``status_filter``; empty for ``running``/``failed`` (a
+        run-less job is never either).
     created_at_from / created_at_to: inclusive bounds on Job.created_at.
     page / page_size: 1-based offset pagination.
     """
@@ -661,7 +668,19 @@ async def list_jobs(
         if created_at_to is not None:
             q = q.where(Job.created_at <= created_at_to)
         if status_filter is not None:
-            q = q.where(latest_run_sq.c.status.in_(list(status_filter)))
+            match_run = latest_run_sq.c.status.in_(list(status_filter))
+            if job_state_filter:
+                # A run-less job (chained downstream not yet fired) has a NULL latest
+                # run, so `NULL IN (...)` never matches — fall back to Job.state, the
+                # same source the read path uses to render its status (ADR-067).
+                match_run = or_(
+                    match_run,
+                    and_(
+                        latest_run_sq.c.status.is_(None),
+                        Job.state.in_(list(job_state_filter)),
+                    ),
+                )
+            q = q.where(match_run)
         return q
 
     # Count query — join to latest_run for status filtering

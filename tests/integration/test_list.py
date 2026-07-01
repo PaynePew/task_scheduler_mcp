@@ -67,6 +67,41 @@ async def _force_run_status(
             )
 
 
+async def _make_chained_downstream(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    user_id: str,
+    parent_job_id: int,
+) -> Job:
+    """Create a trigger-driven downstream job.
+
+    Under continuation (ADR-067) a chained job has ZERO runs until its upstream
+    terminates, so this is the faithful shape of the bug: `latest_run` is NULL
+    and the job's external status must come from `Job.state` alone.
+    """
+    async with factory() as session:
+        return await create_job(
+            session,
+            user_id=user_id,
+            action="echo",
+            action_params={"message": "downstream"},
+            schedule_type="immediate",
+            trigger_on_job_id=parent_job_id,
+            trigger_on_status="SUCCEEDED",
+        )
+
+
+async def _force_job_state(
+    factory: async_sessionmaker[AsyncSession],
+    job_id: int,
+    state: str,
+) -> None:
+    """Directly set Job.state (for test setup — a 0-run downstream that settled/cancelled)."""
+    async with factory() as session:
+        async with session.begin():
+            await session.execute(update(Job).where(Job.job_id == job_id).values(state=state))
+
+
 # ---------------------------------------------------------------------------
 # Basic list tests
 # ---------------------------------------------------------------------------
@@ -228,6 +263,100 @@ async def test_status_filter_cancelled(session_factory) -> None:
     ids = [j["job_id"] for j in result["data"]["jobs"]]
     assert cancelled_job.job_id in ids
     assert active_job.job_id not in ids
+
+
+# ---------------------------------------------------------------------------
+# Zero-run status filter tests (ADR-067 continuation — chained downstream has
+# no run yet, so its external status must come from Job.state, matching how the
+# display path renders it). Regression guard for #264.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+async def test_status_filter_scheduled_includes_zero_run_chained_downstream(
+    session_factory,
+) -> None:
+    """status=scheduled must include an active chained downstream that has no run yet.
+
+    The display path renders it as `scheduled` (from Job.state='active'), so the
+    filter must too — otherwise a flagship 3-hop chain's not-yet-fired hops are
+    invisible to `status=scheduled` despite showing up unfiltered.
+    """
+    parent = await _make_job(session_factory, user_id="zerorun-user")
+    downstream = await _make_chained_downstream(
+        session_factory, user_id="zerorun-user", parent_job_id=parent.job_id
+    )
+
+    result = await handle_task_list(
+        {"status": "scheduled"}, user_id="zerorun-user", session_factory=session_factory
+    )
+    assert result["ok"] is True
+    by_id = {j["job_id"]: j for j in result["data"]["jobs"]}
+    assert downstream.job_id in by_id, "0-run active downstream dropped from status=scheduled"
+    # Consistent with the display path.
+    assert by_id[downstream.job_id]["status"] == "scheduled"
+
+
+@pytest.mark.integration
+async def test_status_filter_completed_includes_zero_run_settled_downstream(
+    session_factory,
+) -> None:
+    """status=completed must include a settled downstream (Job.state='completed', no run).
+
+    A predicate-miss / cancelled-upstream downstream settles to completed with
+    zero runs; it renders as `completed` and must be filterable as such.
+    """
+    parent = await _make_job(session_factory, user_id="zerorun-user2")
+    downstream = await _make_chained_downstream(
+        session_factory, user_id="zerorun-user2", parent_job_id=parent.job_id
+    )
+    await _force_job_state(session_factory, downstream.job_id, "completed")
+
+    result = await handle_task_list(
+        {"status": "completed"}, user_id="zerorun-user2", session_factory=session_factory
+    )
+    assert result["ok"] is True
+    ids = [j["job_id"] for j in result["data"]["jobs"]]
+    assert downstream.job_id in ids, "0-run settled downstream dropped from status=completed"
+
+
+@pytest.mark.integration
+async def test_status_filter_cancelled_includes_zero_run_prefire_cancelled(
+    session_factory,
+) -> None:
+    """status=cancelled must include a downstream cancelled before it ever fired (no run)."""
+    parent = await _make_job(session_factory, user_id="zerorun-user3")
+    downstream = await _make_chained_downstream(
+        session_factory, user_id="zerorun-user3", parent_job_id=parent.job_id
+    )
+    await _force_job_state(session_factory, downstream.job_id, "cancelled")
+
+    result = await handle_task_list(
+        {"status": "cancelled"}, user_id="zerorun-user3", session_factory=session_factory
+    )
+    assert result["ok"] is True
+    ids = [j["job_id"] for j in result["data"]["jobs"]]
+    assert downstream.job_id in ids, "0-run pre-fire-cancelled downstream dropped from cancelled"
+
+
+@pytest.mark.integration
+async def test_status_filter_running_excludes_zero_run_downstream(session_factory) -> None:
+    """A 0-run job is never `running` — the Job.state fallback must not over-include it.
+
+    Regression guard: the fix ORs in `latest_run IS NULL AND Job.state IN (...)`, but
+    no Job.state maps to `running`, so an active 0-run downstream must stay out.
+    """
+    parent = await _make_job(session_factory, user_id="zerorun-user4")
+    downstream = await _make_chained_downstream(
+        session_factory, user_id="zerorun-user4", parent_job_id=parent.job_id
+    )
+
+    result = await handle_task_list(
+        {"status": "running"}, user_id="zerorun-user4", session_factory=session_factory
+    )
+    assert result["ok"] is True
+    ids = [j["job_id"] for j in result["data"]["jobs"]]
+    assert downstream.job_id not in ids, "0-run active downstream wrongly matched status=running"
 
 
 # ---------------------------------------------------------------------------
