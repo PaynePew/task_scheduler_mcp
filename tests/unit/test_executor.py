@@ -125,6 +125,23 @@ async def test_claim_returns_true_when_row_returned():
 
 
 @pytest.mark.asyncio
+async def test_claim_sets_heartbeat_at():
+    """The RUNNING claim UPDATE sets heartbeat_at (issue #267 DB-side lease)."""
+    mock_result = MagicMock()
+    mock_result.first.return_value = MagicMock(run_id=1, job_id=1)
+
+    session = MagicMock()
+    session.execute = AsyncMock(return_value=mock_result)
+    session.add = MagicMock()
+
+    await _claim(session, run_id=1, job_id=1)
+
+    update_stmt = session.execute.await_args_list[-1].args[0]
+    set_columns = {col.name for col in update_stmt._values}
+    assert "heartbeat_at" in set_columns
+
+
+@pytest.mark.asyncio
 async def test_claim_returns_false_when_no_row():
     """UPDATE matches 0 rows (already claimed) → returns False, no RunEvent."""
     mock_result = MagicMock()

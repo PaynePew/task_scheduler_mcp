@@ -100,7 +100,7 @@ Mapping happens at the MCP handler boundary. DB keeps the precise truth; LLM get
 
 - **`claim-and-mark`** — `UPDATE job_runs SET status='RUNNING' WHERE run_id=:rid AND status IN ('PENDING','QUEUED') RETURNING ...`. Atomic. Only one worker wins on duplicate delivery.
 - **`lookahead window`** — the 5-minute future horizon the Watcher considers due. Matches SQS `DelaySeconds` max for our use case.
-- **`heartbeat`** — every 30 seconds while a long action runs, the Worker calls `ChangeMessageVisibility` to extend SQS visibility. On crash, the timeout expires and the message becomes visible to another worker.
+- **`heartbeat`** — every 30 seconds while a long action runs, the Worker calls `ChangeMessageVisibility` to extend SQS visibility **and** bumps the DB-side `job_runs.heartbeat_at` lease (issue #267). On crash, both legs go stale: SQS visibility expires and the message becomes visible to another worker, while `heartbeat_at` is the observable a future `RUNNING`-orphan sweep keys on (not yet implemented — PRD #266 S3).
 
 ### Chain-fed handlers and the inter-handler data plane
 

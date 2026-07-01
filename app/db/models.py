@@ -137,6 +137,13 @@ class JobRun(Base):
     wait_for_run_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     start_at: Mapped[datetime | None] = mapped_column(TZ, nullable=True)
     finish_at: Mapped[datetime | None] = mapped_column(TZ, nullable=True)
+    # DB-side heartbeat lease (issue #267 / PRD #266). Set at the RUNNING claim
+    # and re-bumped every heartbeat tick (~30s) while the action runs, in
+    # addition to the SQS visibility extension. Unlike updated_at (frozen at
+    # claim), this stays fresh for the life of a legitimately long-running
+    # action — it is the observable a later RUNNING-orphan sweep keys on to
+    # tell a live worker apart from a dead one.
+    heartbeat_at: Mapped[datetime | None] = mapped_column(TZ, nullable=True)
     created_at: Mapped[datetime] = mapped_column(TZ, nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(TZ, nullable=False, server_default=func.now())
 
