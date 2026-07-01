@@ -100,7 +100,8 @@ Mapping happens at the MCP handler boundary. DB keeps the precise truth; LLM get
 
 - **`claim-and-mark`** — `UPDATE job_runs SET status='RUNNING' WHERE run_id=:rid AND status IN ('PENDING','QUEUED') RETURNING ...`. Atomic. Only one worker wins on duplicate delivery.
 - **`lookahead window`** — the 5-minute future horizon the Watcher considers due. Matches SQS `DelaySeconds` max for our use case.
-- **`heartbeat`** — every 30 seconds while a long action runs, the Worker calls `ChangeMessageVisibility` to extend SQS visibility **and** bumps the DB-side `job_runs.heartbeat_at` lease (issue #267). On crash, both legs go stale: SQS visibility expires and the message becomes visible to another worker, while `heartbeat_at` is the observable a future `RUNNING`-orphan sweep keys on (not yet implemented — PRD #266 S3).
+- **`heartbeat`** — every 30 seconds while a long action runs, the Worker calls `ChangeMessageVisibility` to extend SQS visibility **and** bumps the DB-side `job_runs.heartbeat_at` lease (issue #267). On crash, both legs go stale: SQS visibility expires and the message becomes visible to another worker, while `heartbeat_at` is the observable the reconciler's **Sweep C** keys on to reclaim a `RUNNING` row whose worker died (ADR-069 / PRD #266 S3).
+- **`Sweep C`** (reconciler `RUNNING`-orphan recovery) — a `RUNNING` row whose `heartbeat_at` lease is staler than `reconciler_running_grace_seconds` is a dead-worker orphan (the redelivered message can't re-claim `RUNNING`, so nothing else recovers it). Recovery is keyed on the action's `idempotent` posture: non-idempotent → `FAILED` + `settle` (frees the leaked quota slot) + operator alert; idempotent → reset to a claimable status + re-enqueue. Un-wedges the job's recurrence/chaining that forbid-concurrency (`has_executing_run`) would otherwise stall forever (ADR-069).
 
 ### Chain-fed handlers and the inter-handler data plane
 

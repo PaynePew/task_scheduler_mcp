@@ -47,3 +47,26 @@ def test_reconciler_interval_settings_driven(monkeypatch):
     monkeypatch.setenv("RECONCILER_INTERVAL_SECONDS", "45")
     s = Settings()
     assert s.reconciler_interval_seconds == 45.0
+
+
+def test_reconciler_running_grace_exceeds_heartbeat_plus_visibility():
+    """Sweep C's grace MUST exceed heartbeat_interval + visibility so a live
+    long-running worker is never swept (issue #271 / PRD #266).
+
+    heartbeat_interval (30s, executor.HEARTBEAT_INTERVAL_SECONDS) is how often a
+    live worker re-bumps ``job_runs.heartbeat_at``; visibility (60s) is the
+    per-receive SQS window. Their sum (90s) is the floor: a healthy worker's
+    lease is never staler than that. running_grace must sit strictly above it.
+    """
+    from app.workers.executor import HEARTBEAT_INTERVAL_SECONDS
+
+    s = Settings()
+    visibility_timeout_seconds = 60
+    floor = HEARTBEAT_INTERVAL_SECONDS + visibility_timeout_seconds
+    assert s.reconciler_running_grace_seconds > floor
+
+
+def test_reconciler_running_grace_settings_driven(monkeypatch):
+    monkeypatch.setenv("RECONCILER_RUNNING_GRACE_SECONDS", "222")
+    s = Settings()
+    assert s.reconciler_running_grace_seconds == 222
