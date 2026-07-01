@@ -11,6 +11,11 @@ Two sweeps per tick (both use FOR UPDATE SKIP LOCKED per ADR-007 pattern):
     Watcher wrote QUEUED + committed, but sqs.send_message_batch raised.
     Fix: re-issue send_message_batch; on success, advance updated_at +
          RunEvent(REENQUEUED) so the row isn't re-swept next tick.
+    Guard: only rows with scheduled_at < now are considered "stuck" — a row
+    the Watcher legitimately queued ahead of time (within its 5-minute
+    lookahead, with an SQS DelaySeconds) sits QUEUED with a stale updated_at
+    on purpose. Without this guard Sweep B re-sends it with DelaySeconds=0,
+    running it minutes early (issue #269).
 
 Multiple reconciler processes are safe by the same SKIP LOCKED guarantee used
 by the watcher (ADR-007).
@@ -112,16 +117,27 @@ async def sweep_queued_stuck(
 ) -> int:
     """Sweep B: re-enqueue QUEUED rows stuck past the grace window.
 
+    Only rows that are genuinely past-due (``scheduled_at < now``) are
+    eligible — a row the Watcher queued ahead of its `lookahead window` with
+    an SQS ``DelaySeconds`` legitimately sits QUEUED with a stale
+    ``updated_at`` until its scheduled time arrives (issue #269).
+
     Returns the number of rows successfully re-enqueued.
     """
-    cutoff = datetime.now(tz=UTC) - grace
+    now = datetime.now(tz=UTC)
+    cutoff = now - grace
+
     requeued = 0
 
     async with session_factory() as session:
         async with session.begin():
             result = await session.execute(
                 select(JobRun)
-                .where(JobRun.status == "QUEUED", JobRun.updated_at < cutoff)
+                .where(
+                    JobRun.status == "QUEUED",
+                    JobRun.updated_at < cutoff,
+                    JobRun.scheduled_at < now,
+                )
                 .with_for_update(skip_locked=True)
                 .limit(batch_size)
             )
