@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.mcp.status_mapping import to_external, to_external_job_status
+from app.mcp.status_mapping import to_external, to_external_job_status, to_job_states
 
 
 @pytest.mark.parametrize(
@@ -78,3 +78,36 @@ def test_run_status_wins_when_a_run_exists(
 def test_unknown_job_state_raises_value_error() -> None:
     with pytest.raises(ValueError, match="Unknown job state"):
         to_external_job_status(job_state="bogus", latest_run_status=None)
+
+
+# ---------------------------------------------------------------------------
+# to_job_states — the run-less filter fallback (inverse of the Job.state map).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "external,expected",
+    [
+        ("scheduled", frozenset({"active"})),
+        ("completed", frozenset({"completed"})),
+        ("cancelled", frozenset({"cancelled"})),
+        # A run-less job is never running or failed, so nothing to fall back on.
+        ("running", frozenset()),
+        ("failed", frozenset()),
+    ],
+)
+def test_to_job_states(external: str, expected: frozenset[str]) -> None:
+    assert to_job_states(external) == expected
+
+
+def test_to_job_states_unknown_raises_value_error() -> None:
+    with pytest.raises(ValueError, match="Unknown external status"):
+        to_job_states("bogus")
+
+
+@pytest.mark.parametrize("external", ["scheduled", "completed", "cancelled"])
+def test_to_job_states_roundtrips_with_to_external_job_status(external: str) -> None:
+    """Each Job.state to_job_states returns must render back to the same external status
+    for a run-less job — the filter and the display path stay in lockstep."""
+    for job_state in to_job_states(external):
+        assert to_external_job_status(job_state=job_state, latest_run_status=None) == external

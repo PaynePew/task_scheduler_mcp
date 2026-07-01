@@ -49,6 +49,24 @@ def to_internal_set(external_status: str) -> frozenset[str]:
         raise ValueError(f"Unknown external status: {external_status!r}") from None
 
 
+def to_job_states(external_status: str) -> frozenset[str]:
+    """Map an external status to the ``Job.state`` values a **run-less** job needs to match it.
+
+    Inverse of ``_JOB_STATE_MAPPING`` — the same table ``to_external_job_status``
+    uses to render a job with no run yet. A ``status=`` filter joins on the latest
+    run, but a chained downstream has zero runs until it fires (ADR-067), so the
+    filter must additionally admit run-less jobs whose ``Job.state`` maps here.
+
+    ``running`` and ``failed`` return the empty set: a job with no run is never
+    running or failed, so the run-less fallback must not include one.
+    """
+    if external_status not in _REVERSE_MAPPING:
+        raise ValueError(f"Unknown external status: {external_status!r}")
+    return frozenset(
+        state for state, external in _JOB_STATE_MAPPING.items() if external == external_status
+    )
+
+
 def to_external_job_status(*, job_state: str, latest_run_status: str | None) -> str:
     """Derive the external status from ``(Job.state, latest run)`` — ADR-067 §9.
 

@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.db.engine import async_session_factory as default_session_factory
 from app.domain.jobs import list_jobs
 from app.mcp.envelope import error, success
-from app.mcp.status_mapping import to_external_job_status, to_internal_set
+from app.mcp.status_mapping import to_external_job_status, to_internal_set, to_job_states
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +115,9 @@ async def handle_task_list(
     # --- status filter ---
     status_raw = arguments.get("status")
     internal_statuses: frozenset[str] | None = None
+    # Job.state values a run-less job needs to match this external status (ADR-067):
+    # a chained downstream has no run yet, so it can't be found via the latest run.
+    job_states: frozenset[str] | None = None
     if status_raw is not None:
         if status_raw not in _VALID_EXTERNAL_STATUSES:
             return error(
@@ -124,6 +127,7 @@ async def handle_task_list(
                 expected=", ".join(sorted(_VALID_EXTERNAL_STATUSES)),
             )
         internal_statuses = to_internal_set(status_raw)
+        job_states = to_job_states(status_raw)
 
     # --- created_at range ---
     created_at_from: datetime | None = None
@@ -150,6 +154,7 @@ async def handle_task_list(
                 session,
                 user_id=user_id,
                 status_filter=internal_statuses,
+                job_state_filter=job_states,
                 created_at_from=created_at_from,
                 created_at_to=created_at_to,
                 page=page,
