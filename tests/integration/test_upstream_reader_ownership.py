@@ -91,9 +91,7 @@ async def _insert_run(
 async def test_owner_reads_result(session_factory):
     """The run's owner reads their own JobRun.result → Ok(data)."""
     result_data = {"summary": "5 issues closed", "count": 5}
-    run_id = await _insert_run(
-        session_factory, user_id="victim", result=json.dumps(result_data)
-    )
+    run_id = await _insert_run(session_factory, user_id="victim", result=json.dumps(result_data))
 
     async with session_factory() as session:
         async with session.begin():
@@ -110,9 +108,7 @@ async def test_cross_tenant_read_returns_noresult(session_factory):
     Indistinguishable from a missing run, so the attacker cannot enumerate run_ids.
     """
     result_data = {"secret": "victim-only data"}
-    run_id = await _insert_run(
-        session_factory, user_id="victim", result=json.dumps(result_data)
-    )
+    run_id = await _insert_run(session_factory, user_id="victim", result=json.dumps(result_data))
 
     async with session_factory() as session:
         async with session.begin():

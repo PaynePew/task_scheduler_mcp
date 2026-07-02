@@ -179,9 +179,7 @@ class SlackPostHandler:
         formatter = _TEMPLATE_FORMATTERS[template]
 
         if params.from_run_id is not None:
-            return await self._message_from_upstream(
-                params.from_run_id, formatter, user_id=user_id
-            )
+            return await self._message_from_upstream(params.from_run_id, formatter, user_id=user_id)
 
         if params.message is not None:
             return params.message
