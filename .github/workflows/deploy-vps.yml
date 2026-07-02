@@ -16,6 +16,11 @@ concurrency:
 
 jobs:
   deploy:
+    # Only ever deploy from the canonical repo. A fork that pushes to its own
+    # main (with Actions enabled) would otherwise try to SSH to our production
+    # host. The attempt fails without VPS_SSH_KEY, but this stops the noisy
+    # run before it starts and keeps the deploy intent out of forks.
+    if: github.repository == 'PaynePew/task_scheduler_mcp'
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
