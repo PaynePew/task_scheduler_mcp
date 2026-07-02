@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import boto3
@@ -181,8 +182,12 @@ async def test_from_run_id_uploads_upstream_json(session_factory):
             bucket_path="reports/upstream.json", from_run_id=upstream_run.run_id
         )
 
+        # ADR-071: r2_upload scopes the from_run_id read to run.user_id; the chained
+        # run must share the upstream's owner (chains are single-user). The upstream
+        # owner is "r2-upload-test", set by _insert_run.
+        run = SimpleNamespace(user_id="r2-upload-test")
         with patch.dict("os.environ", _R2_ENV):
-            result = await handler.execute(run=None, params=params)
+            result = await handler.execute(run=run, params=params)
 
         assert result.ok is True
 

@@ -152,7 +152,9 @@ class SlackPostHandler:
         except ConnectionMiss:
             return missing_connection_result("slack")
 
-        message_text = await self._build_message(params=params)
+        # Chain reads are scoped to the caller's own runs (run.user_id) to block
+        # cross-tenant from_run_id reads.
+        message_text = await self._build_message(params=params, user_id=run.user_id)
         if isinstance(message_text, ActionResult):
             return message_text
 
@@ -172,12 +174,12 @@ class SlackPostHandler:
 
         return self._classify_response(response)
 
-    async def _build_message(self, params: SlackPostParams) -> str | ActionResult:
+    async def _build_message(self, params: SlackPostParams, *, user_id: str) -> str | ActionResult:
         template = params.template or SlackTemplate.raw
         formatter = _TEMPLATE_FORMATTERS[template]
 
         if params.from_run_id is not None:
-            return await self._message_from_upstream(params.from_run_id, formatter)
+            return await self._message_from_upstream(params.from_run_id, formatter, user_id=user_id)
 
         if params.message is not None:
             return params.message
@@ -189,12 +191,16 @@ class SlackPostHandler:
             retryable=False,
         )
 
-    async def _message_from_upstream(self, from_run_id: int, formatter: Callable[..., str]) -> str:
+    async def _message_from_upstream(
+        self, from_run_id: int, formatter: Callable[..., str], *, user_id: str
+    ) -> str:
         from app.db.engine import async_session_factory  # noqa: PLC0415
 
         async with async_session_factory() as session:
             async with session.begin():
-                return await resolve_for_display(from_run_id, session, formatter=formatter)
+                return await resolve_for_display(
+                    from_run_id, session, formatter=formatter, user_id=user_id
+                )
 
     @staticmethod
     def _classify_response(response: httpx.Response) -> ActionResult:

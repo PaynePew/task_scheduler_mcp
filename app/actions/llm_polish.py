@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from typing import Any, ClassVar, Literal
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.actions.base import ActionResult, CredentialMode
 from app.chain.upstream_reader import resolve_or_terminal
@@ -32,6 +32,7 @@ from app.llm.budget import (
     record_token_usage,
 )
 from app.llm.client import LLMClient, LLMClientError, LLMRequest
+from app.llm.prompt_guard import sanitize_prompt_field
 
 # ---------------------------------------------------------------------------
 # Fixed operator-authored system prompt (ADR-052 §3)
@@ -51,6 +52,18 @@ def _build_system_prompt(tone: str, language: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Prompt-integrity constraints (ADR-052 §5)
+# ---------------------------------------------------------------------------
+
+_MAX_LANGUAGE_LEN = 40
+
+# ``language`` is interpolated into the FIXED operator-authored system prompt;
+# sanitize_prompt_field (shared with llm_summarize) collapses line separators so
+# a caller cannot inject an extra instruction line. Length is capped separately
+# via the Field constraint below.
+
+
+# ---------------------------------------------------------------------------
 # Params
 # ---------------------------------------------------------------------------
 
@@ -61,7 +74,12 @@ class LlmPolishParams(BaseModel):
     from_run_id: int | None = None
     text: str | None = None
     tone: Literal["professional", "casual", "concise"] = "professional"
-    language: str = "en"
+    language: str = Field(default="en", max_length=_MAX_LANGUAGE_LEN)
+
+    @field_validator("language")
+    @classmethod
+    def _clean_language(cls, v: str) -> str:
+        return sanitize_prompt_field(v)
 
     @model_validator(mode="after")
     def _exactly_one_input_source(self) -> LlmPolishParams:
@@ -131,8 +149,9 @@ class LlmPolishHandler:
     async def execute(self, run: Any, params: LlmPolishParams) -> ActionResult:
         from app.config.settings import settings
 
-        # 1. Resolve input text
-        input_text = await self._resolve_input(params)
+        # 1. Resolve input text. Chain reads are scoped to the caller's own runs
+        #    (run.user_id) to block cross-tenant from_run_id reads.
+        input_text = await self._resolve_input(params, user_id=self._get_user_id(run))
         if isinstance(input_text, ActionResult):
             return input_text
 
@@ -208,7 +227,7 @@ class LlmPolishHandler:
             error=None,
         )
 
-    async def _resolve_input(self, params: LlmPolishParams) -> str | ActionResult:
+    async def _resolve_input(self, params: LlmPolishParams, *, user_id: str) -> str | ActionResult:
         """Return the text to polish, fetching from upstream if from_run_id is set."""
         if params.text is not None:
             return params.text
@@ -220,6 +239,7 @@ class LlmPolishHandler:
                     params.from_run_id,  # type: ignore[arg-type]
                     session,
                     on_invalid_json="accept_raw",
+                    user_id=user_id,
                 )
 
     @staticmethod

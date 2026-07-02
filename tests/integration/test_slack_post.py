@@ -128,7 +128,9 @@ async def test_upstream_reader_ok_variant(session_factory):
 
     async with session_factory() as session:
         async with session.begin():
-            payload = await read_upstream(run_id=run.run_id, session=session)
+            payload = await read_upstream(
+                run_id=run.run_id, session=session, user_id="slack-post-test"
+            )
 
     assert isinstance(payload, Ok)
     assert payload.data == result_data
@@ -141,7 +143,9 @@ async def test_upstream_reader_no_result_null(session_factory):
 
     async with session_factory() as session:
         async with session.begin():
-            payload = await read_upstream(run_id=run.run_id, session=session)
+            payload = await read_upstream(
+                run_id=run.run_id, session=session, user_id="slack-post-test"
+            )
 
     assert isinstance(payload, NoResult)
 
@@ -153,7 +157,9 @@ async def test_upstream_reader_invalid_json(session_factory):
 
     async with session_factory() as session:
         async with session.begin():
-            payload = await read_upstream(run_id=run.run_id, session=session)
+            payload = await read_upstream(
+                run_id=run.run_id, session=session, user_id="slack-post-test"
+            )
 
     assert isinstance(payload, InvalidJson)
     assert payload.raw == "not-json-{]"
@@ -164,7 +170,9 @@ async def test_upstream_reader_missing_run_id(session_factory):
     """Non-existent run_id → read_upstream returns NoResult."""
     async with session_factory() as session:
         async with session.begin():
-            payload = await read_upstream(run_id=999_999_999, session=session)
+            payload = await read_upstream(
+                run_id=999_999_999, session=session, user_id="slack-post-test"
+            )
 
     assert isinstance(payload, NoResult)
 
@@ -178,7 +186,9 @@ async def test_upstream_reader_error_message(session_factory):
 
     async with session_factory() as session:
         async with session.begin():
-            payload = await read_upstream(run_id=run.run_id, session=session)
+            payload = await read_upstream(
+                run_id=run.run_id, session=session, user_id="slack-post-test"
+            )
 
     assert isinstance(payload, UpstreamError)
     assert "upstream failed" in payload.error_msg

@@ -160,7 +160,13 @@ class R2UploadHandler:
         secret_access_key = required["R2_SECRET_ACCESS_KEY"]
         bucket = required["R2_BUCKET"]
 
-        content_bytes_result = await self._resolve_content(params, resolved_content)
+        # Chain reads are scoped to the caller's own runs (run.user_id) to block
+        # cross-tenant from_run_id reads. run is None only in the direct-content
+        # smoke path (no from_run_id), where user_id is never consulted.
+        user_id = run.user_id if run is not None else None
+        content_bytes_result = await self._resolve_content(
+            params, resolved_content, user_id=user_id
+        )
         if isinstance(content_bytes_result, ActionResult):
             return content_bytes_result
         content_bytes = content_bytes_result
@@ -171,7 +177,7 @@ class R2UploadHandler:
         )
 
     async def _resolve_content(
-        self, params: R2UploadParams, resolved_content: str | None
+        self, params: R2UploadParams, resolved_content: str | None, *, user_id: str | None
     ) -> bytes | ActionResult:
         if params.from_run_id is not None:
             factory = self._get_session_factory()
@@ -181,6 +187,7 @@ class R2UploadHandler:
                         params.from_run_id,
                         session,
                         on_invalid_json="accept_raw",
+                        user_id=user_id,  # type: ignore[arg-type]
                     )
             if isinstance(result, ActionResult):
                 return result

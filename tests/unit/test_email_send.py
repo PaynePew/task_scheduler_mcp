@@ -74,7 +74,7 @@ async def test_from_run_id_ok_uses_upstream_output_as_body():
             from_run_id=42,
             template=EmailTemplate.digest_v1,
         )
-        body = await handler._build_body(params, None)
+        body = await handler._build_body(params, None, user_id="user-abc")
 
     assert isinstance(body, str)
     assert "5 issues closed" in body
@@ -92,7 +92,7 @@ async def test_from_run_id_upstream_error_passed_through_to_body():
     ):
         handler = EmailSendHandler()
         params = EmailSendParams(to=["user@example.com"], subject="Alert", from_run_id=99)
-        body = await handler._build_body(params, None)
+        body = await handler._build_body(params, None, user_id="user-abc")
 
     assert isinstance(body, str)
     assert "error" in body.lower() or "rate limited" in body
@@ -110,7 +110,7 @@ async def test_from_run_id_placeholder_body_is_still_a_string():
     ):
         handler = EmailSendHandler()
         params = EmailSendParams(to=["user@example.com"], subject="Digest", from_run_id=1)
-        body = await handler._build_body(params, None)
+        body = await handler._build_body(params, None, user_id="user-abc")
 
     assert isinstance(body, str)
     assert body  # non-empty placeholder

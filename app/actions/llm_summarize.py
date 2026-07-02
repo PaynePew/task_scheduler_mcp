@@ -18,9 +18,9 @@ or ``text`` must be set.
 
 from __future__ import annotations
 
-from typing import Any, ClassVar, Literal
+from typing import Annotated, Any, ClassVar, Literal
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.actions.base import ActionResult, CredentialMode
 from app.chain.upstream_reader import resolve_or_terminal
@@ -32,6 +32,7 @@ from app.llm.budget import (
     record_token_usage,
 )
 from app.llm.client import LLMClient, LLMClientError, LLMRequest
+from app.llm.prompt_guard import sanitize_prompt_field
 
 # ---------------------------------------------------------------------------
 # Fixed operator-authored system prompt (ADR-052 §3)
@@ -65,6 +66,20 @@ def _build_system_prompt(
 
 
 # ---------------------------------------------------------------------------
+# Prompt-integrity constraints (ADR-052 §5)
+# ---------------------------------------------------------------------------
+
+_MAX_LANGUAGE_LEN = 40
+_MAX_FOCUS_ITEMS = 10
+_MAX_FOCUS_ITEM_LEN = 80
+
+# ``language`` / ``focus`` are interpolated into the FIXED operator-authored
+# system prompt; sanitize_prompt_field (shared with llm_polish) collapses line
+# separators so a caller cannot inject an extra instruction line. Length is
+# capped separately via the Field constraints below.
+
+
+# ---------------------------------------------------------------------------
 # Params
 # ---------------------------------------------------------------------------
 
@@ -76,8 +91,20 @@ class LlmSummarizeParams(BaseModel):
     text: str | None = None
     style: Literal["bullet", "paragraph"] = "bullet"
     length: Literal["short", "medium", "long"] = "short"
-    language: str = "en"
-    focus: list[str] = []
+    language: str = Field(default="en", max_length=_MAX_LANGUAGE_LEN)
+    focus: list[Annotated[str, Field(max_length=_MAX_FOCUS_ITEM_LEN)]] = Field(
+        default=[], max_length=_MAX_FOCUS_ITEMS
+    )
+
+    @field_validator("language")
+    @classmethod
+    def _clean_language(cls, v: str) -> str:
+        return sanitize_prompt_field(v)
+
+    @field_validator("focus")
+    @classmethod
+    def _clean_focus(cls, v: list[str]) -> list[str]:
+        return [sanitize_prompt_field(item) for item in v]
 
     @model_validator(mode="after")
     def _exactly_one_input_source(self) -> LlmSummarizeParams:
@@ -147,8 +174,9 @@ class LlmSummarizeHandler:
     async def execute(self, run: Any, params: LlmSummarizeParams) -> ActionResult:
         from app.config.settings import settings
 
-        # 1. Resolve input text
-        input_text = await self._resolve_input(params)
+        # 1. Resolve input text. Chain reads are scoped to the caller's own runs
+        #    (run.user_id) to block cross-tenant from_run_id reads.
+        input_text = await self._resolve_input(params, user_id=self._get_user_id(run))
         if isinstance(input_text, ActionResult):
             return input_text
 
@@ -229,7 +257,9 @@ class LlmSummarizeHandler:
             error=None,
         )
 
-    async def _resolve_input(self, params: LlmSummarizeParams) -> str | ActionResult:
+    async def _resolve_input(
+        self, params: LlmSummarizeParams, *, user_id: str
+    ) -> str | ActionResult:
         """Return the text to summarize, fetching from upstream if from_run_id is set."""
         if params.text is not None:
             return params.text
@@ -241,6 +271,7 @@ class LlmSummarizeHandler:
                     params.from_run_id,  # type: ignore[arg-type]
                     session,
                     on_invalid_json="accept_raw",
+                    user_id=user_id,
                 )
 
     @staticmethod
