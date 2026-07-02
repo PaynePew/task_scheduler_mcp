@@ -23,6 +23,7 @@ A live multi-tenant instance runs at [scheduler.paynepew.dev](https://scheduler.
 - Your raw secret is never stored. GitHub, Slack, and Gmail actions run on per-user OAuth tokens that are scoped, revocable, and encrypted at rest with AWS KMS envelope encryption, then refreshed automatically when they expire ([ADR-054](docs/adr/ADR-054-layer2-token-storage-aws-kms-envelope-encryption.md)).
 - The data model is built to avoid races. Every status change is written to an append-only outbox in the same transaction, and the follow-up consumers read that event log instead of polling mutable state ([ADR-009](docs/adr/ADR-009-database-schema-outbox.md)). A recurring or chained run is created only when its upstream run reaches a terminal event — *continuation* — and exactly-once is enforced by a Postgres unique index rather than a distributed lock, so nothing can double-spawn ([ADR-067](docs/adr/ADR-067-continuation-chaining-replaces-pre-armed-waiting-runs.md)).
 - It runs on $5/month and stays up under load. Watchers claim work with `FOR UPDATE SKIP LOCKED` so several can run with no leader election. The server sheds load at the edge, caps concurrency, and applies backpressure when the queue is deep ([ADR-007](docs/adr/ADR-007-watcher-ha-skip-locked.md), [ADR-057](docs/adr/ADR-057-overload-protection-load-shedding-concurrency.md)).
+- A crashed worker can't wedge a job. Every `RUNNING` run renews a `heartbeat_at` lease, so the reconciler can tell a slow-but-alive run from a dead one and recover only true orphans — re-running idempotent actions and failing non-idempotent ones safely — which frees the job's quota and resumes its recurrence. `email_send` is *effectively-once*: a run-derived idempotency key plus a write-ahead intent record make a redelivered send a no-op, not a duplicate. At-least-once delivery + an idempotent consumer is the honest guarantee for an external side effect ([ADR-069](docs/adr/ADR-069-running-orphan-recovery-and-heartbeat-lease.md), [ADR-070](docs/adr/ADR-070-email-send-effectively-once-posture.md)).
 - Every decision is written down. 60+ ADRs cover scope, language, data store, transport, auth, and the security model, so the reasoning is auditable rather than tribal.
 
 ## Architecture
@@ -38,10 +39,10 @@ flowchart LR
     PG[("Postgres<br/>jobs · job_runs<br/>run_events outbox")]
     WAT["Watcher<br/>SKIP LOCKED"]
     Q[("Queue<br/>SQS · ElasticMQ")]
-    WO["Worker<br/>action handlers"]
+    WO["Worker<br/>action handlers<br/>renews heartbeat lease"]
     EXT["External APIs<br/>GitHub · Slack · Gmail<br/>LLM · HTTP · ICS"]
     CONT["Continuation consumer<br/>recurring successor +<br/>chained downstream"]
-    REC["Reconciler<br/>orphaned-run sweep"]
+    REC["Reconciler<br/>Sweep A · B · C<br/>orphan recovery"]
 
     CL -->|MCP call| SRV
     SRV -->|persist job| PG
@@ -52,13 +53,13 @@ flowchart LR
     WO -->|results + terminal events| PG
     PG -. terminal events .-> CONT
     CONT -. create next run .-> PG
-    PG -. orphaned runs .-> REC
-    REC -. requeue .-> PG
+    PG -. stale-lease orphans .-> REC
+    REC -. recover / fail-safe .-> PG
 ```
 
 A tool call reaches `mcp-server` through Caddy. The server verifies the bearer token, checks the caller's rate limit and quota, and writes a `Job` (and, for a scheduled job, its first `JobRun` — a chained job gets no run until its trigger fires). The **Watcher** scans for runs due within the next five minutes and claims them with `FOR UPDATE SKIP LOCKED`, so several watchers can run at once without stepping on each other. Claimed runs go onto the queue, and the **Worker** pulls one, dispatches it to the matching typed action handler, then writes the result and a status event back to Postgres.
 
-The follow-up consumers never poll the mutable status column — they read the append-only `run_events` outbox. The **Continuation consumer** reacts to each terminal event: in the same transaction it materializes the next recurring occurrence *and* creates a `PENDING` run for every chained downstream whose trigger just fired (continuation), then settles the finished job's `Job.state`. It replaced the old `RecurringJobWatcher` + `ChainWatcher` pair (ADR-067). The **Reconciler** sweeps up runs orphaned by a worker crash.
+The follow-up consumers never poll the mutable status column — they read the append-only `run_events` outbox. The **Continuation consumer** reacts to each terminal event: in the same transaction it materializes the next recurring occurrence *and* creates a `PENDING` run for every chained downstream whose trigger just fired (continuation), then settles the finished job's `Job.state`. It replaced the old `RecurringJobWatcher` + `ChainWatcher` pair (ADR-067). The **Reconciler** is the last line of defense: three idempotent sweeps run under `SKIP LOCKED` — it fails stuck `RETRYING` runs (A), re-enqueues due `QUEUED` runs the queue dropped (B), and recovers `RUNNING` runs orphaned by a worker crash (C). It tells a dead worker from a slow one by the `heartbeat_at` lease the worker renews while it holds a run, and recovers each orphan by its action's idempotency posture — re-running what is safe to repeat, failing-safe and alerting on what is not ([ADR-069](docs/adr/ADR-069-running-orphan-recovery-and-heartbeat-lease.md)).
 
 ### Auth and secrets
 
@@ -227,7 +228,7 @@ A stdio MCP server is a child process of the chat client, so it stops the moment
 |---|---|---|
 | `github_digest` | your GitHub | Pulls your issues and PRs for a repo. Good upstream for a digest. |
 | `slack_post` | your Slack | Posts a message to a channel in your workspace. |
-| `email_send` | your Google | Sends mail from your Gmail. Supports digest chaining. |
+| `email_send` | your Google | Sends mail from your Gmail. Supports digest chaining. Effectively-once — a redelivered send is de-duplicated, not doubled. |
 | `llm_summarize` | nothing | Summarizes text or an upstream result; chain to `slack_post` or `email_send` to deliver the output. Fixed prompt, token and budget caps. |
 | `llm_polish` | nothing | Rewrites text more cleanly (tone & language); chain to `slack_post` or `email_send` to deliver the output. Fixed prompt, token and budget caps. |
 | `echo` | nothing | Echoes input back. Smoke test for create and dispatch. |
@@ -296,6 +297,8 @@ Clients see five simple statuses (`scheduled`, `running`, `completed`, `failed`,
 
 Chaining and recurrence share one rule: a follow-up run is created only when its upstream run reaches a terminal event — **continuation**, driven by a single consumer that reads the outbox in event order. Exactly-once is a data-layer guarantee: a redelivered event that retries a creation hits a Postgres unique index and is a no-op, so no distributed lock is needed. If an upstream terminates faster than a downstream can finish, the overlapping tick is skipped on purpose (load shedding) and audited, keeping at most one executing run per job. This replaced the earlier pre-armed `WAITING` / `ChainWatcher` design and the double-spawn race it carried; the reasoning is in [ADR-067](docs/adr/ADR-067-continuation-chaining-replaces-pre-armed-waiting-runs.md) and [CONTEXT.md](CONTEXT.md).
 
+A worker crash doesn't strand that pipeline. While a run is `RUNNING` the worker renews a `heartbeat_at` lease; if the lease goes stale the reconciler recovers the run by its action's idempotency posture, so the job's `Job.state` settles, its quota frees, and its recurrence resumes instead of wedging forever on a stuck `RUNNING` row. For an external side effect there is no true exactly-once, so `email_send` is **effectively-once**: a run-derived idempotency key (`{action}:{run_id}`) and a write-ahead `send_intents` record make a redelivered or retried send a no-op that echoes the original message id, rather than a second email. At-least-once delivery plus an idempotent consumer is the honest end-to-end guarantee ([ADR-069](docs/adr/ADR-069-running-orphan-recovery-and-heartbeat-lease.md), [ADR-070](docs/adr/ADR-070-email-send-effectively-once-posture.md)).
+
 ## Security model
 
 The public deployment ([ADR-049](docs/adr/ADR-049-public-product-multi-tenant-oauth-delegation.md)) is built in two layers.
@@ -339,7 +342,8 @@ Decisions are recorded as ADRs under [docs/adr/](docs/adr/), with the domain lan
 | Actions and chaining | [013](docs/adr/ADR-013-action-catalog-typed-registry.md) typed registry, [033](docs/adr/ADR-033-inter-handler-data-flow-via-job-run-result.md) inter-handler data plane, [067](docs/adr/ADR-067-continuation-chaining-replaces-pre-armed-waiting-runs.md) continuation chaining, [068](docs/adr/ADR-068-job-state-machine-replaces-active-boolean.md) Job.state lifecycle |
 | Public auth and secrets | [049](docs/adr/ADR-049-public-product-multi-tenant-oauth-delegation.md) multi-tenant deployment, [053](docs/adr/ADR-053-layer1-authorization-server-workos-authkit.md) WorkOS, [054](docs/adr/ADR-054-layer2-token-storage-aws-kms-envelope-encryption.md) KMS tokens, [050](docs/adr/ADR-050-dual-credential-model-oauth-vs-operator-env.md) / [051](docs/adr/ADR-051-action-surface-tiering-public-oauth-vs-operator-only.md) credential tiering |
 | Cost and resilience | [055](docs/adr/ADR-055-public-abuse-cost-containment-posture.md) quotas, [057](docs/adr/ADR-057-overload-protection-load-shedding-concurrency.md) overload protection, [056](docs/adr/ADR-056-observability-structured-json-logging-better-stack.md) structured logging, [031](docs/adr/ADR-031-monitoring-better-stack-over-uptimerobot.md) external monitoring |
+| Durability and delivery | [069](docs/adr/ADR-069-running-orphan-recovery-and-heartbeat-lease.md) RUNNING-orphan recovery + heartbeat lease, [070](docs/adr/ADR-070-email-send-effectively-once-posture.md) effectively-once email |
 
 ## Status
 
-The hosted instance is live and multi-tenant: OAuth login, per-user connections, the six actions above, recurring schedules, and continuation chaining all work in production. Deferred to a later version: fan-in (one job reading several upstreams), a higher-level plan abstraction, and running the worker as its own MCP client ([ADR-038](docs/adr/ADR-038-mcp-call-as-future-direction.md) through [ADR-040](docs/adr/ADR-040-predicate-based-chain-as-future-direction.md)). Issues and discussion: [github.com/PaynePew/task_scheduler_mcp/issues](https://github.com/PaynePew/task_scheduler_mcp/issues).
+The hosted instance is live and multi-tenant: OAuth login, per-user connections, the six actions above, recurring schedules, continuation chaining, crash-durable execution (heartbeat lease + reconciler orphan recovery), and effectively-once email all work in production. Deferred to a later version: fan-in (one job reading several upstreams), a higher-level plan abstraction, and running the worker as its own MCP client ([ADR-038](docs/adr/ADR-038-mcp-call-as-future-direction.md) through [ADR-040](docs/adr/ADR-040-predicate-based-chain-as-future-direction.md)). Issues and discussion: [github.com/PaynePew/task_scheduler_mcp/issues](https://github.com/PaynePew/task_scheduler_mcp/issues).
