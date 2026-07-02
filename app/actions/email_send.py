@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import base64
 import logging
-import os
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from email.message import EmailMessage
@@ -42,7 +41,6 @@ from app.actions.send_dedup import (
 from app.chain.upstream_reader import resolve_for_display
 from app.config.settings import settings
 from app.connections.store import ConnectionMiss, get_token
-from app.secrets.resolver import SecretResolutionError, build_effective_whitelist, resolve
 
 logger = logging.getLogger(__name__)
 
@@ -133,25 +131,20 @@ class EmailSendHandler:
     idempotent: ClassVar[bool] = False  # external side effect (sends real email)
 
     async def execute(self, run: Any, params: EmailSendParams) -> ActionResult:
-        # Resolve any ${VAR} references (ADR-032) in subject/body.
-        whitelist = build_effective_whitelist()
-        env = dict(os.environ)
-        try:
-            resolved_subject = resolve(params.subject, env, whitelist)
-            resolved_body = (
-                resolve(params.body, env, whitelist) if params.body is not None else None
-            )
-        except SecretResolutionError as exc:
-            return ActionResult(ok=False, result=None, error=str(exc), retryable=False)
-
-        # Build email body (direct or chain-fed).
-        body_text = await self._build_body(params, resolved_body)
+        # email_send is a PUBLIC action (requires_operator=False): it must NOT do
+        # ${VAR} operator-secret substitution (ADR-050 dual-credential model, ADR-052
+        # §5). Public users send via their own OAuth/Gmail; subject/body are literal.
+        # A caller who types "${GITHUB_TOKEN}" gets that literal text, not the secret.
+        #
+        # Build email body (direct or chain-fed). Chain reads are scoped to the
+        # caller's own runs (run.user_id) to block cross-tenant from_run_id reads.
+        body_text = await self._build_body(params, params.body, user_id=run.user_id)
         if isinstance(body_text, ActionResult):
             return body_text
 
         # Send via the caller's connected Gmail. Returns MISSING_CONNECTION when
         # the user has no Google connection — there is no SMTP fallback.
-        return await self._send_via_gmail(run, params, resolved_subject, body_text)
+        return await self._send_via_gmail(run, params, params.subject, body_text)
 
     async def _send_via_gmail(
         self,
@@ -181,9 +174,15 @@ class EmailSendHandler:
             return missing_connection_result("google")
 
         # Build RFC 2822 message and encode as base64url for the Gmail API.
+        # Defense-in-depth against header injection: strip CR/LF from the subject
+        # so a newline can never inject a second header (e.g. "\r\nBcc: ..."). The
+        # stdlib EmailMessage policy already rejects CR/LF in headers with a
+        # ValueError; stripping first turns that into a clean send. (To is
+        # EmailStr-validated; body via set_content is a body, not a header.)
+        safe_subject = subject.replace("\r", " ").replace("\n", " ")
         msg = EmailMessage()
         msg["To"] = ", ".join(str(addr) for addr in params.to)
-        msg["Subject"] = subject
+        msg["Subject"] = safe_subject
         msg.set_content(body_text)
         raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
 
@@ -293,12 +292,14 @@ class EmailSendHandler:
         self,
         params: EmailSendParams,
         resolved_body: str | None,
+        *,
+        user_id: str,
     ) -> str | ActionResult:
         template = params.template or EmailTemplate.raw
         formatter = _TEMPLATE_FORMATTERS[template]
 
         if params.from_run_id is not None:
-            return await self._body_from_upstream(params.from_run_id, formatter)
+            return await self._body_from_upstream(params.from_run_id, formatter, user_id=user_id)
 
         if resolved_body is not None:
             return resolved_body
@@ -310,12 +311,16 @@ class EmailSendHandler:
             retryable=False,
         )
 
-    async def _body_from_upstream(self, from_run_id: int, formatter: Callable[..., str]) -> str:
+    async def _body_from_upstream(
+        self, from_run_id: int, formatter: Callable[..., str], *, user_id: str
+    ) -> str:
         from app.db.engine import async_session_factory  # noqa: PLC0415
 
         async with async_session_factory() as session:
             async with session.begin():
-                return await resolve_for_display(from_run_id, session, formatter=formatter)
+                return await resolve_for_display(
+                    from_run_id, session, formatter=formatter, user_id=user_id
+                )
 
 
 # ---------------------------------------------------------------------------

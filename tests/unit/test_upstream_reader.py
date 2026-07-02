@@ -48,7 +48,7 @@ def _make_run(result: str | None = None, error_message: str | None = None) -> Ma
 
 async def test_no_result_when_run_not_found():
     session = _make_session(None)
-    payload = await read_upstream(999, session)
+    payload = await read_upstream(999, session, user_id="u1")
     assert isinstance(payload, NoResult)
 
 
@@ -60,7 +60,7 @@ async def test_no_result_when_run_not_found():
 async def test_no_result_when_result_null_no_error():
     run = _make_run(result=None, error_message=None)
     session = _make_session(run)
-    payload = await read_upstream(1, session)
+    payload = await read_upstream(1, session, user_id="u1")
     assert isinstance(payload, NoResult)
 
 
@@ -72,7 +72,7 @@ async def test_no_result_when_result_null_no_error():
 async def test_upstream_error_when_result_null_with_error_message():
     run = _make_run(result=None, error_message="connection refused")
     session = _make_session(run)
-    payload = await read_upstream(1, session)
+    payload = await read_upstream(1, session, user_id="u1")
     assert isinstance(payload, UpstreamError)
     assert payload.error_msg == "connection refused"
 
@@ -86,7 +86,7 @@ async def test_ok_when_result_is_valid_json_object():
     data = {"status": "ok", "count": 42}
     run = _make_run(result=json.dumps(data))
     session = _make_session(run)
-    payload = await read_upstream(1, session)
+    payload = await read_upstream(1, session, user_id="u1")
     assert isinstance(payload, Ok)
     assert payload.data == data
 
@@ -95,7 +95,7 @@ async def test_ok_when_result_is_valid_json_array():
     data = [1, 2, 3]
     run = _make_run(result=json.dumps(data))
     session = _make_session(run)
-    payload = await read_upstream(1, session)
+    payload = await read_upstream(1, session, user_id="u1")
     assert isinstance(payload, Ok)
     assert payload.data == data
 
@@ -103,7 +103,7 @@ async def test_ok_when_result_is_valid_json_array():
 async def test_ok_when_result_is_valid_json_string():
     run = _make_run(result=json.dumps("hello"))
     session = _make_session(run)
-    payload = await read_upstream(1, session)
+    payload = await read_upstream(1, session, user_id="u1")
     assert isinstance(payload, Ok)
     assert payload.data == "hello"
 
@@ -111,7 +111,7 @@ async def test_ok_when_result_is_valid_json_string():
 async def test_ok_when_result_is_valid_json_number():
     run = _make_run(result="123")
     session = _make_session(run)
-    payload = await read_upstream(1, session)
+    payload = await read_upstream(1, session, user_id="u1")
     assert isinstance(payload, Ok)
     assert payload.data == 123
 
@@ -124,7 +124,7 @@ async def test_ok_when_result_is_valid_json_number():
 async def test_invalid_json_when_result_is_not_json():
     run = _make_run(result="not-json{{")
     session = _make_session(run)
-    payload = await read_upstream(1, session)
+    payload = await read_upstream(1, session, user_id="u1")
     assert isinstance(payload, InvalidJson)
     assert payload.raw == "not-json{{"
 
@@ -132,7 +132,7 @@ async def test_invalid_json_when_result_is_not_json():
 async def test_invalid_json_when_result_is_truncated():
     run = _make_run(result='{"key": ')
     session = _make_session(run)
-    payload = await read_upstream(1, session)
+    payload = await read_upstream(1, session, user_id="u1")
     assert isinstance(payload, InvalidJson)
     assert payload.raw == '{"key": '
 

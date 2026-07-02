@@ -9,6 +9,7 @@ Exercises:
 
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -43,6 +44,26 @@ def _build_mock_http_client(response: httpx.Response) -> MagicMock:
     ctx.__aenter__ = AsyncMock(return_value=mock_client)
     ctx.__aexit__ = AsyncMock(return_value=None)
     return ctx
+
+
+def _build_capturing_http_client(captured: dict, response: httpx.Response) -> MagicMock:
+    """Mock httpx client that records the posted JSON (captures the RFC 2822 raw)."""
+
+    async def _post(url, headers=None, json=None):
+        captured["json"] = json
+        return response
+
+    mock_client = MagicMock()
+    mock_client.post = AsyncMock(side_effect=_post)
+    ctx = MagicMock()
+    ctx.__aenter__ = AsyncMock(return_value=mock_client)
+    ctx.__aexit__ = AsyncMock(return_value=None)
+    return ctx
+
+
+def _decode_sent_message(captured: dict) -> str:
+    """Base64url-decode the ``raw`` field the handler POSTs to the Gmail API."""
+    return base64.urlsafe_b64decode(captured["json"]["raw"]).decode()
 
 
 # ---------------------------------------------------------------------------
@@ -298,3 +319,84 @@ async def test_routes_to_gmail_regardless_of_operator_status():
 
     assert result.ok is True
     assert result.result.get("provider") == "gmail"
+
+
+# ---------------------------------------------------------------------------
+# Security — no ${VAR} operator-secret substitution (public action; ADR-050/052)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_email_send_does_not_substitute_env_vars(monkeypatch):
+    """email_send is PUBLIC: a ${VAR} in subject/body must reach Gmail as literal
+    text, never the operator's secret (blocks secret exfiltration)."""
+    monkeypatch.setenv("GITHUB_TOKEN", "super-secret-operator-value")
+    handler = _handler()
+    params = EmailSendParams(
+        to=["dest@example.com"],
+        subject="Report ${GITHUB_TOKEN}",
+        body="the token is ${GITHUB_TOKEN}",
+    )
+    run = FakeRun(user_id="user-abc")
+
+    captured: dict = {}
+    success_resp = httpx.Response(200, json={"id": "msg-1"})
+    with (
+        patch("app.actions.email_send.settings") as mock_settings,
+        patch("app.actions.email_send.get_token", AsyncMock(return_value="ya29.tok")),
+        patch(
+            "app.actions.email_send.httpx.AsyncClient",
+            return_value=_build_capturing_http_client(captured, success_resp),
+        ),
+    ):
+        mock_settings.operator_user_id = "operator-uid"
+        mock_settings.connections_base_url = "http://localhost:8000"
+        result = await handler.execute(run=run, params=params)
+
+    assert result.ok is True
+    sent = _decode_sent_message(captured)
+    # Literal ${VAR} passes through un-substituted...
+    assert "${GITHUB_TOKEN}" in sent
+    # ...and the operator secret is never leaked into the outgoing message.
+    assert "super-secret-operator-value" not in sent
+
+
+# ---------------------------------------------------------------------------
+# Security — Subject header-injection defense-in-depth (FIX #4)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_email_send_subject_no_header_injection():
+    """A newline + 'Bcc:' embedded in the subject must not produce a Bcc header:
+    CR/LF are stripped before the subject is set, so no second header is injected."""
+    handler = _handler()
+    params = EmailSendParams(
+        to=["dest@example.com"],
+        subject="Hello\r\nBcc: attacker@evil.com",
+        body="Body",
+    )
+    run = FakeRun(user_id="user-abc")
+
+    captured: dict = {}
+    success_resp = httpx.Response(200, json={"id": "msg-1"})
+    with (
+        patch("app.actions.email_send.settings") as mock_settings,
+        patch("app.actions.email_send.get_token", AsyncMock(return_value="ya29.tok")),
+        patch(
+            "app.actions.email_send.httpx.AsyncClient",
+            return_value=_build_capturing_http_client(captured, success_resp),
+        ),
+    ):
+        mock_settings.operator_user_id = "operator-uid"
+        mock_settings.connections_base_url = "http://localhost:8000"
+        result = await handler.execute(run=run, params=params)
+
+    assert result.ok is True
+    sent = _decode_sent_message(captured)
+    header_block = sent.split("\n\n", 1)[0]
+    header_lines = header_block.split("\n")
+    # No standalone Bcc header was injected by the embedded newline...
+    assert not any(line.lower().startswith("bcc:") for line in header_lines)
+    # ...the subject collapsed to a single sanitized Subject line (CR/LF → space).
+    assert "Subject: Hello  Bcc: attacker@evil.com" in header_lines

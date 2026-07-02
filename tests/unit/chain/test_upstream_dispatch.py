@@ -50,33 +50,33 @@ def _patch_upstream(payload):
 
 async def test_resolve_for_display_ok():
     with _patch_upstream(Ok(data={"x": 1})):
-        result = await resolve_for_display(1, AsyncMock(), formatter=_fmt)
+        result = await resolve_for_display(1, AsyncMock(), formatter=_fmt, user_id="u1")
     assert result == "data={'x': 1},is_error=False"
 
 
 async def test_resolve_for_display_upstream_error():
     with _patch_upstream(UpstreamError(error_msg="boom")):
-        result = await resolve_for_display(1, AsyncMock(), formatter=_fmt)
+        result = await resolve_for_display(1, AsyncMock(), formatter=_fmt, user_id="u1")
     assert result == "data='boom',is_error=True"
 
 
 async def test_resolve_for_display_no_result():
     with _patch_upstream(NoResult()):
-        result = await resolve_for_display(1, AsyncMock(), formatter=_fmt)
+        result = await resolve_for_display(1, AsyncMock(), formatter=_fmt, user_id="u1")
     assert result == "data='(no result)',is_error=True"
 
 
 async def test_resolve_for_display_invalid_json():
     raw = "bad-json"
     with _patch_upstream(InvalidJson(raw=raw)):
-        result = await resolve_for_display(1, AsyncMock(), formatter=_fmt)
+        result = await resolve_for_display(1, AsyncMock(), formatter=_fmt, user_id="u1")
     assert result == f"data='(invalid JSON: {raw})',is_error=True"
 
 
 async def test_resolve_for_display_invalid_json_truncates_at_100():
     raw = "x" * 200
     with _patch_upstream(InvalidJson(raw=raw)):
-        result = await resolve_for_display(1, AsyncMock(), formatter=_fmt)
+        result = await resolve_for_display(1, AsyncMock(), formatter=_fmt, user_id="u1")
     truncated = raw[:100]
     assert result == f"data='(invalid JSON: {truncated})',is_error=True"
 
@@ -89,46 +89,54 @@ async def test_resolve_for_display_invalid_json_truncates_at_100():
 async def test_resolve_or_terminal_ok_dict_accept_raw():
     data = {"key": "val"}
     with _patch_upstream(Ok(data=data)):
-        result = await resolve_or_terminal(1, AsyncMock(), on_invalid_json="accept_raw")
+        result = await resolve_or_terminal(
+            1, AsyncMock(), on_invalid_json="accept_raw", user_id="u1"
+        )
     assert result == json.dumps(data)
 
 
 async def test_resolve_or_terminal_ok_dict_fail():
     data = {"key": "val"}
     with _patch_upstream(Ok(data=data)):
-        result = await resolve_or_terminal(1, AsyncMock(), on_invalid_json="fail")
+        result = await resolve_or_terminal(1, AsyncMock(), on_invalid_json="fail", user_id="u1")
     assert result == json.dumps(data)
 
 
 async def test_resolve_or_terminal_ok_str_accept_raw():
     with _patch_upstream(Ok(data="plain text")):
-        result = await resolve_or_terminal(1, AsyncMock(), on_invalid_json="accept_raw")
+        result = await resolve_or_terminal(
+            1, AsyncMock(), on_invalid_json="accept_raw", user_id="u1"
+        )
     assert result == "plain text"
 
 
 async def test_resolve_or_terminal_ok_str_fail():
     with _patch_upstream(Ok(data="plain text")):
-        result = await resolve_or_terminal(1, AsyncMock(), on_invalid_json="fail")
+        result = await resolve_or_terminal(1, AsyncMock(), on_invalid_json="fail", user_id="u1")
     assert result == "plain text"
 
 
 async def test_resolve_or_terminal_ok_list_accept_raw():
     data = [1, 2, 3]
     with _patch_upstream(Ok(data=data)):
-        result = await resolve_or_terminal(1, AsyncMock(), on_invalid_json="accept_raw")
+        result = await resolve_or_terminal(
+            1, AsyncMock(), on_invalid_json="accept_raw", user_id="u1"
+        )
     assert result == json.dumps(data)
 
 
 async def test_resolve_or_terminal_ok_list_fail():
     data = [1, 2, 3]
     with _patch_upstream(Ok(data=data)):
-        result = await resolve_or_terminal(1, AsyncMock(), on_invalid_json="fail")
+        result = await resolve_or_terminal(1, AsyncMock(), on_invalid_json="fail", user_id="u1")
     assert result == json.dumps(data)
 
 
 async def test_resolve_or_terminal_upstream_error_accept_raw():
     with _patch_upstream(UpstreamError(error_msg="db down")):
-        result = await resolve_or_terminal(1, AsyncMock(), on_invalid_json="accept_raw")
+        result = await resolve_or_terminal(
+            1, AsyncMock(), on_invalid_json="accept_raw", user_id="u1"
+        )
     assert isinstance(result, ActionResult)
     assert result.ok is False
     assert result.retryable is False
@@ -137,7 +145,7 @@ async def test_resolve_or_terminal_upstream_error_accept_raw():
 
 async def test_resolve_or_terminal_upstream_error_fail():
     with _patch_upstream(UpstreamError(error_msg="db down")):
-        result = await resolve_or_terminal(1, AsyncMock(), on_invalid_json="fail")
+        result = await resolve_or_terminal(1, AsyncMock(), on_invalid_json="fail", user_id="u1")
     assert isinstance(result, ActionResult)
     assert result.ok is False
     assert result.retryable is False
@@ -146,7 +154,9 @@ async def test_resolve_or_terminal_upstream_error_fail():
 
 async def test_resolve_or_terminal_no_result_accept_raw():
     with _patch_upstream(NoResult()):
-        result = await resolve_or_terminal(1, AsyncMock(), on_invalid_json="accept_raw")
+        result = await resolve_or_terminal(
+            1, AsyncMock(), on_invalid_json="accept_raw", user_id="u1"
+        )
     assert isinstance(result, ActionResult)
     assert result.ok is False
     assert result.retryable is False
@@ -154,7 +164,7 @@ async def test_resolve_or_terminal_no_result_accept_raw():
 
 async def test_resolve_or_terminal_no_result_fail():
     with _patch_upstream(NoResult()):
-        result = await resolve_or_terminal(1, AsyncMock(), on_invalid_json="fail")
+        result = await resolve_or_terminal(1, AsyncMock(), on_invalid_json="fail", user_id="u1")
     assert isinstance(result, ActionResult)
     assert result.ok is False
     assert result.retryable is False
@@ -163,14 +173,16 @@ async def test_resolve_or_terminal_no_result_fail():
 async def test_resolve_or_terminal_invalid_json_accept_raw():
     raw = '{"broken": '
     with _patch_upstream(InvalidJson(raw=raw)):
-        result = await resolve_or_terminal(1, AsyncMock(), on_invalid_json="accept_raw")
+        result = await resolve_or_terminal(
+            1, AsyncMock(), on_invalid_json="accept_raw", user_id="u1"
+        )
     assert result == raw
 
 
 async def test_resolve_or_terminal_invalid_json_fail():
     raw = '{"broken": '
     with _patch_upstream(InvalidJson(raw=raw)):
-        result = await resolve_or_terminal(1, AsyncMock(), on_invalid_json="fail")
+        result = await resolve_or_terminal(1, AsyncMock(), on_invalid_json="fail", user_id="u1")
     assert isinstance(result, ActionResult)
     assert result.ok is False
     assert result.retryable is False

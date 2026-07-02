@@ -96,7 +96,7 @@ async def test_ok_when_upstream_run_has_json_result(session_factory):
 
     async with session_factory() as session:
         async with session.begin():
-            payload = await read_upstream(run_id, session)
+            payload = await read_upstream(run_id, session, user_id="upstream-reader-test")
 
     assert isinstance(payload, Ok)
     assert payload.data == payload_data
@@ -114,7 +114,7 @@ async def test_no_result_when_upstream_result_null(session_factory):
 
     async with session_factory() as session:
         async with session.begin():
-            payload = await read_upstream(run_id, session)
+            payload = await read_upstream(run_id, session, user_id="upstream-reader-test")
 
     assert isinstance(payload, NoResult)
 
@@ -132,7 +132,7 @@ async def test_invalid_json_when_upstream_result_is_malformed(session_factory):
 
     async with session_factory() as session:
         async with session.begin():
-            payload = await read_upstream(run_id, session)
+            payload = await read_upstream(run_id, session, user_id="upstream-reader-test")
 
     assert isinstance(payload, InvalidJson)
     assert payload.raw == raw
@@ -148,7 +148,7 @@ async def test_no_result_when_run_id_missing(session_factory):
     """Non-existent run_id → NoResult."""
     async with session_factory() as session:
         async with session.begin():
-            payload = await read_upstream(999_999_999, session)
+            payload = await read_upstream(999_999_999, session, user_id="upstream-reader-test")
 
     assert isinstance(payload, NoResult)
 
@@ -171,7 +171,7 @@ async def test_upstream_error_when_result_null_error_message_set(session_factory
 
     async with session_factory() as session:
         async with session.begin():
-            payload = await read_upstream(run_id, session)
+            payload = await read_upstream(run_id, session, user_id="upstream-reader-test")
 
     assert isinstance(payload, UpstreamError)
     assert payload.error_msg == msg
