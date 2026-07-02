@@ -309,6 +309,8 @@ stdio 的 MCP 伺服器是對話客戶端的子行程，對話一關就停。排
 
 憑證來自兩條互不重疊的軌道（[ADR-050](docs/adr/ADR-050-dual-credential-model-oauth-vs-operator-env.md)）：公開使用者用自己的 OAuth 連線，伺服器自己的動作則用 `${VAR}` 環境變數替換。會讀到這些伺服器端密鑰、或能打到任意 URL 的動作（`http_call`、`calendar_digest_ics`）僅限部署者使用，對其他人在 `task.create` 就被拒絕（[ADR-051](docs/adr/ADR-051-action-surface-tiering-public-oauth-vs-operator-only.md)）。
 
+**第三層，你的輸入能碰到什麼。** `task.create` 參數裡的一切都是不受信任的，而它流經的兩個平面都會強制擁有權 (ownership)。控制面上，串接觸發（`trigger_on_job_id`）只能指向你自己的 job；資料面上，把某次 run 的結果餵給下一個處理器的 `from_run_id`，會被限縮在你自己的 run，所以別的租戶的 run id 會解析成「找不到」而非洩漏其結果。成本受限的 LLM 動作不接受自由格式 prompt：它的 `language` / `focus` 參數有長度上限、並剝除換行，因此無法改寫固定的系統提示；而公開動作永遠不做 `${VAR}` 密鑰替換（[ADR-071](docs/adr/ADR-071-input-abuse-and-prompt-injection-hardening.md)）。
+
 一顆 5 美元的核心，靠分層限制守住（[ADR-055](docs/adr/ADR-055-public-abuse-cost-containment-posture.md)、[ADR-057](docs/adr/ADR-057-overload-protection-load-shedding-concurrency.md)）：每位使用者的建立速率（100/天、5/分）、每人活躍週期任務上限（5）與總活躍任務上限（50）、全域週期任務天花板（500）、機器不健康時在邊緣卸載流量、在途併發上限，以及佇列堆積時的 `429` 背壓。每項限制都可由環境變數設定。結構化 JSON 日誌送到 Better Stack，帶每位使用者與每次執行的關聯欄位，且權杖從不寫進日誌（[ADR-056](docs/adr/ADR-056-observability-structured-json-logging-better-stack.md)）。
 
 ## 部署
@@ -340,7 +342,7 @@ uv run ruff check . && uv run ruff format --check .
 |---|---|
 | 傳輸與資料模型 | [006](docs/adr/ADR-006-mcp-transport-dual-stdio-http.md) 雙模 stdio／HTTP、[009](docs/adr/ADR-009-database-schema-outbox.md) outbox schema、[007](docs/adr/ADR-007-watcher-ha-skip-locked.md) SKIP LOCKED watcher |
 | 動作與串接 | [013](docs/adr/ADR-013-action-catalog-typed-registry.md) 型別化登錄表、[033](docs/adr/ADR-033-inter-handler-data-flow-via-job-run-result.md) 跨處理器資料面、[067](docs/adr/ADR-067-continuation-chaining-replaces-pre-armed-waiting-runs.md) 延續串接、[068](docs/adr/ADR-068-job-state-machine-replaces-active-boolean.md) Job.state 生命週期 |
-| 公開認證與密鑰 | [049](docs/adr/ADR-049-public-product-multi-tenant-oauth-delegation.md) 多租戶部署、[053](docs/adr/ADR-053-layer1-authorization-server-workos-authkit.md) WorkOS、[054](docs/adr/ADR-054-layer2-token-storage-aws-kms-envelope-encryption.md) KMS 權杖、[050](docs/adr/ADR-050-dual-credential-model-oauth-vs-operator-env.md)／[051](docs/adr/ADR-051-action-surface-tiering-public-oauth-vs-operator-only.md) 憑證分層 |
+| 公開認證與密鑰 | [049](docs/adr/ADR-049-public-product-multi-tenant-oauth-delegation.md) 多租戶部署、[053](docs/adr/ADR-053-layer1-authorization-server-workos-authkit.md) WorkOS、[054](docs/adr/ADR-054-layer2-token-storage-aws-kms-envelope-encryption.md) KMS 權杖、[050](docs/adr/ADR-050-dual-credential-model-oauth-vs-operator-env.md)／[051](docs/adr/ADR-051-action-surface-tiering-public-oauth-vs-operator-only.md) 憑證分層、[071](docs/adr/ADR-071-input-abuse-and-prompt-injection-hardening.md) 輸入濫用／prompt injection 強化 |
 | 成本與韌性 | [055](docs/adr/ADR-055-public-abuse-cost-containment-posture.md) 配額、[057](docs/adr/ADR-057-overload-protection-load-shedding-concurrency.md) 過載保護、[056](docs/adr/ADR-056-observability-structured-json-logging-better-stack.md) 結構化日誌、[031](docs/adr/ADR-031-monitoring-better-stack-over-uptimerobot.md) 外部監控 |
 | 耐久性與投遞 | [069](docs/adr/ADR-069-running-orphan-recovery-and-heartbeat-lease.md) RUNNING 孤兒回收 + heartbeat 租約、[070](docs/adr/ADR-070-email-send-effectively-once-posture.md) 有效一次 email |
 
