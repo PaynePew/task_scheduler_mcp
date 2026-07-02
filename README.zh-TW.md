@@ -23,6 +23,7 @@
 - 從不儲存你的原始密鑰 (raw secret)。GitHub、Slack、Gmail 這些動作跑在每位使用者自己的 OAuth 權杖上，這些權杖是受限、可撤銷的，用 AWS KMS 信封加密 (envelope encryption) 加密後才落地，過期時自動換新（[ADR-054](docs/adr/ADR-054-layer2-token-storage-aws-kms-envelope-encryption.md)）。
 - 資料模型是為了避免競態 (race condition) 而設計的。每一次狀態變更都在同一個交易 (transaction) 裡寫進一個僅能附加 (append-only) 的 outbox，而後續消費者讀的是這份事件日誌，不去輪詢 (poll) 可變狀態（[ADR-009](docs/adr/ADR-009-database-schema-outbox.md)）。週期或串接的執行，只在其上游執行到達終態事件時才建立——延續 (continuation)——而 exactly-once 由 Postgres 唯一索引保證，而非分散式鎖，所以任何東西都不會重複生成（[ADR-067](docs/adr/ADR-067-continuation-chaining-replaces-pre-armed-waiting-runs.md)）。
 - 它跑在每月 5 美元上，而且在負載下站得住。各個 watcher 用 `FOR UPDATE SKIP LOCKED` 認領工作，所以可以跑好幾個而不需要 leader 選舉。伺服器會在邊緣 (edge) 卸載流量、限制併發 (concurrency)，並在佇列堆積時施加背壓 (backpressure)（[ADR-007](docs/adr/ADR-007-watcher-ha-skip-locked.md)、[ADR-057](docs/adr/ADR-057-overload-protection-load-shedding-concurrency.md)）。
+- 一個當掉的 worker 不會把任務卡死。每個 `RUNNING` 執行都會續約一個 `heartbeat_at` 租約 (lease)，所以 reconciler 能分辨「還活著、只是慢」與「已經死了」，只回收真正被孤立的執行——可安全重跑的冪等 (idempotent) 動作就重跑，非冪等的則安全地判失敗——藉此釋放任務的配額並讓它的週期恢復。`email_send` 是**有效一次 (effectively-once)**：以執行衍生的冪等鍵 (idempotency key) 加上寫入在前的意圖記錄 (write-ahead intent)，讓被重新投遞的寄送變成 no-op，而非重複寄出。至少一次投遞 (at-least-once) + 冪等消費者，才是外部副作用誠實的保證（[ADR-069](docs/adr/ADR-069-running-orphan-recovery-and-heartbeat-lease.md)、[ADR-070](docs/adr/ADR-070-email-send-effectively-once-posture.md)）。
 - 每個決策都寫下來了。60 多份 ADR 涵蓋範疇、語言、資料存儲、傳輸、認證與安全模型，所以推理過程是可稽核的，而不是只存在某個人腦裡。
 
 ## 系統架構
@@ -38,10 +39,10 @@ flowchart LR
     PG[("Postgres<br/>jobs · job_runs<br/>run_events outbox")]
     WAT["Watcher<br/>SKIP LOCKED"]
     Q[("Queue<br/>SQS · ElasticMQ")]
-    WO["Worker<br/>action handlers"]
+    WO["Worker<br/>action handlers<br/>renews heartbeat lease"]
     EXT["External APIs<br/>GitHub · Slack · Gmail<br/>LLM · HTTP · ICS"]
     CONT["Continuation consumer<br/>recurring successor +<br/>chained downstream"]
-    REC["Reconciler<br/>orphaned-run sweep"]
+    REC["Reconciler<br/>Sweep A · B · C<br/>orphan recovery"]
 
     CL -->|MCP call| SRV
     SRV -->|persist job| PG
@@ -52,13 +53,13 @@ flowchart LR
     WO -->|results + terminal events| PG
     PG -. terminal events .-> CONT
     CONT -. create next run .-> PG
-    PG -. orphaned runs .-> REC
-    REC -. requeue .-> PG
+    PG -. stale-lease orphans .-> REC
+    REC -. recover / fail-safe .-> PG
 ```
 
 一次工具呼叫透過 Caddy 到達 `mcp-server`。伺服器驗證 bearer 權杖、檢查呼叫者的速率限制與配額，然後寫入一個 `Job`（若是排程型任務，還會建立它的第一個 `JobRun`——串接型任務要等到觸發才會有執行）。**Watcher** 掃描未來五分鐘內到期的執行，用 `FOR UPDATE SKIP LOCKED` 認領它們，所以可以同時跑好幾個 watcher 而互不踩線。被認領的執行進入佇列，**Worker** 取出一個，分派 (dispatch) 給對應的型別化動作處理器 (typed action handler)，再把結果與一筆狀態事件寫回 Postgres。
 
-後續的消費者從不輪詢那個可變的狀態欄位，它們讀的是僅能附加的 `run_events` outbox。**Continuation consumer（延續消費者）** 對每一筆終態事件反應：在同一個交易裡，它物化 (materialize) 下一個週期執行，並為每個觸發條件剛滿足的串接下游建立一個 `PENDING` 執行（延續 continuation），接著結算 (settle) 完成任務的 `Job.state`。它取代了舊的 `RecurringJobWatcher` + `ChainWatcher` 這一對（ADR-067）。**Reconciler** 則負責清理那些因 worker 當機而被孤立的執行。
+後續的消費者從不輪詢那個可變的狀態欄位，它們讀的是僅能附加的 `run_events` outbox。**Continuation consumer（延續消費者）** 對每一筆終態事件反應：在同一個交易裡，它物化 (materialize) 下一個週期執行，並為每個觸發條件剛滿足的串接下游建立一個 `PENDING` 執行（延續 continuation），接著結算 (settle) 完成任務的 `Job.state`。它取代了舊的 `RecurringJobWatcher` + `ChainWatcher` 這一對（ADR-067）。**Reconciler** 是最後一道防線：三個冪等的 sweep 在 `SKIP LOCKED` 下執行——判失敗卡住的 `RETRYING` 執行 (A)、把佇列漏掉、已到期的 `QUEUED` 執行重新入列 (B)，並回收因 worker 當機而被孤立的 `RUNNING` 執行 (C)。它靠 worker 在持有執行期間持續續約的 `heartbeat_at` 租約來分辨「死掉的 worker」與「只是慢的 worker」，並依動作宣告的冪等姿態 (idempotency posture) 回收每個孤兒——可安全重複的就重跑，不能的就安全判失敗並告警（[ADR-069](docs/adr/ADR-069-running-orphan-recovery-and-heartbeat-lease.md)）。
 
 ### 認證與密鑰
 
@@ -227,7 +228,7 @@ stdio 的 MCP 伺服器是對話客戶端的子行程，對話一關就停。排
 |---|---|---|
 | `github_digest` | 你的 GitHub | 拉某個 repo 的 issues 與 PR。很適合當摘要的上游。 |
 | `slack_post` | 你的 Slack | 把訊息貼到你工作區的某個頻道。 |
-| `email_send` | 你的 Google | 用你的 Gmail 寄信。支援摘要串接。 |
+| `email_send` | 你的 Google | 用你的 Gmail 寄信。支援摘要串接。有效一次 (effectively-once)——被重新投遞的寄送會被去重，不會重複寄出。 |
 | `llm_summarize` | 無 | 摘要文字或上游結果；須串接到 `slack_post` 或 `email_send` 才能收到輸出。固定提示詞，有 token 與預算上限。 |
 | `llm_polish` | 無 | 把文字改寫得更通順（語氣與語言）；須串接到 `slack_post` 或 `email_send` 才能收到輸出。固定提示詞，有 token 與預算上限。 |
 | `echo` | 無 | 把輸入回拋。建立與分派的冒煙測試。 |
@@ -296,6 +297,8 @@ stdio 的 MCP 伺服器是對話客戶端的子行程，對話一關就停。排
 
 串接與週期性共用同一條規則：後續執行只在其上游執行到達終態事件時才建立——**延續 (continuation)**，由單一消費者依事件順序讀 outbox 驅動。exactly-once 是資料層保證：一筆被重新投遞的事件若重試建立，會撞上 Postgres 唯一索引而成為 no-op，所以不需要分散式鎖。如果上游終結的速度快過下游能完成的速度，重疊的那一拍會被刻意略過（載荷卸除）並留下稽核記錄，這保證每個任務最多只有一個執行中的執行。這取代了先前預先上膛的 `WAITING` / `ChainWatcher` 設計以及它帶的重複生成競態；推理過程在 [ADR-067](docs/adr/ADR-067-continuation-chaining-replaces-pre-armed-waiting-runs.md) 與 [CONTEXT.md](CONTEXT.md)。
 
+一個 worker 當掉也不會讓這條管線卡死。當某個執行處於 `RUNNING` 時，worker 會續約一個 `heartbeat_at` 租約；若租約過期，reconciler 會依動作的冪等姿態回收該執行，讓任務的 `Job.state` 結算、配額釋放、週期恢復，而不是永遠卡在一列 `RUNNING` 上。外部副作用不存在真正的 exactly-once，所以 `email_send` 是**有效一次 (effectively-once)**：以執行衍生的冪等鍵（`{action}:{run_id}`）與寫入在前的 `send_intents` 記錄，讓被重新投遞或重試的寄送變成一個回傳原訊息 id 的 no-op，而不是第二封 email。至少一次投遞加上冪等消費者，就是誠實的端到端保證（[ADR-069](docs/adr/ADR-069-running-orphan-recovery-and-heartbeat-lease.md)、[ADR-070](docs/adr/ADR-070-email-send-effectively-once-posture.md)）。
+
 ## 安全模型
 
 公開部署（[ADR-049](docs/adr/ADR-049-public-product-multi-tenant-oauth-delegation.md)）分兩層建構。
@@ -339,7 +342,8 @@ uv run ruff check . && uv run ruff format --check .
 | 動作與串接 | [013](docs/adr/ADR-013-action-catalog-typed-registry.md) 型別化登錄表、[033](docs/adr/ADR-033-inter-handler-data-flow-via-job-run-result.md) 跨處理器資料面、[067](docs/adr/ADR-067-continuation-chaining-replaces-pre-armed-waiting-runs.md) 延續串接、[068](docs/adr/ADR-068-job-state-machine-replaces-active-boolean.md) Job.state 生命週期 |
 | 公開認證與密鑰 | [049](docs/adr/ADR-049-public-product-multi-tenant-oauth-delegation.md) 多租戶部署、[053](docs/adr/ADR-053-layer1-authorization-server-workos-authkit.md) WorkOS、[054](docs/adr/ADR-054-layer2-token-storage-aws-kms-envelope-encryption.md) KMS 權杖、[050](docs/adr/ADR-050-dual-credential-model-oauth-vs-operator-env.md)／[051](docs/adr/ADR-051-action-surface-tiering-public-oauth-vs-operator-only.md) 憑證分層 |
 | 成本與韌性 | [055](docs/adr/ADR-055-public-abuse-cost-containment-posture.md) 配額、[057](docs/adr/ADR-057-overload-protection-load-shedding-concurrency.md) 過載保護、[056](docs/adr/ADR-056-observability-structured-json-logging-better-stack.md) 結構化日誌、[031](docs/adr/ADR-031-monitoring-better-stack-over-uptimerobot.md) 外部監控 |
+| 耐久性與投遞 | [069](docs/adr/ADR-069-running-orphan-recovery-and-heartbeat-lease.md) RUNNING 孤兒回收 + heartbeat 租約、[070](docs/adr/ADR-070-email-send-effectively-once-posture.md) 有效一次 email |
 
 ## 現況
 
-線上實例已上線且為多租戶：OAuth 登入、每位使用者的連線、上面那六個動作、週期排程與延續串接，都在生產環境運作中。延後到後續版本的有：fan-in（一個任務讀多個上游）、更高層的 plan 抽象，以及讓 worker 自己當 MCP 客戶端（[ADR-038](docs/adr/ADR-038-mcp-call-as-future-direction.md) 到 [ADR-040](docs/adr/ADR-040-predicate-based-chain-as-future-direction.md)）。issue 與討論：[github.com/PaynePew/task_scheduler_mcp/issues](https://github.com/PaynePew/task_scheduler_mcp/issues)。
+線上實例已上線且為多租戶：OAuth 登入、每位使用者的連線、上面那六個動作、週期排程、延續串接、當機可復原的執行（heartbeat 租約 + reconciler 孤兒回收）與有效一次 email，都在生產環境運作中。延後到後續版本的有：fan-in（一個任務讀多個上游）、更高層的 plan 抽象，以及讓 worker 自己當 MCP 客戶端（[ADR-038](docs/adr/ADR-038-mcp-call-as-future-direction.md) 到 [ADR-040](docs/adr/ADR-040-predicate-based-chain-as-future-direction.md)）。issue 與討論：[github.com/PaynePew/task_scheduler_mcp/issues](https://github.com/PaynePew/task_scheduler_mcp/issues)。

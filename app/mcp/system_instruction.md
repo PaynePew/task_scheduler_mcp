@@ -16,4 +16,6 @@ To chain jobs, set `trigger_on_job_id` with `trigger_on_status` (SUCCEEDED|FAILE
 
 Use `task.cancel.v1` to stop a job. If a run is currently in progress, it will finish naturally; cancellation only stops future runs.
 
+Runs are durable: a crashed worker is reconciled automatically, so a run always reaches a terminal status you can trust from `task.status.v1`, and `email_send` is effectively-once -- a retried or redelivered send is de-duplicated, never doubled. You do not need to build your own retry or dedup logic on top.
+
 Ask one clarifying question only if essential info is missing.

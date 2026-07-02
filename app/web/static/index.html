@@ -267,9 +267,9 @@
           <span class="chip">GitHub · Slack · Gmail</span>
         </div>
         <p class="fineprint"
-           data-en="Follow-ups react to an append-only event outbox: one continuation consumer creates the next recurring run and every chained downstream the moment an upstream finishes — exactly-once via a database unique index. OAuth 2.1 login, per-user KMS-encrypted tokens, quotas and load-shedding keep a single $5 box safe. Full diagrams and ADRs in the README."
-           data-zh="後續動作只讀取一份 append-only 的事件 outbox：單一 continuation 消費者在上游完成的當下，建立下一個週期 run 與每個被串接的下游——由資料庫唯一索引保證 exactly-once。OAuth 2.1 登入、每位使用者的 KMS 加密權杖、配額與載荷卸除，讓單台 $5 主機安全運行。完整架構圖與 ADR 見 README。">
-          Follow-ups react to an append-only event outbox: one continuation consumer creates the next recurring run and every chained downstream the moment an upstream finishes — exactly-once via a database unique index. OAuth 2.1 login, per-user KMS-encrypted tokens, quotas and load-shedding keep a single $5 box safe. Full diagrams and ADRs in the README.
+           data-en="Follow-ups react to an append-only event outbox: one continuation consumer creates the next recurring run and every chained downstream the moment an upstream finishes — exactly-once via a database unique index. A worker crash can't wedge a job: a heartbeat lease lets the reconciler recover orphaned runs, and email_send is effectively-once, so a redelivered send never doubles. OAuth 2.1 login, per-user KMS-encrypted tokens, quotas and load-shedding keep a single $5 box safe. Full diagrams and ADRs in the README."
+           data-zh="後續動作只讀取一份 append-only 的事件 outbox：單一 continuation 消費者在上游完成的當下，建立下一個週期 run 與每個被串接的下游——由資料庫唯一索引保證 exactly-once。worker 當掉也不會卡死任務：heartbeat 租約讓 reconciler 回收被孤立的 run，email_send 則是有效一次 (effectively-once)，重新投遞不會重複寄出。OAuth 2.1 登入、每位使用者的 KMS 加密權杖、配額與載荷卸除 (load shedding)，讓單台 $5 主機安全運行。完整架構圖與 ADR 見 README。">
+          Follow-ups react to an append-only event outbox: one continuation consumer creates the next recurring run and every chained downstream the moment an upstream finishes — exactly-once via a database unique index. A worker crash can't wedge a job: a heartbeat lease lets the reconciler recover orphaned runs, and email_send is effectively-once, so a redelivered send never doubles. OAuth 2.1 login, per-user KMS-encrypted tokens, quotas and load-shedding keep a single $5 box safe. Full diagrams and ADRs in the README.
         </p>
       </div>
     </section>
@@ -304,7 +304,7 @@
             <ul class="action-list">
               <li><code>github_digest</code><span data-en="Summarize a repo's issues &amp; PRs." data-zh="彙整某 repo 的 issues 與 PR。">Summarize a repo's issues &amp; PRs.</span></li>
               <li><code>slack_post</code><span data-en="Post a message to a Slack channel." data-zh="發送訊息到 Slack 頻道。">Post a message to a Slack channel.</span></li>
-              <li><code>email_send</code><span data-en="Send email via your connected Gmail." data-zh="透過已連接的 Gmail 寄送 email。">Send email via your connected Gmail.</span></li>
+              <li><code>email_send</code><span data-en="Send email via your connected Gmail — effectively-once, so a retry never doubles." data-zh="透過已連接的 Gmail 寄送 email——有效一次，重試不會重複寄出。">Send email via your connected Gmail — effectively-once, so a retry never doubles.</span></li>
               <li><code>llm_summarize</code><span data-en="Summarize text or an upstream result — chain to Slack or email to receive the output." data-zh="摘要文字或上游結果——須串接到 Slack 或 email 才能收到輸出。">Summarize text or an upstream result — chain to Slack or email to receive the output.</span></li>
               <li><code>llm_polish</code><span data-en="Rewrite text more cleanly (tone &amp; language) — chain to Slack or email to receive the output." data-zh="把文字改寫得更通順（語氣與語言）——須串接到 Slack 或 email 才能收到輸出。">Rewrite text more cleanly (tone &amp; language) — chain to Slack or email to receive the output.</span></li>
               <li><code>echo</code><span data-en="Echo a message back — smoke test." data-zh="回傳訊息 — 煙霧測試。">Echo a message back — smoke test.</span></li>
@@ -317,6 +317,7 @@
           <span class="chip" data-en="Cron recurrence" data-zh="Cron 週期排程">Cron recurrence</span>
           <span class="chip" data-en="Job chaining" data-zh="任務串接">Job chaining</span>
           <span class="chip" data-en="Cancel semantics" data-zh="取消語意">Cancel semantics</span>
+          <span class="chip" data-en="Crash recovery" data-zh="當機復原">Crash recovery</span>
           <span class="chip" data-en="OAuth connections" data-zh="OAuth 連線">OAuth connections</span>
           <span class="chip" data-en="Rate limiting" data-zh="速率限制">Rate limiting</span>
         </div>
