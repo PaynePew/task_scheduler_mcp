@@ -235,7 +235,7 @@ A stdio MCP server is a child process of the chat client, so it stops the moment
 
 The OAuth-backed actions run on each user's own scoped token. The two LLM actions run a fixed, cost-capped transform: no free-form prompt and no `${VAR}`. The model is pinned to a cheap one (`gpt-4o-mini`) with a hard per-call output-token limit plus per-user daily and global monthly budget ceilings, so cost stays bounded ([ADR-052](docs/adr/ADR-052-operator-subsidized-llm-actions-fixed-prompt-and-caps.md)). Their output feeds a downstream handler via the internal data plane — no MCP surface returns it to the caller. Chain `llm_polish` or `llm_summarize` to `slack_post` or `email_send` to actually receive the result.
 
-> Self-host extras (operator-only, not offered on the hosted demo): `http_call` and `calendar_digest_ics` exist for the deployer's own use and are rejected at `task.create` for everyone else ([ADR-051](docs/adr/ADR-051-action-surface-tiering-public-oauth-vs-operator-only.md)).
+> Self-host extras (operator-only): `http_call` and `calendar_digest_ics` exist for the deployer's own use. They still appear in `task.list_actions`, but on the hosted instance `task.create` rejects them for everyone but the operator ([ADR-051](docs/adr/ADR-051-action-surface-tiering-public-oauth-vs-operator-only.md)).
 
 **Resources (4):** `tasks://list`, `tasks://actions`, `tasks://job/{job_id}`, `tasks://recent-results` (last 24h of completed runs, useful as an on-connect briefing).
 

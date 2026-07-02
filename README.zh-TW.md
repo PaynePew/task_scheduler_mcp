@@ -235,7 +235,7 @@ stdio 的 MCP 伺服器是對話客戶端的子行程，對話一關就停。排
 
 走 OAuth 的動作，跑在每位使用者自己的受限權杖上。兩個 LLM 動作只執行一個固定、有成本上限的轉換：不能自帶任意提示詞，也不能引用 `${VAR}`。模型釘死在便宜的 `gpt-4o-mini`，並有硬性的單次輸出 token 上限，以及每位使用者每日與全域每月的預算天花板，把成本框住（[ADR-052](docs/adr/ADR-052-operator-subsidized-llm-actions-fixed-prompt-and-caps.md)）。它們的輸出透過內部資料平面餵給下游處理器——沒有任何 MCP 介面會把它回傳給呼叫者。把 `llm_polish` 或 `llm_summarize` 串接到 `slack_post` 或 `email_send`，才能實際收到結果。
 
-> 自架附帶（僅限 operator，不在託管 demo 提供）：`http_call` 與 `calendar_digest_ics` 是給部署者自己用的，其他人在 `task.create` 會被拒絕（[ADR-051](docs/adr/ADR-051-action-surface-tiering-public-oauth-vs-operator-only.md)）。
+> 自架附帶（僅限 operator）：`http_call` 與 `calendar_digest_ics` 是給部署者自己用的。它們仍會出現在 `task.list_actions` 清單裡，但在託管實例上，`task.create` 會拒絕 operator 以外的所有人（[ADR-051](docs/adr/ADR-051-action-surface-tiering-public-oauth-vs-operator-only.md)）。
 
 **資源 Resources（4）：** `tasks://list`、`tasks://actions`、`tasks://job/{job_id}`、`tasks://recent-results`（最近 24 小時完成的執行，適合在連上時做個簡報）。
 
